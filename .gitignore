@@ -1,0 +1,10 @@
+# Arquivos temporários e locais
+diagnostico.txt
+*.tmp
+
+# Cache do Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
