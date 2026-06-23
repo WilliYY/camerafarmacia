@@ -12,7 +12,7 @@ from datetime import datetime
 import ctypes
 
 # Configurações do Projeto
-PROJ_DIR = r"C:\Users\Thiesen\Desktop\camera farmacia"
+PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
 GO2RTC_EXE = os.path.join(PROJ_DIR, "go2rtc", "go2rtc.exe")
 RECORDER_SCRIPT = os.path.join(PROJ_DIR, "gravador_camera.py")
 
@@ -311,6 +311,25 @@ class CameraManagerApp:
         )
         self.btn_monitor.pack(side="left", padx=4, expand=True, fill="x")
 
+        # Inicialização automática
+        startup_frame = tk.Frame(self.root, bg=BG_COLOR, pady=2)
+        startup_frame.pack(fill="x", padx=20)
+        
+        self.btn_setup_startup = tk.Button(
+            startup_frame, 
+            text=" ⚙️ Habilitar Inicialização Automática com o Windows", 
+            font=("Segoe UI", 9, "bold"), 
+            fg=TEXT_COLOR, 
+            bg="#1F2937", 
+            activebackground="#374151", 
+            activeforeground=TEXT_COLOR,
+            bd=0, 
+            cursor="hand2",
+            padx=10, 
+            pady=6,
+            command=self.click_configurar_inicializacao
+        )
+        self.btn_setup_startup.pack(fill="x", padx=4, pady=2)
 
         # 5. LOG DE EVENTOS (CONSOLE)
         log_title_frame = tk.Frame(self.root, bg=BG_COLOR)
@@ -657,6 +676,29 @@ class CameraManagerApp:
             self.add_log("ERRO: visualizador.html não encontrado!")
             messagebox.showerror("Erro de Acesso", "O arquivo visualizador.html não foi encontrado na pasta do projeto.")
 
+    def click_configurar_inicializacao(self):
+        try:
+            startup_folder = os.path.join(os.getenv('APPDATA'), r"Microsoft\Windows\Start Menu\Programs\Startup")
+            vbs_path = os.path.join(startup_folder, "iniciar_gravacao_farmacia.vbs")
+            
+            vbs_content = f'''Set WshShell = CreateObject("WScript.Shell")
+WshShell.CurrentDirectory = "{PROJ_DIR}\\go2rtc"
+WshShell.Run """{PROJ_DIR}\\go2rtc\\go2rtc.exe""", 0, False
+
+WScript.Sleep 2500
+
+WshShell.CurrentDirectory = "{PROJ_DIR}"
+WshShell.Run "pythonw.exe gravador_camera.py --stream farmacia --dir ""{GDRIVE_DIR1}"" --lock gravando_c1.lock --log c1_erros.log", 0, False
+WshShell.Run "pythonw.exe gravador_camera.py --stream farmacia2 --dir ""{GDRIVE_DIR2}"" --lock gravando_c2.lock --log c2_erros.log", 0, False
+'''
+            with open(vbs_path, "w", encoding="utf-8") as f:
+                f.write(vbs_content)
+                
+            self.add_log("Inicialização automática configurada com sucesso!")
+            messagebox.showinfo("Sucesso", f"O script de inicialização automática foi gerado com sucesso em:\n{vbs_path}\n\nAgora o sistema iniciará em segundo plano assim que o Windows fizer logon neste computador.")
+        except Exception as e:
+            self.add_log(f"ERRO ao configurar inicialização: {str(e)}")
+            messagebox.showerror("Erro de Configuração", f"Não foi possível salvar o arquivo de inicialização:\n{str(e)}")
 
     def click_diagnostico(self):
         self.add_log("Gerando relatório de diagnóstico detalhado...")

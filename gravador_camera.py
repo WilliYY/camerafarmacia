@@ -20,12 +20,10 @@ LARGURA_HD = 1280
 ALTURA_HD = 720
 
 # Arquivos locais de controle
-PROJ_DIR = r"C:\Users\Thiesen\Desktop\camera farmacia"
+PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
 LOCK_FILE = os.path.join(PROJ_DIR, args.lock)
 LOG_FILE = os.path.join(PROJ_DIR, args.log)
 # ==================================================================
-
-os.makedirs(PASTA_GRAVACOES, exist_ok=True)
 
 def escrever_log(mensagem):
     """Escreve uma linha no arquivo de log com carimbo de data/hora"""
@@ -49,6 +47,20 @@ def criar_lock_file():
 def verificar_lock_file():
     """Retorna True se o lock file ainda existe, False caso contrário"""
     return os.path.exists(LOCK_FILE)
+
+# Tenta criar a pasta de gravações primária e testa a escrita (para detectar erros de sincronização/Drive)
+try:
+    os.makedirs(PASTA_GRAVACOES, exist_ok=True)
+    teste_path = os.path.join(PASTA_GRAVACOES, ".teste_escrita")
+    with open(teste_path, "w") as f:
+        f.write("teste")
+    os.remove(teste_path)
+    pasta_final = PASTA_GRAVACOES
+except Exception as e:
+    pasta_fallback = os.path.join(PROJ_DIR, "backup_gravacoes", args.stream)
+    os.makedirs(pasta_fallback, exist_ok=True)
+    pasta_final = pasta_fallback
+    escrever_log(f"AVISO: Pasta do Drive indisponivel ({str(e)}). Usando backup local: {pasta_fallback}")
 
 def obter_faixa_horario(dt):
     """Calcula a faixa de 30 minutos exata do relógio para o horário fornecido"""
@@ -132,7 +144,7 @@ def gravar_fluxo():
                 hora_inicio = inicio_bloco.strftime("%H-%M")
                 hora_fim = fim_bloco.strftime("%H-%M")
                 
-                nome_arquivo = os.path.join(PASTA_GRAVACOES, f"camera_{data_dia}_{hora_inicio}_ate_{hora_fim}.mp4")
+                nome_arquivo = os.path.join(pasta_final, f"camera_{data_dia}_{hora_inicio}_ate_{hora_fim}.mp4")
                 escrever_log(f"Iniciando gravação do bloco: {os.path.basename(nome_arquivo)}")
                 
                 out = cv2.VideoWriter(nome_arquivo, fourcc, fps, (LARGURA_HD, ALTURA_HD))
