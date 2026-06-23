@@ -1,4 +1,4 @@
-# 🎥 Controle e Gravação da Câmera - Farmácia (v2.1 Premium)
+# 🎥 Controle e Gravação da Câmera - Farmácia (v2.2 Premium)
 
 Este projeto foi desenvolvido para capturar o sinal de vídeo de uma **Câmera Inteligente Positivo (ecossistema Tuya)** na rede local, redimensionar a imagem para salvar espaço e gravar continuamente em blocos exatos de 30 minutos sincronizados com o relógio diretamente em uma pasta do Google Drive (`G:\Meu Drive\CAMERAS\CAMERA 1 FARMACIA`).
 
@@ -74,9 +74,15 @@ Se você deseja assistir à câmera a partir de outros PCs na mesma rede:
 - Criação do gerenciador visual `gerenciador.pyw` com tema escuro básico, eliminando a necessidade de vários scripts `.bat` poluindo a Área de Trabalho.
 - Implementação do gerador de diagnósticos técnico (`diagnostico.txt`) que verifica dependências, permissões de escrita do Drive e acessibilidade de rede.
 
-### [v2.1] - Interface Premium (Atual)
+### [v2.1] - Interface Premium
 - **LEDs de Status**: Adicionados indicadores LED circulares animados na interface para visualização clara de processos ativos/inativos.
 - **Painel de Endereço IP**: Exibe dinamicamente o IP local do computador na interface para facilitar o acesso de outros dispositivos.
 - **Cópia Rápida**: Clique sobre o link local para copiá-lo para a área de transferência do Windows instantaneamente.
 - **DPI Scaling**: Adicionada compatibilidade com monitores de alta densidade (4K/FullHD) para textos mais nítidos.
 - **Atalho no Desktop**: Criação do atalho unificado **Câmera Farmácia** que abre a interface com um clique.
+
+### [v2.2] - Otimizações do Backend (Atual)
+- **Desligamento Seguro (Sem Corrupção)**: Implementado encerramento gracioso via arquivo de trava `gravando.lock` para permitir que o OpenCV finalize a indexação do MP4 antes de fechar.
+- **Detecção de Congelamento**: Inclusão de verificação de quadros repetidos. Se a imagem congelar por mais de 15 segundos, o backend força a reconexão automática da ponte RTSP.
+- **Timeouts do OpenCV/FFmpeg**: Configurados limites de 5 segundos para conexão e leitura de pacotes, evitando que o script trave indefinidamente em quedas de rede.
+- **Relatório de Erros Continuo**: Todos os eventos e erros de sinal do gravador são salvos em `erros_gravador.log` na pasta do projeto.

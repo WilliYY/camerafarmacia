@@ -469,7 +469,22 @@ class CameraManagerApp:
         threading.Thread(target=self.run_stop_sequence_verbose, daemon=True).start()
 
     def run_stop_sequence(self):
-        subprocess.run('taskkill /F /IM go2rtc.exe', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # 1. Sinaliza o gravador_camera.py para parar graciosamente deletando o lock file
+        lock_file = os.path.join(PROJ_DIR, "gravando.lock")
+        if os.path.exists(lock_file):
+            try:
+                os.remove(lock_file)
+                self.root.after(0, lambda: self.add_log("Enviando sinal de parada ao gravador (gravando.lock removido)..."))
+            except Exception:
+                pass
+                
+        # 2. Aguarda até 3 segundos para que o script termine de salvar o vídeo
+        for _ in range(15): # 15 * 0.2s = 3s
+            if not self.check_process_recorder():
+                break
+            time.sleep(0.2)
+            
+        # 3. Força a finalização de qualquer pythonw órfão como contingência
         try:
             output = subprocess.check_output(
                 'wmic process where "CommandLine like \'%gravador_camera.py%\' and not CommandLine like \'%wmic%\'" get ProcessId',
@@ -482,6 +497,9 @@ class CameraManagerApp:
                 subprocess.run(f'taskkill /F /PID {pid}', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
+
+        # 4. Finaliza a ponte go2rtc.exe (como é uma ponte de stream, pode ser terminada diretamente)
+        subprocess.run('taskkill /F /IM go2rtc.exe', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def run_stop_sequence_verbose(self):
         self.run_stop_sequence()
