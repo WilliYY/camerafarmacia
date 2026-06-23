@@ -294,6 +294,23 @@ class CameraManagerApp:
         )
         self.btn_open_folder.pack(side="left", padx=4, expand=True, fill="x")
 
+        self.btn_monitor = tk.Button(
+            actions_frame, 
+            text=" 📺 Monitor Lado a Lado", 
+            font=("Segoe UI", 9, "bold"), 
+            fg=TEXT_COLOR, 
+            bg="#1F2937", 
+            activebackground="#374151", 
+            activeforeground=TEXT_COLOR,
+            bd=0, 
+            cursor="hand2",
+            padx=10, 
+            pady=6,
+            command=self.click_monitor
+        )
+        self.btn_monitor.pack(side="left", padx=4, expand=True, fill="x")
+
+
         # 5. LOG DE EVENTOS (CONSOLE)
         log_title_frame = tk.Frame(self.root, bg=BG_COLOR)
         log_title_frame.pack(fill="x", padx=25, pady=(8,0))
@@ -583,6 +600,16 @@ class CameraManagerApp:
         else:
             self.add_log("ERRO: Pasta G:\\Meu Drive\\CAMERAS inacessível.")
             messagebox.showerror("Erro de Acesso", "Não foi possível abrir o Google Drive. Verifique se ele está rodando.")
+
+    def click_monitor(self):
+        html_path = os.path.join(PROJ_DIR, "visualizador.html")
+        if os.path.exists(html_path):
+            self.add_log("Abrindo Monitor Lado a Lado no navegador...")
+            os.startfile(html_path)
+        else:
+            self.add_log("ERRO: visualizador.html não encontrado!")
+            messagebox.showerror("Erro de Acesso", "O arquivo visualizador.html não foi encontrado na pasta do projeto.")
+
 
     def click_diagnostico(self):
         self.add_log("Gerando relatório de diagnóstico detalhado...")

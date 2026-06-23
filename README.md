@@ -1,4 +1,4 @@
-# 🎥 Controle e Gravação da Câmera - Farmácia (v2.5 Dupla Premium)
+# 🎥 Controle e Gravação da Câmera - Farmácia (v2.6 Monitor Web Premium)
 
 Este projeto foi desenvolvido para capturar o sinal de vídeo de uma **Câmera Inteligente Positivo (ecossistema Tuya)** na rede local, redimensionar a imagem para salvar espaço e gravar continuamente em blocos exatos de 30 minutos sincronizados com o relógio diretamente em uma pasta do Google Drive (`G:\Meu Drive\CAMERAS\CAMERA 1 FARMACIA`).
 
@@ -87,8 +87,14 @@ Se você deseja assistir à câmera a partir de outros PCs na mesma rede:
 - **Timeouts do OpenCV/FFmpeg**: Configurados limites de 5 segundos para conexão e leitura de pacotes, evitando que o script trave indefinidamente em quedas de rede.
 - **Relatório de Erros Continuo**: Todos os eventos e erros de sinal do gravador são salvos em `erros_gravador.log` na pasta do projeto.
 
-### [v2.5] - Suporte Duplo de Câmeras (Atual)
+### [v2.5] - Suporte Duplo de Câmeras
 - **Sistema Duplo Unificado**: Expansão da interface para gerenciar a **Câmera 1** e a **Câmera 2** simultaneamente em um painel unificado.
 - **Parametrização por CLI**: O script `gravador_camera.py` agora aceita argumentos (`--stream`, `--dir`, `--lock`, `--log`), permitindo rodar duas instâncias independentes a partir do mesmo arquivo.
 - **Interface Otimizada (2x2)**: Novo design de grid dinâmico exibindo os LEDs de sinal e gravação para cada câmera de forma separada.
 - **Logs Individuais**: Criação dos arquivos `c1_erros.log` e `c2_erros.log` para isolar eventos de cada câmera.
+
+### [v2.6] - Visualizador Web Lado a Lado (Atual)
+- **Monitor Lado a Lado**: Criação do arquivo `visualizador.html` que junta as duas transmissões WebRTC lado a lado com latência zero.
+- **IP Remoto Portátil**: Adicionado painel de configurações na página HTML para permitir assistir de outros PCs na mesma rede. Basta digitar o IP do PC da câmera (`192.168.7.12`).
+- **Memória de Configuração**: Uso do `localStorage` do navegador para salvar o IP digitado, evitando reconfigurar.
+- **Atalho Direto no Painel**: Botão "Monitor Lado a Lado" incorporado na interface do gerenciador para abrir o monitor no navegador automaticamente.
