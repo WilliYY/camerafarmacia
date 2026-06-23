@@ -1,107 +1,92 @@
-# 🎥 Controle e Gravação da Câmeras - Farmácia (v3.0 Portabilidade & Contingência Premium)
+# 🎥 Controle e Gravação de Câmeras - Farmácia (v3.5 NVR Premium Dinâmico)
 
-Este projeto foi desenvolvido para capturar o sinal de vídeo de duas **Câmeras Inteligentes Positivo (ecossistema Tuya)** na rede local, redimensionar as imagens para salvar espaço e gravar continuamente em blocos exatos de 30 minutos sincronizados com o relógio diretamente em pastas do Google Drive (`G:\Meu Drive\CAMERAS`).
+Este projeto é uma solução de NVR (Network Video Recorder) de baixíssimo consumo de hardware, projetada para capturar, gravar e monitorar múltiplas câmeras inteligentes (compatíveis com o ecossistema Tuya/Positivo) de forma dinâmica, portable e com tolerância a falhas.
 
 ---
 
 ## 🛠️ Como Funciona o Sistema
 
-O sistema é composto por três componentes principais trabalhando juntos:
+O sistema é dividido em três camadas integradas:
 
 1. **Ponte RTSP (`go2rtc.exe`)**:
-   As câmeras Positivo/Tuya possuem portas locais de transmissão bloqueadas de fábrica. O `go2rtc` estabelece uma conexão autenticada com os servidores em nuvem da Tuya e cria transmissões RTSP locais em `rtsp://localhost:8554/farmacia` e `rtsp://localhost:8554/farmacia2`.
+   Estabelece conexões seguras e autenticadas com os servidores Tuya Cloud e expõe as transmissões de vídeo das câmeras na rede local (nos formatos RTSP na porta `8554` e API Web na porta `1984`).
    
-2. **Script de Gravação (`gravador_camera.py`)**:
-   Lê a transmissão local do `go2rtc`, redimensiona os quadros para **HD (1280x720)** para otimizar espaço de armazenamento e salva os arquivos com nomes no formato `camera_AAAA-MM-DD_HH-MM_ate_HH-MM.mp4`. Os arquivos são finalizados e salvos nos minutos `:00` e `:30` do relógio.
-   **Contingência Integrada**: Se o Google Drive estiver desconectado, sem espaço ou com erro de permissão de escrita, o script automaticamente desvia a gravação para a pasta local `backup_gravacoes/` no disco local (C:), garantindo que as imagens nunca sejam perdidas.
+2. **Gravador Ultra-Leve (`gravador_camera.py`)**:
+   - **0% Transcoding (Cópia Direta)**: O gravador se conecta à API HTTP do `go2rtc` (`/api/stream.mp4?src=NOME`) e baixa diretamente o fluxo binário H.264/H.265 do vídeo, salvando-o no disco. Isso elimina todo o processamento de decodificação e recodificação de vídeo. O uso de CPU é praticamente **0%**, e os arquivos finais são muito menores e mantêm a qualidade nativa da câmera.
+   - **Independência de Bibliotecas**: Não requer `opencv-python` ou `numpy` para gravação. Funciona utilizando apenas as bibliotecas nativas do Python.
+   - **Contingência de Sincronização**: Se a pasta do Google Drive (`G:\Meu Drive\CAMERAS`) estiver offline, cheia ou sem permissão de escrita ("Acesso de Leitor"), o gravador desvia o arquivo automaticamente para a pasta local `backup_gravacoes/` do PC.
+   - **Detecção de Duplicidade na Rede**: Para evitar que dois computadores gravem a mesma câmera ao mesmo tempo (gerando conflitos de sincronização no Drive), cada gravador ativo envia batimentos cardíacos (heartbeat) em formato JSON a cada 30 segundos no Google Drive. Se outro gravador iniciar e detectar um batimento recente de outro host, ele cessa a gravação local imediatamente para evitar duplicidade.
 
-3. **Interface Gráfica (`gerenciador.pyw`)**:
-   Uma interface amigável escrita em Python (Tkinter) com tema escuro que permite ao usuário iniciar, parar, monitorar o status do sistema (com LEDs de status virtuais), consultar o IP local, gerar relatórios de diagnóstico e configurar a inicialização do Windows com um clique.
+3. **Gerenciador Gráfico (`gerenciador.pyw`)**:
+   Interface em tema escuro que lê as configurações do arquivo `go2rtc.yaml` e cria dinamicamente os cards de controle para qualquer quantidade de câmeras. Ele também:
+   - Monitora se as gravações locais estão ativas e se há alertas de gravação duplicada.
+   - Exibe o número de visualizadores ao vivo conectados nas câmeras, identificando o IP e o navegador de cada um.
+   - Executa uma thread silenciosa que detecta quando o Google Drive volta a ficar disponível, faz o upload dos vídeos acumulados na pasta `backup_gravacoes/` e os apaga localmente para economizar espaço em disco.
+   - Permite ativar a inicialização automática do Windows com apenas um clique.
 
 ---
 
-## 💻 Como Instalar e Rodar em Outra Máquina (Configuração)
+## 📂 Estrutura de Arquivos do Projeto
 
-Caso queira mover este projeto para outro computador, siga os passos abaixo:
-
-### Passo 1: Instalar o Python
-Baixe e instale o Python 3.10 ou superior.
-> ⚠️ **IMPORTANTE**: Na tela de instalação, certifique-se de marcar a caixa **"Add Python to PATH"** (Adicionar Python às variáveis de ambiente) antes de prosseguir.
-
-### Passo 2: Instalar as Dependências
-Abra o Prompt de Comando (CMD) ou PowerShell e instale as bibliotecas necessárias com o comando:
-```bash
-pip install opencv-python numpy
+```
+📁 camera farmacia/
+├── 📁 go2rtc/
+│   ├── 📄 go2rtc.exe                   # Ponte RTSP nativa go2rtc compilada para Windows
+│   ├── 📄 go2rtc.yaml                  # Configurações das credenciais e IDs das câmeras
+│   └── 📄 go2rtc_start.log             # Logs da ponte go2rtc
+├── 📁 backup_gravacoes/                # Diretório automático para vídeos salvos localmente em contingência
+├── 📄 gerenciador.pyw                  # Interface Gráfica de Controle (Pythonw / Tkinter)
+├── 📄 gravador_camera.py                # Script Gravador de Baixo Consumo (Python CLI)
+├── 📄 visualizador.html                # Painel de Visualização Web responsivo profissional
+├── 📄 Liberar Rede Local (Executar como Admin).bat   # Script para abrir as portas de rede no Firewall
+├── 📄 README.md                        # Documentação Geral do Sistema
+└── 📄 .gitignore                       # Configurações de arquivos ignorados pelo Git
 ```
 
-### Passo 3: Baixar/Copiar a Pasta do Projeto
-Copie a pasta inteira `camera farmacia` para o novo computador (recomenda-se colocar na Área de Trabalho: `C:\Users\<NomeUsuario>\Desktop\camera farmacia`).
+---
 
-### Passo 4: Configurar as Credenciais da Câmera
-Se a conta da Tuya ou a câmera mudar:
-1. Abra o arquivo de configuração `go2rtc/go2rtc.yaml` em um editor de texto (como o Bloco de Notas).
-2. Atualize as credenciais na linha do stream:
-   ```yaml
-   streams:
-     farmacia: "tuya://protect-us.ismartlife.me?device_id=SEU_DEVICE_ID&email=SEU_EMAIL&password=SUA_SENHA"
-   ```
-   *Nota: O usuário deve estar cadastrado no aplicativo **Tuya Smart** (não no app da Positivo) com uma senha definida.*
+## 💻 Como Configurar e Rodar em Outro Computador
 
-### Passo 5: Inicialização Automática com o Windows (Super Simples)
-Para que a gravação inicie de forma invisível em segundo plano toda vez que o Windows ligar:
-1. Abra a interface gráfica do projeto executando `gerenciador.pyw`.
-2. Clique no botão **"Habilitar Inicialização Automática com o Windows"**.
-3. O programa gerará e configurará o script `.vbs` de inicialização de forma dinâmica na pasta correspondente do seu novo PC. Não é necessário editar nenhum arquivo manualmente!
+Como o projeto possui caminhos 100% dinâmicos e relativos, a portabilidade é imediata:
 
-### Passo 6: Acessar a Transmissão de Outros Dispositivos (Opcional)
-Se você deseja assistir às câmeras a partir de outros PCs na mesma rede:
-1. No PC que está gravando, abra a pasta do projeto.
-2. Clique com o botão direito sobre o arquivo `Liberar Rede Local (Executar como Admin).bat` e selecione **"Executar como Administrador"**.
-3. O script irá abrir as portas `1984` e `8554` no Firewall do Windows.
-4. Agora, em qualquer outro aparelho (PC, celular, tablet) conectado no mesmo Wi-Fi, acesse o link do navegador indicado na interface (Ex: `http://192.168.7.12:1984` ou use o visualizador local `visualizador.html`).
+### Passo 1: Instalar o Python
+Baixe e instale o Python (recomendado 3.10 ou superior) no site oficial.
+> ⚠️ **IMPORTANTE**: Durante a instalação, marque a caixa **"Add Python to PATH"** (Adicionar Python às variáveis de ambiente).
+
+### Passo 2: Clonar ou Copiar o Repositório
+Copie a pasta inteira do projeto (ou clone o repositório git) para qualquer pasta do novo computador.
+> *Nota: Não há necessidade de instalar bibliotecas pesadas como `opencv-python` ou `numpy` para o funcionamento padrão dos gravadores H.264/H.265 HTTP.*
+
+### Passo 3: Configurar as Câmeras em `go2rtc.yaml`
+Abra o arquivo `go2rtc/go2rtc.yaml` com o Bloco de Notas e configure as credenciais das suas câmeras Tuya/Positivo. O painel gráfico detectará os novos nomes e quantidades automaticamente.
+```yaml
+streams:
+  camera1: "tuya://protect-us.ismartlife.me?device_id=ID_AQUI&email=SEU_EMAIL&password=SUA_SENHA"
+  camera2: "tuya://protect-us.ismartlife.me?device_id=OUTRO_ID&email=SEU_EMAIL&password=SUA_SENHA"
+```
+
+### Passo 4: Executar e Ativar Inicialização Automática
+1. Dê um duplo clique no arquivo `gerenciador.pyw` para abrir a interface gráfica.
+2. Clique no botão **"⚙️ Habilitar Inicialização Automática com o Windows"**. 
+3. Pronto! O sistema gerará o arquivo `.vbs` na pasta de Inicialização do Windows com os caminhos corretos deste PC.
 
 ---
 
-## 📈 Histórico de Alterações (Change Log)
+## 🤖 Guia de Orientação para Assistentes de IA (Claude, Antigravity, Cursor, etc.)
 
-### [v1.0] - Versão Inicial (Terminal)
-- Implementação do script `gravador_camera.py` com alinhamento de minutos.
-- Configuração do `go2rtc` com credenciais Tuya.
-- Criação de scripts `.bat` avulsos no Desktop para Iniciar, Parar e Verificar Status via linha de comando.
-- Criação do script de inicialização automática `iniciar_gravacao_farmacia.vbs`.
+Se você é uma Inteligência Artificial atuando neste repositório para manutenção, melhoria ou suporte, leia as regras de negócio abaixo para evitar regressões de código:
 
-### [v2.0] - Interface Gráfica e Organização
-- Criação da pasta centralizada `camera farmacia` no Desktop.
-- Criação do gerenciador visual `gerenciador.pyw` com tema escuro básico, eliminando a necessidade de vários scripts `.bat` poluindo a Área de Trabalho.
-- Implementação do gerador de diagnósticos técnico (`diagnostico.txt`) que verifica dependências, permissões de escrita do Drive e acessibilidade de rede.
+### ⚙️ Regras Arquiteturais
+1. **Evitar Importar OpenCV/NumPy no Gravador**: O script `gravador_camera.py` deve permanecer ultra-leve, sem importar `cv2` ou `numpy`, realizando a captura do fluxo MP4 diretamente da API do `go2rtc` via socket/HTTP.
+2. **Caminhos Dinâmicos**: Nunca escreva caminhos absolutos como `C:\Users\Thiesen\...` nos códigos. Sempre utilize `os.path.dirname(os.path.abspath(__file__))` para obter o caminho relativo à pasta do projeto.
+3. **Mapeamento de Pastas do Drive**:
+   - `farmacia` -> `CAMERA 1 FARMACIA`
+   - `farmacia2` -> `CAMERA 2 FARMACIA`
+   - Câmeras adicionais de index $i \ge 2$ -> `CAMERA {i+1} {NOME_STREAM}`
+4. **Arquivo de Trava e Encerramento Gracioso**:
+   - Os processos do gravador são controlados via arquivos `.lock` contendo o PID do processo.
+   - O encerramento seguro e a liberação de buffers é feito removendo o arquivo `.lock` e deixando o loop de gravação fechar o arquivo MP4 naturalmente.
+   - O painel (`gerenciador.pyw`) monitora os processos de forma nativa consultando a API do Windows via `ctypes` (`kernel32.OpenProcess` e `GetExitCodeProcess`) para economizar processamento e não travar o loop de Tkinter.
 
-### [v2.1] - Interface Premium
-- **LEDs de Status**: Adicionados indicadores LED circulares animados na interface para visualização clara de processos ativos/inativos.
-- **Painel de Endereço IP**: Exibe dinamicamente o IP local do computador na interface para facilitar o acesso de outros dispositivos.
-- **Cópia Rápida**: Clique sobre o link local para copiá-lo para a área de transferência do Windows instantaneamente.
-- **DPI Scaling**: Adicionada compatibilidade com monitores de alta densidade (4K/FullHD) para textos mais nítidos.
-- **Atalho no Desktop**: Criação do atalho unificado **Câmera Farmácia** que abre a interface com um clique.
-
-### [v2.2] - Otimizações do Backend
-- **Desligamento Seguro (Sem Corrupção)**: Implementado encerramento gracioso via arquivo de trava `gravando.lock` para permitir que o OpenCV finalize a indexação do MP4 antes de fechar.
-- **Detecção de Congelamento**: Inclusão de verificação de quadros repetidos. Se a imagem congelar por mais de 15 segundos, o backend força a reconexão automática da ponte RTSP.
-- **Timeouts do OpenCV/FFmpeg**: Configurados limites de 5 segundos para conexão e leitura de pacotes, evitando que o script trave indefinidamente em quedas de rede.
-- **Relatório de Erros Continuo**: Todos os eventos e erros de sinal do gravador são salvos em `erros_gravador.log` na pasta do projeto.
-
-### [v2.5] - Suporte Duplo de Câmeras
-- **Sistema Duplo Unificado**: Expansão da interface para gerenciar a **Câmera 1** e a **Câmera 2** simultaneamente em um painel unificado.
-- **Parametrização por CLI**: O script `gravador_camera.py` agora aceita argumentos (`--stream`, `--dir`, `--lock`, `--log`), permitindo rodar duas instâncias independentes a partir do mesmo arquivo.
-- **Interface Otimizada (2x2)**: Novo design de grid dinâmico exibindo os LEDs de sinal e gravação para cada câmera de forma separada.
-- **Logs Individuais**: Criação dos arquivos `c1_erros.log` e `c2_erros.log` para isolar eventos de cada câmera.
-
-### [v2.6] - Visualizador Web Lado a Lado
-- **Monitor Lado a Lado**: Criação do arquivo `visualizador.html` que junta as duas transmissões WebRTC lado a lado com latência zero.
-- **IP Remoto Portátil**: Adicionado painel de configurações na página HTML para permitir assistir de outros PCs na mesma rede. Basta digitar o IP do PC da câmera (`192.168.7.12`).
-- **Memória de Configuração**: Uso do `localStorage` do navegador para salvar o IP digitado, evitando reconfigurar.
-- **Atalho Direto no Painel**: Botão "Monitor Lado a Lado" incorporado na interface do gerenciador para abrir o monitor no navegador automaticamente.
-
-### [v3.0] - Portabilidade & Contingência Total (Atual)
-- **Caminhos 100% Dinâmicos**: O projeto não possui mais caminhos rígidos de pastas (como `C:\Users\Thiesen`). Pode ser colocado em qualquer diretório ou rodado em qualquer computador.
-- **Backup de Sincronização Automático**: Em caso de erros com o Google Drive (disco G: offline, falta de espaço ou erro de permissão "Viewer/Leitor"), o script salva automaticamente os arquivos em uma pasta local do PC (`backup_gravacoes`), protegendo contra perda de filmagem.
-- **Instalador de Inicialização Dinâmico**: Adicionado botão no painel para gerar o script `.vbs` de inicialização automático ajustado para o caminho atual e usuário local com apenas um clique.
-- **Substituição do WMIC por API Nativa**: O gerenciador agora verifica e finaliza processos de gravação usando chamadas de sistema eficientes em memória (ctypes), melhorando drasticamente o desempenho e a estabilidade da interface Tkinter.
+### 🛡️ Tratamento de Colisões
+O sistema de batimento cardíaco é armazenado no Google Drive no arquivo `.active_recorder_{stream}.json`. Em caso de manutenção no sistema de detecção de duplicidade, certifique-se de que a verificação de batimento ocorra de forma assíncrona ou sem bloquear o início de gravações legítimas.

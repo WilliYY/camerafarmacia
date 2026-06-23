@@ -3,350 +3,631 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Monitor Câmeras - Farmácia</title>
+    <title>Central de Monitoramento Profissional - Farmácia</title>
     <style>
-        /* Estilos do Tema Escuro Premium */
+        /* Design Premium Glassmorphism e Tema Escuro Futurista */
+        @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=JetBrains+Mono:wght@400;700&display=swap');
+
         * {
             box-sizing: border-box;
             margin: 0;
             padding: 0;
-            font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
         }
 
         body {
-            background-color: #0D0E12;
+            background-color: #08090D;
             color: #F3F4F6;
             min-height: 100vh;
             display: flex;
             flex-direction: column;
-            overflow-x: hidden;
+            overflow: hidden;
         }
 
-        /* Header */
+        /* Header Premium com Blur de Fundo */
         header {
-            background-color: #161822;
-            padding: 15px 25px;
+            background: rgba(18, 20, 29, 0.7);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            padding: 14px 24px;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            border-bottom: 1px solid #1F2937;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.4);
+            z-index: 10;
         }
 
-        .logo-title {
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .logo-container {
             display: flex;
             align-items: center;
             gap: 10px;
         }
 
-        .logo-title h1 {
-            font-size: 1.4rem;
-            font-weight: 700;
-            letter-spacing: -0.025em;
+        .logo-icon {
+            font-size: 1.6rem;
+            animation: pulse-glow 2s infinite ease-in-out;
         }
 
-        .badge {
-            background-color: #3B82F6;
-            color: white;
+        @keyframes pulse-glow {
+            0%, 100% { filter: drop-shadow(0 0 2px rgba(59, 130, 246, 0.5)); transform: scale(1); }
+            50% { filter: drop-shadow(0 0 10px rgba(59, 130, 246, 0.8)); transform: scale(1.05); }
+        }
+
+        .logo-container h1 {
+            font-size: 1.3rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            background: linear-gradient(135deg, #FFFFFF 30%, #9CA3AF 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .server-badge {
+            background: rgba(59, 130, 246, 0.1);
+            border: 1px solid rgba(59, 130, 246, 0.2);
+            color: #3B82F6;
             font-size: 0.75rem;
-            font-weight: 700;
-            padding: 3px 8px;
+            font-weight: 600;
+            padding: 4px 10px;
             border-radius: 9999px;
+            letter-spacing: 0.05em;
             text-transform: uppercase;
+            transition: all 0.3s;
         }
 
-        .controls {
+        .server-connected {
+            background: rgba(16, 185, 129, 0.1);
+            border-color: rgba(16, 185, 129, 0.2);
+            color: #10B981;
+        }
+
+        /* Relógio Digital Moderno */
+        .live-clock {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.95rem;
+            color: #9CA3AF;
+            background: rgba(255, 255, 255, 0.03);
+            padding: 4px 12px;
+            border-radius: 6px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .header-right {
             display: flex;
             align-items: center;
             gap: 12px;
         }
 
-        /* Botões */
+        /* Botões Estilizados */
         button {
-            background-color: #1F2937;
-            color: #F3F4F6;
-            border: none;
+            background: rgba(255, 255, 255, 0.03);
+            color: #E5E7EB;
+            border: 1px solid rgba(255, 255, 255, 0.08);
             padding: 8px 16px;
-            border-radius: 6px;
-            font-size: 0.9rem;
+            border-radius: 8px;
+            font-size: 0.85rem;
             font-weight: 600;
             cursor: pointer;
             display: flex;
             align-items: center;
             gap: 8px;
-            transition: all 0.2s ease;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
         }
 
         button:hover {
-            background-color: #374151;
+            background: rgba(255, 255, 255, 0.08);
+            border-color: rgba(255, 255, 255, 0.15);
+            transform: translateY(-1px);
         }
 
         button.primary {
-            background-color: #3B82F6;
+            background: #3B82F6;
+            color: #FFFFFF;
+            border: none;
+            box-shadow: 0 4px 14px rgba(59, 130, 246, 0.3);
         }
 
         button.primary:hover {
-            background-color: #2563EB;
+            background: #2563EB;
+            box-shadow: 0 6px 20px rgba(59, 130, 246, 0.4);
         }
 
-        /* Painel de Configurações (IP) */
-        .settings-panel {
-            background-color: #161822;
-            border-bottom: 1px solid #1F2937;
-            padding: 15px 25px;
-            display: none;
-            animation: slideDown 0.3s ease-out forwards;
-        }
-
-        @keyframes slideDown {
-            from { transform: translateY(-20px); opacity: 0; }
-            to { transform: translateY(0); opacity: 1; }
-        }
-
-        .settings-content {
-            max-width: 600px;
-            margin: 0 auto;
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            flex-wrap: wrap;
-        }
-
-        .settings-content label {
-            font-size: 0.9rem;
-            font-weight: 600;
-            color: #9CA3AF;
-        }
-
-        .settings-content input {
-            background-color: #0D0E12;
-            border: 1px solid #374151;
-            color: #F3F4F6;
-            padding: 8px 12px;
-            border-radius: 6px;
-            font-size: 0.9rem;
-            min-width: 200px;
-            outline: none;
-            transition: border-color 0.2s;
-        }
-
-        .settings-content input:focus {
-            border-color: #3B82F6;
-        }
-
-        /* Grid de Câmeras */
-        .camera-container {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(480px, 1fr));
-            gap: 20px;
-            padding: 20px;
-            flex-grow: 1;
-            align-items: center;
-        }
-
-        @media (max-width: 1024px) {
-            .camera-container {
-                grid-template-columns: 1fr;
-            }
-        }
-
-        .camera-card {
-            background-color: #161822;
-            border-radius: 8px;
-            border: 1px solid #1F2937;
-            overflow: hidden;
+        /* Configurações Sidebar */
+        .sidebar {
+            position: fixed;
+            top: 0;
+            right: -320px;
+            width: 320px;
+            height: 100vh;
+            background: rgba(18, 20, 29, 0.95);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border-left: 1px solid rgba(255, 255, 255, 0.05);
+            box-shadow: -10px 0 30px rgba(0, 0, 0, 0.5);
+            z-index: 100;
+            padding: 30px 24px;
             display: flex;
             flex-direction: column;
-            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
-            height: 100%;
-            min-height: 360px;
+            gap: 20px;
+            transition: right 0.3s cubic-bezier(0.4, 0, 0.2, 1);
         }
 
-        .camera-titlebar {
-            background-color: #1F2937;
-            padding: 10px 15px;
-            font-size: 0.95rem;
-            font-weight: 600;
+        .sidebar.active {
+            right: 0;
+        }
+
+        .sidebar-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            color: #E5E7EB;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            padding-bottom: 15px;
         }
 
-        .camera-iframe-wrapper {
-            position: relative;
+        .sidebar-header h2 {
+            font-size: 1.1rem;
+            font-weight: 700;
+        }
+
+        .close-btn {
+            font-size: 1.2rem;
+            cursor: pointer;
+            color: #9CA3AF;
+            transition: color 0.2s;
+        }
+
+        .close-btn:hover {
+            color: #FFFFFF;
+        }
+
+        .input-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .input-group label {
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: #9CA3AF;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .input-group input, .input-group select {
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            color: #F3F4F6;
+            padding: 10px 12px;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            outline: none;
+            transition: all 0.2s;
+        }
+
+        .input-group input:focus, .input-group select:focus {
+            border-color: #3B82F6;
+            box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+        }
+
+        /* Container Principal do Monitor */
+        main {
             flex-grow: 1;
-            width: 100%;
-            height: 0;
-            padding-bottom: 56.25%; /* Aspect Ratio 16:9 */
-            background-color: #000;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            position: relative;
         }
 
-        .camera-iframe-wrapper iframe {
+        /* Grid de Câmeras */
+        .camera-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
+            gap: 20px;
+            padding: 20px;
+            align-content: start;
+        }
+
+        /* Classes para controle de colunas manuais */
+        .grid-1-col { grid-template-columns: 1fr !important; }
+        .grid-2-col { grid-template-columns: repeat(2, 1fr) !important; }
+        .grid-3-col { grid-template-columns: repeat(3, 1fr) !important; }
+
+        @media (max-width: 900px) {
+            .camera-grid {
+                grid-template-columns: 1fr !important;
+                padding: 10px;
+                gap: 10px;
+            }
+        }
+
+        /* Card de Câmera Premium */
+        .camera-card {
+            background: rgba(22, 24, 34, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            border-radius: 12px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.3);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            position: relative;
+        }
+
+        .camera-card:hover {
+            border-color: rgba(59, 130, 246, 0.2);
+            box-shadow: 0 15px 30px rgba(0, 0, 0, 0.5);
+            transform: translateY(-2px);
+        }
+
+        /* Barra de Título do Card */
+        .camera-titlebar {
+            background: rgba(31, 41, 55, 0.3);
+            padding: 10px 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+        }
+
+        .camera-name {
+            font-size: 0.9rem;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            color: #E5E7EB;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .pulse-dot {
+            width: 8px;
+            height: 8px;
+            background-color: #10B981;
+            border-radius: 50%;
+            animation: pulse-dot-glow 1.5s infinite ease-in-out;
+        }
+
+        @keyframes pulse-dot-glow {
+            0%, 100% { transform: scale(1); opacity: 0.5; box-shadow: 0 0 0 rgba(16, 185, 129, 0); }
+            50% { transform: scale(1.2); opacity: 1; box-shadow: 0 0 8px rgba(16, 185, 129, 0.8); }
+        }
+
+        .camera-actions {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .card-icon-btn {
+            font-size: 0.95rem;
+            color: #9CA3AF;
+            cursor: pointer;
+            transition: color 0.2s, transform 0.2s;
+            background: none;
+            border: none;
+            padding: 4px;
+        }
+
+        .card-icon-btn:hover {
+            color: #FFFFFF;
+            transform: scale(1.1);
+        }
+
+        /* Wrapper do Video 16:9 */
+        .camera-video-wrapper {
+            position: relative;
+            width: 100%;
+            padding-bottom: 56.25%; /* 16:9 Aspect Ratio */
+            background-color: #020204;
+            flex-grow: 1;
+        }
+
+        .camera-video-wrapper iframe {
             position: absolute;
             top: 0;
             left: 0;
             width: 100%;
             height: 100%;
             border: none;
+            background-color: #000;
         }
 
-        /* Rodapé de Informações */
-        footer {
-            background-color: #0D0E12;
-            padding: 15px;
+        /* Estado Vazio (Sem Câmeras) */
+        .empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 15px;
+            padding: 80px 20px;
             text-align: center;
-            font-size: 0.8rem;
-            color: #6B7280;
-            border-top: 1px solid #1F2937;
+            color: #9CA3AF;
+            flex-grow: 1;
         }
 
-        .ip-badge {
-            background-color: #1F2937;
-            color: #9CA3AF;
-            padding: 2px 6px;
+        .empty-icon {
+            font-size: 3rem;
+            color: #374151;
+        }
+
+        .empty-state p {
+            font-size: 1.1rem;
+            font-weight: 300;
+        }
+
+        /* Rodapé Fino */
+        footer {
+            background-color: #06070a;
+            padding: 12px 24px;
+            text-align: center;
+            font-size: 0.75rem;
+            color: #4B5563;
+            border-top: 1px solid rgba(255, 255, 255, 0.02);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .footer-left {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .indicator-pill {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            padding: 2px 8px;
             border-radius: 4px;
-            font-family: monospace;
+            font-family: 'JetBrains Mono', monospace;
+            color: #9CA3AF;
         }
     </style>
 </head>
 <body>
 
-    <!-- Header -->
+    <!-- Header Principal -->
     <header>
-        <div class="logo-title">
-            <h1>📺 Monitor Câmeras Farmácia</h1>
-            <span class="badge" id="srv-badge">Servidor: Local</span>
+        <div class="header-left">
+            <div class="logo-container">
+                <span class="logo-icon">📺</span>
+                <h1>Central de Monitoramento</h1>
+            </div>
+            <span class="server-badge" id="server-badge">Servidor Offline</span>
+            <div class="live-clock" id="live-clock">00:00:00</div>
         </div>
-        <div class="controls">
-            <button onclick="toggleSettings()" id="btn-settings">⚙️ Configurar IP</button>
-            <button class="primary" onclick="reloadStreams()">🔄 Recarregar Câmeras</button>
+        <div class="header-right">
+            <button onclick="toggleSettings()"><span style="font-size:1.1rem">⚙️</span> Configurações</button>
+            <button class="primary" onclick="loadActiveStreams()"><span style="font-size:1.1rem">🔄</span> Recarregar Painel</button>
         </div>
     </header>
 
-    <!-- Painel de Configurações de IP -->
-    <div class="settings-panel" id="settings-panel">
-        <div class="settings-content">
-            <label for="ip-input">IP do Computador da Câmera (Servidor):</label>
+    <!-- Sidebar de Configurações (Slide-In) -->
+    <div class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <h2>Configurações</h2>
+            <span class="close-btn" onclick="toggleSettings()">✖</span>
+        </div>
+        
+        <div class="input-group">
+            <label for="ip-input">IP do Servidor go2rtc</label>
             <input type="text" id="ip-input" placeholder="Ex: 192.168.7.12 ou localhost">
-            <button class="primary" onclick="saveIP()">Salvar e Conectar</button>
-            <button onclick="resetIP()">Usar Localhost</button>
-        </div>
-    </div>
-
-    <!-- Container das Câmeras -->
-    <div class="camera-container">
-        <!-- Câmera 1 -->
-        <div class="camera-card">
-            <div class="camera-titlebar">
-                <span>🟢 CÂMERA 1 - FARMÁCIA</span>
-                <span class="badge" style="background-color: #059669;">AO VIVO</span>
-            </div>
-            <div class="camera-iframe-wrapper">
-                <iframe id="iframe-c1" src="about:blank" allowfullscreen></iframe>
-            </div>
         </div>
 
-        <!-- Câmera 2 -->
-        <div class="camera-card">
-            <div class="camera-titlebar">
-                <span>🟢 CÂMERA 2 - FARMÁCIA</span>
-                <span class="badge" style="background-color: #059669;">AO VIVO</span>
-            </div>
-            <div class="camera-iframe-wrapper">
-                <iframe id="iframe-c2" src="about:blank" allowfullscreen></iframe>
-            </div>
+        <div class="input-group">
+            <label for="layout-select">Layout do Grid</label>
+            <select id="layout-select" onchange="changeLayout()">
+                <option value="auto">Automático (Responsivo)</option>
+                <option value="1">1 Coluna (Lista)</option>
+                <option value="2">2 Colunas (Lado a Lado)</option>
+                <option value="3">3 Colunas (Largo)</option>
+            </select>
         </div>
+
+        <button class="primary" style="margin-top: 15px; width: 100%; justify-content: center;" onclick="saveIP()">Salvar e Aplicar</button>
+        <button style="width: 100%; justify-content: center;" onclick="resetIP()">Usar Localhost</button>
     </div>
+
+    <!-- Container Principal das Câmeras -->
+    <main>
+        <div class="camera-grid" id="camera-grid">
+            <!-- As câmeras serão renderizadas dinamicamente aqui pelo JavaScript -->
+        </div>
+
+        <!-- Tela de carregamento ou grid vazio -->
+        <div class="empty-state" id="empty-state" style="display: none;">
+            <span class="empty-icon">🎥</span>
+            <p id="empty-message">Procurando conexões ativas com o servidor...</p>
+        </div>
+    </main>
 
     <!-- Rodapé -->
     <footer>
-        Conectado ao go2rtc via IP local: <span class="ip-badge" id="ip-display">localhost</span> | Desenvolvido para Farmácia v2.5
+        <div class="footer-left">
+            <span>Servidor ativo em:</span>
+            <span class="indicator-pill" id="ip-display">localhost</span>
+        </div>
+        <div>v3.5 Dashboard de Segurança Profissional</div>
     </footer>
 
     <script>
-        // Carrega o IP salvo ou assume localhost
+        // Carrega IP do servidor do localStorage ou assume localhost
         let currentIP = localStorage.getItem("camera_server_ip") || "localhost";
-        
-        // Elementos da página
-        const ipInput = document.getElementById("ip-input");
-        const srvBadge = document.getElementById("srv-badge");
-        const ipDisplay = document.getElementById("ip-display");
-        const iframeC1 = document.getElementById("iframe-c1");
-        const iframeC2 = document.getElementById("iframe-c2");
-        const settingsPanel = document.getElementById("settings-panel");
+        let currentLayout = localStorage.getItem("camera_layout_mode") || "auto";
 
-        // Inicializa a página
+        const cameraGrid = document.getElementById("camera-grid");
+        const emptyState = document.getElementById("empty-state");
+        const emptyMessage = document.getElementById("empty-message");
+        const ipInput = document.getElementById("ip-input");
+        const layoutSelect = document.getElementById("layout-select");
+        const serverBadge = document.getElementById("server-badge");
+        const ipDisplay = document.getElementById("ip-display");
+        const sidebar = document.getElementById("sidebar");
+        const liveClock = document.getElementById("live-clock");
+
+        // Atualiza o relógio dinâmico a cada segundo
+        function updateClock() {
+            const now = new Date();
+            const timeString = now.toLocaleTimeString('pt-BR');
+            liveClock.textContent = timeString;
+        }
+        setInterval(updateClock, 1000);
+        updateClock();
+
+        // Inicializa a interface
         function init() {
             ipInput.value = currentIP;
             ipDisplay.textContent = currentIP;
-            
-            if (currentIP === "localhost" || currentIP === "127.0.0.1") {
-                srvBadge.textContent = "Servidor: Local";
-                srvBadge.style.backgroundColor = "#3B82F6";
-            } else {
-                srvBadge.textContent = "Servidor: " + currentIP;
-                srvBadge.style.backgroundColor = "#10B981";
-            }
-            
-            // Carrega as streams nos iframes
-            loadStreams();
+            layoutSelect.value = currentLayout;
+            applyLayoutClass(currentLayout);
+            loadActiveStreams();
         }
 
-        // Define a URL dos iframes
-        function loadStreams() {
-            iframeC1.src = `http://${currentIP}:1984/webrtc.html?src=farmacia`;
-            iframeC2.src = `http://${currentIP}:1984/webrtc.html?src=farmacia2`;
-        }
-
-        // Abre/Fecha painel de configurações
+        // Abre/Fecha a barra de configurações lateral
         function toggleSettings() {
-            if (settingsPanel.style.display === "block") {
-                settingsPanel.style.display = "none";
-            } else {
-                settingsPanel.style.display = "block";
-                ipInput.focus();
-            }
+            sidebar.classList.toggle("active");
         }
 
-        // Salva o novo IP
+        // Altera o layout do grid manualmente
+        function changeLayout() {
+            const mode = layoutSelect.value;
+            localStorage.setItem("camera_layout_mode", mode);
+            currentLayout = mode;
+            applyLayoutClass(mode);
+        }
+
+        function applyLayoutClass(mode) {
+            cameraGrid.className = "camera-grid"; // limpa classes
+            if (mode === "1") cameraGrid.classList.add("grid-1-col");
+            else if (mode === "2") cameraGrid.classList.add("grid-2-col");
+            else if (mode === "3") cameraGrid.classList.add("grid-3-col");
+        }
+
+        // Salva as configurações de IP
         function saveIP() {
             let ipValue = ipInput.value.trim();
             if (ipValue === "") ipValue = "localhost";
             
-            // Remove espaços e protocolos se o usuário colar algo como http://
+            // Remove protocolos desnecessários se colados pelo usuário
             ipValue = ipValue.replace(/^(http:\/\/|https:\/\/)/, "").split(":")[0];
             
             localStorage.setItem("camera_server_ip", ipValue);
             currentIP = ipValue;
+            ipDisplay.textContent = ipValue;
             
-            // Fecha painel e reinicia
-            settingsPanel.style.display = "none";
-            init();
+            sidebar.classList.remove("active");
+            loadActiveStreams();
         }
 
         // Reseta o IP para localhost
         function resetIP() {
-            localStorage.setItem("camera_server_ip", "localhost");
-            currentIP = "localhost";
             ipInput.value = "localhost";
-            settingsPanel.style.display = "none";
-            init();
+            saveIP();
         }
 
-        // Força recarregar os iframes (atualizar stream)
-        function reloadStreams() {
-            const src1 = iframeC1.src;
-            const src2 = iframeC2.src;
-            iframeC1.src = "about:blank";
-            iframeC2.src = "about:blank";
-            setTimeout(() => {
-                iframeC1.src = src1;
-                iframeC2.src = src2;
-            }, 100);
+        // Consulta a API do go2rtc e monta o painel de câmeras dinamicamente
+        function loadActiveStreams() {
+            cameraGrid.innerHTML = "";
+            emptyState.style.display = "flex";
+            emptyMessage.textContent = "Procurando conexões ativas com o servidor...";
+            serverBadge.textContent = "Servidor Offline";
+            serverBadge.className = "server-badge";
+            
+            // Requisição API
+            fetch(`http://${currentIP}:1984/api/streams`)
+                .then(response => {
+                    if (!response.ok) throw new Error("Falha ao comunicar com a API");
+                    return response.json();
+                })
+                .then(data => {
+                    const streams = Object.keys(data);
+                    
+                    if (streams.length === 0) {
+                        emptyMessage.textContent = "Nenhuma câmera ativa encontrada no servidor go2rtc.";
+                        serverBadge.textContent = "Sem Câmeras";
+                        serverBadge.classList.add("server-connected");
+                        return;
+                    }
+                    
+                    // Sucesso! Esconde tela de vazio e atualiza badge
+                    emptyState.style.display = "none";
+                    serverBadge.textContent = `ONLINE | ${streams.length} CAM`;
+                    serverBadge.classList.add("server-connected");
+                    
+                    // Renderiza cada câmera
+                    streams.forEach(stream => {
+                        createCameraCard(stream);
+                    });
+                })
+                .catch(error => {
+                    console.error(error);
+                    emptyMessage.textContent = `Não foi possível conectar ao servidor go2rtc no IP: ${currentIP}. Verifique se a Ponte RTSP está iniciada no computador.`;
+                });
         }
 
-        // Inicia
+        // Cria o elemento HTML de cada câmera dinamicamente
+        function createCameraCard(streamName) {
+            const card = document.createElement("div");
+            card.className = "camera-card";
+            card.id = `card-${streamName}`;
+            
+            const webrtcUrl = `http://${currentIP}:1984/webrtc.html?src=${streamName}`;
+            
+            card.innerHTML = `
+                <div class="camera-titlebar">
+                    <div class="camera-name">
+                        <span class="pulse-dot"></span>
+                        <span>CÂMERA: ${streamName.toUpperCase()}</span>
+                    </div>
+                    <div class="camera-actions">
+                        <button class="card-icon-btn" title="Recarregar esta câmera" onclick="reloadCamera('${streamName}')">🔄</button>
+                        <button class="card-icon-btn" title="Tela Cheia" onclick="toggleCardFullscreen('${streamName}')">📺</button>
+                    </div>
+                </div>
+                <div class="camera-video-wrapper">
+                    <iframe id="iframe-${streamName}" src="${webrtcUrl}" allowfullscreen allow="autoplay"></iframe>
+                </div>
+            `;
+            
+            cameraGrid.appendChild(card);
+        }
+
+        // Recarrega apenas uma câmera específica
+        function reloadCamera(streamName) {
+            const iframe = document.getElementById(`iframe-${streamName}`);
+            if (iframe) {
+                const src = iframe.src;
+                iframe.src = "about:blank";
+                setTimeout(() => {
+                    iframe.src = src;
+                }, 100);
+            }
+        }
+
+        // Ativa tela cheia (Fullscreen) para a câmera selecionada
+        function toggleCardFullscreen(streamName) {
+            const card = document.getElementById(`card-${streamName}`);
+            if (card) {
+                if (!document.fullscreenElement) {
+                    card.requestFullscreen()
+                        .catch(err => {
+                            alert(`Erro ao tentar ativar tela cheia: ${err.message}`);
+                        });
+                } else {
+                    document.exitFullscreen();
+                }
+            }
+        }
+
+        // Inicializa ao carregar a página
         init();
     </script>
 </body>
