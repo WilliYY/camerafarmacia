@@ -2,27 +2,35 @@ import cv2
 import time
 import os
 import sys
+import argparse
 import numpy as np
 from datetime import datetime, timedelta
 
-# ================= CONFIGURAÇÕES =================
-RTSP_URL = "rtsp://localhost:8554/farmacia"
-PASTA_GRAVACOES = "G:/Meu Drive/CAMERAS/CAMERA 1 FARMACIA"
+# ================= ARGUMENTOS DA LINHA DE COMANDO =================
+parser = argparse.ArgumentParser(description="Gravador de Câmeras RTSP")
+parser.add_argument("--stream", type=str, default="farmacia", help="Nome da stream no go2rtc (Ex: farmacia)")
+parser.add_argument("--dir", type=str, default="G:/Meu Drive/CAMERAS/CAMERA 1 FARMACIA", help="Diretório de salvamento do Drive")
+parser.add_argument("--lock", type=str, default="gravando.lock", help="Nome do arquivo de lock de controle")
+parser.add_argument("--log", type=str, default="erros_gravador.log", help="Nome do arquivo de log")
+args = parser.parse_args()
+
+RTSP_URL = f"rtsp://localhost:8554/{args.stream}"
+PASTA_GRAVACOES = args.dir
 LARGURA_HD = 1280
 ALTURA_HD = 720
 
 # Arquivos locais de controle
 PROJ_DIR = r"C:\Users\Thiesen\Desktop\camera farmacia"
-LOCK_FILE = os.path.join(PROJ_DIR, "gravando.lock")
-LOG_FILE = os.path.join(PROJ_DIR, "erros_gravador.log")
-# =================================================
+LOCK_FILE = os.path.join(PROJ_DIR, args.lock)
+LOG_FILE = os.path.join(PROJ_DIR, args.log)
+# ==================================================================
 
 os.makedirs(PASTA_GRAVACOES, exist_ok=True)
 
 def escrever_log(mensagem):
-    """Escreve uma linha no arquivo erros_gravador.log com carimbo de data/hora"""
+    """Escreve uma linha no arquivo de log com carimbo de data/hora"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    formatted = f"[{timestamp}] {mensagem}\n"
+    formatted = f"[{timestamp}] [{args.stream.upper()}] {mensagem}\n"
     print(formatted.strip()) # Imprime no console (caso rodando em modo interativo)
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
@@ -31,7 +39,7 @@ def escrever_log(mensagem):
         pass
 
 def criar_lock_file():
-    """Cria o arquivo gravando.lock contendo o PID do processo atual"""
+    """Cria o arquivo de lock contendo o PID do processo atual"""
     try:
         with open(LOCK_FILE, "w") as f:
             f.write(str(os.getpid()))
@@ -85,7 +93,7 @@ def gravar_fluxo():
         while True:
             # 1. Verifica se o painel GUI enviou comando para parar deletando o arquivo lock
             if not verificar_lock_file():
-                escrever_log("Sinal de parada detectado (gravando.lock foi removido). Encerrando gravação...")
+                escrever_log("Sinal de parada detectado (lock foi removido). Encerrando gravação...")
                 break
                 
             ret, frame = cap.read()
@@ -95,7 +103,6 @@ def gravar_fluxo():
             
             # 2. Detector de Congelamento de Imagem
             if prev_frame is not None:
-                # Compara rapidamente se os quadros são idênticos em nível de bytes (muito leve)
                 if np.array_equal(frame, prev_frame):
                     quadros_identicos_consecutivos += 1
                     if quadros_identicos_consecutivos >= limite_quadros_congelados:
@@ -132,8 +139,6 @@ def gravar_fluxo():
             
             out.write(frame_hd)
             
-            # Pequeno delay para aliviar uso de CPU entre frames
-            # O VideoCapture.read() já aguarda o tempo natural da stream, mas um waitKey opcional ajuda
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 escrever_log("Tecla de encerramento pressionada.")
                 break

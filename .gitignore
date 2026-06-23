@@ -1,6 +1,7 @@
 # Arquivos temporários e locais
 diagnostico.txt
 *.tmp
+*.log
 
 # Cache do Python
 __pycache__/
