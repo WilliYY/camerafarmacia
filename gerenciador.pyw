@@ -9,6 +9,7 @@ import json
 import threading
 import time
 from datetime import datetime
+import ctypes
 
 # Configurações do Projeto
 PROJ_DIR = r"C:\Users\Thiesen\Desktop\camera farmacia"
@@ -373,19 +374,57 @@ class CameraManagerApp:
         except Exception:
             return False
 
-    def check_process_recorder(self, lock_filename):
-        try:
-            # Verifica processos que contêm gravador_camera.py e o nome do arquivo lock específico
-            output = subprocess.check_output(
-                f'wmic process where "CommandLine like \'%gravador_camera.py%\' and CommandLine like \'%{lock_filename}%\' and not CommandLine like \'%wmic%\'" get ProcessId',
-                shell=True,
-                text=True,
-                stderr=subprocess.DEVNULL
-            )
-            pids = [line.strip() for line in output.split('\n') if line.strip().isdigit()]
-            return len(pids) > 0
-        except Exception:
+    def is_pid_running_and_python(self, pid):
+        if not pid:
             return False
+        try:
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return False
+                
+            exit_code = ctypes.c_ulong()
+            active_success = kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+            is_active = active_success and (exit_code.value == 259) # STILL_ACTIVE
+            
+            size = ctypes.c_ulong(1024)
+            buf = ctypes.create_unicode_buffer(1024)
+            exe_success = kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size))
+            kernel32.CloseHandle(handle)
+            
+            if is_active and exe_success:
+                exe_name = os.path.basename(buf.value).lower()
+                if "python" in exe_name:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def check_process_recorder(self, lock_filename):
+        lock_path = os.path.join(PROJ_DIR, lock_filename)
+        if not os.path.exists(lock_path):
+            return False
+        try:
+            with open(lock_path, "r") as f:
+                content = f.read().strip()
+            if not content.isdigit():
+                return False
+            pid = int(content)
+            return self.is_pid_running_and_python(pid)
+        except Exception:
+            # Fallback para wmic caso a leitura de PID ou ctypes falhe
+            try:
+                output = subprocess.check_output(
+                    f'wmic process where "CommandLine like \'%gravador_camera.py%\' and CommandLine like \'%{lock_filename}%\' and not CommandLine like \'%wmic%\'" get ProcessId',
+                    shell=True,
+                    text=True,
+                    stderr=subprocess.DEVNULL
+                )
+                pids = [line.strip() for line in output.split('\n') if line.strip().isdigit()]
+                return len(pids) > 0
+            except Exception:
+                return False
 
     def check_rtsp_stream(self, go2rtc_ok, stream_name):
         if not go2rtc_ok:
@@ -519,7 +558,8 @@ class CameraManagerApp:
             time.sleep(2.5)
             
             # Localiza pythonw.exe
-            pythonw_path = sys.executable.replace("python.exe", "pythonw.exe")
+            python_dir = os.path.dirname(sys.executable)
+            pythonw_path = os.path.join(python_dir, "pythonw.exe")
             if not os.path.exists(pythonw_path):
                 pythonw_path = "pythonw"
                 
@@ -557,34 +597,41 @@ class CameraManagerApp:
         threading.Thread(target=self.run_stop_sequence_verbose, daemon=True).start()
 
     def run_stop_sequence(self):
-        # 1. Sinaliza parada para Câmera 1 e Câmera 2 removendo seus locks
-        for lock_file in [LOCK_FILE1, LOCK_FILE2]:
+        # 1. Lê os PIDs dos arquivos de lock e depois os remove para sinalizar parada
+        pids = {}
+        for cam, lock_file in [("c1", LOCK_FILE1), ("c2", LOCK_FILE2)]:
             if os.path.exists(lock_file):
+                try:
+                    with open(lock_file, "r") as f:
+                        content = f.read().strip()
+                    if content.isdigit():
+                        pids[cam] = int(content)
+                except Exception:
+                    pass
                 try:
                     os.remove(lock_file)
                 except Exception:
                     pass
         self.root.after(0, lambda: self.add_log("Enviando sinal de parada aos gravadores..."))
         
-        # 2. Aguarda até 3 segundos para que encerrem de forma graciosa
+        # 2. Aguarda até 3 segundos para que os processos encerrem de forma graciosa
         for _ in range(15):
-            if not self.check_process_recorder("gravando_c1.lock") and not self.check_process_recorder("gravando_c2.lock"):
+            any_running = False
+            for cam, pid in pids.items():
+                if self.is_pid_running_and_python(pid):
+                    any_running = True
+            if not any_running:
                 break
             time.sleep(0.2)
             
-        # 3. Contingência: Força encerramento de qualquer processo do gravador que tenha travado
-        try:
-            output = subprocess.check_output(
-                'wmic process where "CommandLine like \'%gravador_camera.py%\' and not CommandLine like \'%wmic%\'" get ProcessId',
-                shell=True,
-                text=True,
-                stderr=subprocess.DEVNULL
-            )
-            pids = [line.strip() for line in output.split('\n') if line.strip().isdigit()]
-            for pid in pids:
-                subprocess.run(f'taskkill /F /PID {pid}', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
+        # 3. Contingência: Força encerramento de qualquer processo do gravador que ainda esteja rodando
+        for cam, pid in pids.items():
+            if self.is_pid_running_and_python(pid):
+                try:
+                    os.kill(pid, 9)
+                    self.root.after(0, lambda: self.add_log(f"Processo do gravador {cam.upper()} finalizado à força."))
+                except Exception:
+                    pass
 
         # 4. Encerra go2rtc.exe
         subprocess.run('taskkill /F /IM go2rtc.exe', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

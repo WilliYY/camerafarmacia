@@ -2,6 +2,7 @@
 diagnostico.txt
 *.tmp
 *.log
+*.lock
 
 # Cache do Python
 __pycache__/
