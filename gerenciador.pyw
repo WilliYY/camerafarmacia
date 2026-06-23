@@ -724,6 +724,10 @@ class CameraManagerApp:
                     log.append(f"   [-] ERRO de escrita Câmera 2: {str(e)}")
             else:
                 log.append(f" - ERRO: Pasta da Câmera 2 NÃO encontrada: {GDRIVE_DIR2}")
+            log.append("\n [NOTA] O teste de escrita acima valida apenas a criação local dos arquivos no PC.")
+            log.append("        Se o aplicativo do Google Drive exibir alertas de erro de permissão ao sincronizar,")
+            log.append("        certifique-se de que a conta de e-mail vinculada possui acesso de 'Editor'")
+            log.append("        (e não apenas de 'Leitor/Visualizador') nas pastas compartilhadas na nuvem.")
         else:
             log.append(f" - ERRO: Diretório Raiz G:\\Meu Drive\\CAMERAS não foi encontrado!")
 
