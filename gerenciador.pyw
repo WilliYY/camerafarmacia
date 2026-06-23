@@ -10,12 +10,14 @@ import threading
 import time
 import ctypes
 import shutil
-from datetime import datetime
+from datetime import datetime, timedelta
+
+# Versão do Sistema (usada para o auto-update)
+VERSION = "3.6"
 
 # Configurações do Projeto
 PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
 GO2RTC_EXE = os.path.join(PROJ_DIR, "go2rtc", "go2rtc.exe")
-RECORDER_SCRIPT = os.path.join(PROJ_DIR, "gravador_camera.py")
 
 GDRIVE_ROOT = r"G:\Meu Drive\CAMERAS"
 
@@ -40,35 +42,46 @@ class StatusLED(tk.Canvas):
         self.itemconfig(self.led, fill=color, outline=border_color)
 
 class CameraManagerApp:
-    def __init__(self, root):
+    def __init__(self, root, silent=False):
         self.root = root
-        self.root.title("Controle das Câmeras - Farmácia (NVR Dinâmico)")
-        self.root.geometry("680x700")
-        self.root.configure(bg=BG_COLOR)
-        self.root.resizable(False, False)
+        self.silent = silent
         
-        # 1. Carrega as câmeras dinamicamente
-        self.streams = self.parse_streams()
-        self.local_ip = self.get_local_ip()
-        
-        # 2. Inicializa Variáveis de Controle e GUI
+        # Variáveis de Gravação em Memória (NVR Integrado)
+        self.recording_active = {}
         self.status_lock = threading.Lock()
         self.alerted_duplicates = {} # Evita exibir alerta popup repetidamente
         
-        self.setup_styles()
-        self.create_widgets()
+        self.streams = self.parse_streams()
+        self.local_ip = self.get_local_ip()
         
-        # 3. Inicia a thread de monitoramento em tempo real
+        # 1. Configura título e layout se não estiver em modo silencioso
+        if not self.silent:
+            self.root.title(f"Controle das Câmeras - Farmácia (NVR Unificado v{VERSION})")
+            self.root.geometry("680x700")
+            self.root.configure(bg=BG_COLOR)
+            self.root.resizable(False, False)
+            
+            self.setup_styles()
+            self.create_widgets()
+            
+            # Thread de verificação de atualizações no GitHub
+            threading.Thread(target=self.check_for_updates_thread, daemon=True).start()
+            
+        # 2. Inicia a thread de monitoramento em tempo real
         self.running_monitor = True
         self.monitor_thread = threading.Thread(target=self.monitor_loop, daemon=True)
         self.monitor_thread.start()
         
-        # 4. Inicia a thread de sincronização de backups locais em segundo plano
+        # 3. Inicia a thread de sincronização de backups locais em segundo plano
         self.running_sync = True
         self.sync_thread = threading.Thread(target=self.background_sync_loop, daemon=True)
         self.sync_thread.start()
         
-        self.add_log(f"Painel NVR iniciado. Detectadas {len(self.streams)} câmeras: {', '.join(self.streams)}")
+        # 4. No modo silencioso, inicia as gravações automaticamente
+        if self.silent:
+            threading.Thread(target=self.run_start_sequence, daemon=True).start()
+        else:
+            self.add_log(f"Painel NVR v{VERSION} iniciado. Câmeras: {', '.join(self.streams)}")
 
     def parse_streams(self):
         yaml_path = os.path.join(PROJ_DIR, "go2rtc", "go2rtc.yaml")
@@ -140,7 +153,7 @@ class CameraManagerApp:
         
         subtitle_label = tk.Label(
             header_frame, 
-            text="v3.5 Premium", 
+            text=f"v{VERSION} Unificado", 
             font=("Segoe UI", 9, "bold"), 
             fg=ACCENT_COLOR, 
             bg=BG_COLOR
@@ -396,7 +409,7 @@ class CameraManagerApp:
     # ================= MONITOR LOOP (THREAD SEPARADA) =================
     def monitor_loop(self):
         while self.running_monitor:
-            # 1. Verifica go2rtc
+            # 1. Verifica se go2rtc está ativo
             go2rtc_ok = self.check_process_go2rtc()
             
             # 2. Verifica se o Google Drive está conectado
@@ -412,7 +425,7 @@ class CameraManagerApp:
                 log_file = f"{stream}_erros.log"
                 gdrive_dir = self.get_gdrive_dir(stream, idx)
                 
-                c_grav_ok = self.check_process_recorder(lock_file)
+                c_grav_ok = self.check_process_recorder(lock_file, stream)
                 c_signal_str = self.check_rtsp_stream(go2rtc_ok, stream)
                 last_file_str = self.check_last_recording(gdrive_ok, gdrive_dir, stream)
                 
@@ -422,9 +435,9 @@ class CameraManagerApp:
                     duplicate_msg = self.check_log_for_duplicate_error(os.path.join(PROJ_DIR, log_file))
                     if duplicate_msg and stream not in self.alerted_duplicates:
                         self.alerted_duplicates[stream] = True
-                        self.root.after(0, lambda m=duplicate_msg: messagebox.showwarning("Aviso de Rede", m))
+                        if not self.silent:
+                            self.root.after(0, lambda m=duplicate_msg: messagebox.showwarning("Aviso de Rede", m))
                 else:
-                    # Se voltou a rodar, limpa o estado de alerta
                     if stream in self.alerted_duplicates:
                         del self.alerted_duplicates[stream]
                 
@@ -435,8 +448,9 @@ class CameraManagerApp:
                     "duplicate_error": duplicate_msg is not None
                 }
             
-            # Atualiza a interface
-            self.root.after(0, self.update_ui_states, go2rtc_ok, gdrive_ok, live_viewers, cam_states)
+            # Atualiza a interface (se não estiver em modo silencioso)
+            if not self.silent:
+                self.root.after(0, self.update_ui_states, go2rtc_ok, gdrive_ok, live_viewers, cam_states)
             
             # Dorme por 3 segundos
             time.sleep(3)
@@ -475,7 +489,10 @@ class CameraManagerApp:
             pass
         return False
 
-    def check_process_recorder(self, lock_filename):
+    def check_process_recorder(self, lock_filename, stream_name):
+        if self.recording_active.get(stream_name, False):
+            return True
+            
         lock_path = os.path.join(PROJ_DIR, lock_filename)
         if not os.path.exists(lock_path):
             return False
@@ -485,12 +502,15 @@ class CameraManagerApp:
             if not content.isdigit():
                 return False
             pid = int(content)
+            
+            if pid == os.getpid():
+                return False
+                
             return self.is_pid_running_and_python(pid)
         except Exception:
-            # Fallback para wmic caso a leitura de PID ou ctypes falhe
             try:
                 output = subprocess.check_output(
-                    f'wmic process where "CommandLine like \'%gravador_camera.py%\' and CommandLine like \'%{lock_filename}%\' and not CommandLine like \'%wmic%\'" get ProcessId',
+                    f'wmic process where "CommandLine like \'%gerenciador.pyw%\' and not CommandLine like \'%wmic%\'" get ProcessId',
                     shell=True,
                     text=True,
                     stderr=subprocess.DEVNULL
@@ -504,7 +524,6 @@ class CameraManagerApp:
         if not go2rtc_ok:
             return "Indisponível"
         try:
-            # Consulta API do go2rtc
             with urllib.request.urlopen("http://localhost:1984/api/streams", timeout=1.0) as conn:
                 data = json.loads(conn.read().decode())
                 if stream_name in data:
@@ -516,7 +535,6 @@ class CameraManagerApp:
                 else:
                     return "Não configurada"
         except Exception:
-            # Fallback para socket simples na porta 1984
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(0.5)
             try:
@@ -527,7 +545,6 @@ class CameraManagerApp:
                 return "Erro API"
 
     def check_last_recording(self, gdrive_ok, gdrive_path, stream_name):
-        # Determina o diretório de leitura (Drive ou fallback local)
         read_path = gdrive_path
         if not gdrive_ok or not os.path.exists(gdrive_path):
             read_path = os.path.join(PROJ_DIR, "backup_gravacoes", stream_name)
@@ -564,7 +581,6 @@ class CameraManagerApp:
             with open(log_file_path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
             if lines:
-                # Verifica as últimas 5 linhas
                 for line in lines[-5:]:
                     if "[ERRO_DUPLICADO]" in line:
                         return line.strip()
@@ -585,7 +601,6 @@ class CameraManagerApp:
                     addr = consumer.get("remote_addr", "")
                     ua = consumer.get("user_agent", "").lower()
                     
-                    # Ignora visualizadores locais (próprio gravador local ou localhost)
                     if "127.0.0.1" in addr or "[::1]" in addr or "localhost" in addr:
                         continue
                     if "lavf" in ua:
@@ -605,6 +620,9 @@ class CameraManagerApp:
     # ================= ATUALIZAÇÃO DA GUI =================
     def update_ui_states(self, go2rtc_ok, gdrive_ok, live_viewers, cam_states):
         with self.status_lock:
+            if self.silent:
+                return
+                
             # 1. go2rtc status
             if go2rtc_ok:
                 self.lbl_val_go2rtc.configure(text="ATIVO", fg=GREEN_COLOR)
@@ -621,13 +639,13 @@ class CameraManagerApp:
                 self.lbl_val_gdrive.configure(text="DESCONECTADO", fg=RED_COLOR)
                 self.led_gdrive.set_status(RED_COLOR, "#991B1B")
                 
-            # 3. Atualiza os visualizadores ao vivo no cabeçalho
+            # 3. Atualiza os visualizadores ao vivo
             if live_viewers:
                 self.lbl_viewers.configure(text=f"👁️ Assistindo: {len(live_viewers)} ({', '.join(live_viewers)})", fg=GREEN_COLOR)
             else:
                 self.lbl_viewers.configure(text="👁️ Assistindo: 0", fg=TEXT_MUTED)
                 
-            # 4. Atualiza os cards das câmeras dinamicamente
+            # 4. Atualiza os cards das câmeras
             for stream, state in cam_states.items():
                 if stream in self.camera_cards:
                     card = self.camera_cards[stream]
@@ -654,16 +672,13 @@ class CameraManagerApp:
                         card["lbl_grav"].configure(text="PARADO", fg=RED_COLOR)
                         card["led_grav"].set_status(RED_COLOR, "#991B1B")
                         
-                    # Última gravação/Sync
                     card["lbl_sync"].configure(text=state["sync"])
 
     # ================= SINCRONIZADOR DE BACKUP EM SEGUNDO PLANO =================
     def background_sync_loop(self):
         while self.running_sync:
-            # Dorme 30 segundos
             time.sleep(30)
             
-            # Só sincroniza se o Google Drive estiver online
             if not os.path.exists(GDRIVE_ROOT):
                 continue
                 
@@ -671,7 +686,6 @@ class CameraManagerApp:
             if not os.path.exists(backup_dir):
                 continue
                 
-            # Escaneia pastas de backup de cada stream
             try:
                 for idx, stream in enumerate(self.streams):
                     stream_backup_dir = os.path.join(backup_dir, stream)
@@ -692,87 +706,285 @@ class CameraManagerApp:
                             tf.write("test")
                         os.remove(teste_path)
                     except Exception:
-                        # Drive continua sem permissão, pula este ciclo
                         continue
                         
                     for filename in files:
                         local_filepath = os.path.join(stream_backup_dir, filename)
                         dest_filepath = os.path.join(gdrive_dest, filename)
                         
-                        # Verifica se o arquivo não está ativo (não modificado nos últimos 60 segundos)
                         mtime = os.path.getmtime(local_filepath)
                         if time.time() - mtime < 60:
                             continue
                             
-                        self.root.after(0, lambda fn=filename, s=stream: self.add_log(f"Subindo backup de {s.upper()}: {fn}..."))
+                        if not self.silent:
+                            self.root.after(0, lambda fn=filename, s=stream: self.add_log(f"Subindo backup de {s.upper()}: {fn}..."))
                         
                         try:
                             shutil.copy2(local_filepath, dest_filepath)
-                            # Confirma integridade pelo tamanho do arquivo
                             if os.path.getsize(local_filepath) == os.path.getsize(dest_filepath):
                                 os.remove(local_filepath)
-                                self.root.after(0, lambda fn=filename, s=stream: self.add_log(f"Sincronizado e apagado local: {fn}"))
+                                if not self.silent:
+                                    self.root.after(0, lambda fn=filename, s=stream: self.add_log(f"Sincronizado e apagado local: {fn}"))
                         except Exception as e:
-                            self.root.after(0, lambda fn=filename, err=str(e): self.add_log(f"Erro ao subir {fn}: {err}"))
+                            if not self.silent:
+                                self.root.after(0, lambda fn=filename, err=str(e): self.add_log(f"Erro ao subir {fn}: {err}"))
             except Exception as e:
-                self.root.after(0, lambda err=str(e): self.add_log(f"Erro no loop de sincronizacao: {err}"))
+                if not self.silent:
+                    self.root.after(0, lambda err=str(e): self.add_log(f"Erro no loop de sincronizacao: {err}"))
+
+    # ================= SISTEMA NVR INTEGRADO (GRAVAÇÃO INTERNA EM THREADS) =================
+    def record_stream_thread(self, stream_name, index):
+        gdrive_dir = self.get_gdrive_dir(stream_name, index)
+        lock_file = f"gravando_{stream_name}.lock"
+        log_file = f"{stream_name}_erros.log"
+        
+        lock_path = os.path.join(PROJ_DIR, lock_file)
+        log_path = os.path.join(PROJ_DIR, log_file)
+        
+        # Cria a trava local
+        try:
+            with open(lock_path, "w") as f:
+                f.write(str(os.getpid()))
+        except Exception:
+            pass
+            
+        def escrever_log_cam(msg):
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            formatted = f"[{timestamp}] [{stream_name.upper()}] {msg}\n"
+            try:
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(formatted)
+            except Exception:
+                pass
+            if not self.silent:
+                self.root.after(0, lambda: self.add_log(f"[{stream_name.upper()}] {msg}"))
+
+        escrever_log_cam("=== INICIANDO TAREFA DE GRAVACAO INTERNA (REMUX THREAD) ===")
+        
+        # Testa a escrita no Drive para fallback
+        try:
+            os.makedirs(gdrive_dir, exist_ok=True)
+            teste_path = os.path.join(gdrive_dir, ".teste_escrita")
+            with open(teste_path, "w") as f:
+                f.write("teste")
+            os.remove(teste_path)
+            pasta_final = gdrive_dir
+        except Exception as e:
+            pasta_fallback = os.path.join(PROJ_DIR, "backup_gravacoes", stream_name)
+            os.makedirs(pasta_fallback, exist_ok=True)
+            pasta_final = pasta_fallback
+            escrever_log_cam(f"AVISO: Pasta do Drive indisponivel ({str(e)}). Usando backup local: {pasta_fallback}")
+
+        # Loop principal da gravação
+        while self.recording_active.get(stream_name, False):
+            # Verifica duplicidade na rede
+            conflito = self.verificar_duplicidade_rede_cam(gdrive_dir, stream_name)
+            if conflito:
+                escrever_log_cam(f"[ERRO_DUPLICADO] O computador {conflito['hostname']} ({conflito['ip']}) ja esta gravando esta camera.")
+                break
+                
+            # Executa gravação do bloco
+            status = self.gravar_bloco_cam(stream_name, pasta_final, gdrive_dir, escrever_log_cam)
+            
+            if status == "parar" or status == "duplicado":
+                break
+                
+            if status == "erro" or status == "reconectar":
+                escrever_log_cam("Aguardando 10 segundos antes de tentar reconectar...")
+                for _ in range(20):
+                    if not self.recording_active.get(stream_name, False):
+                        break
+                    time.sleep(0.5)
+            elif status == "rotacionar":
+                time.sleep(1)
+                
+        # Finalização e Limpeza
+        if os.path.exists(lock_path):
+            try:
+                os.remove(lock_path)
+            except Exception:
+                pass
+                
+        try:
+            gdrive_root = os.path.dirname(gdrive_dir)
+            lock_name = f".active_recorder_{stream_name}.json"
+            net_lock_path = os.path.join(gdrive_root, lock_name)
+            if os.path.exists(net_lock_path):
+                with open(net_lock_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if data.get("hostname") == socket.gethostname():
+                    os.remove(net_lock_path)
+        except Exception:
+            pass
+            
+        escrever_log_cam("=== TAREFA DE GRAVACAO INTERNA ENCERRADA ===")
+
+    def verificar_duplicidade_rede_cam(self, gdrive_dir, stream_name):
+        gdrive_root = os.path.dirname(gdrive_dir)
+        lock_name = f".active_recorder_{stream_name}.json"
+        lock_path = os.path.join(gdrive_root, lock_name)
+        
+        if not os.path.exists(lock_path):
+            return None
+            
+        try:
+            with open(lock_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            last_heartbeat = data.get("timestamp", 0)
+            hostname = data.get("hostname", "")
+            ip = data.get("ip", "")
+            
+            current_time = time.time()
+            my_hostname = socket.gethostname()
+            
+            if (current_time - last_heartbeat < 90) and (hostname != my_hostname):
+                return {"hostname": hostname, "ip": ip}
+        except Exception:
+            pass
+        return None
+
+    def atualizar_heartbeat_cam(self, gdrive_dir, stream_name):
+        gdrive_root = os.path.dirname(gdrive_dir)
+        if not os.path.exists(gdrive_root):
+            return
+            
+        lock_name = f".active_recorder_{stream_name}.json"
+        lock_path = os.path.join(gdrive_root, lock_name)
+        
+        data = {
+            "timestamp": time.time(),
+            "hostname": socket.gethostname(),
+            "ip": self.local_ip
+        }
+        
+        try:
+            with open(lock_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
+
+    def obter_faixa_horario(self, dt):
+        if dt.minute < 30:
+            inicio = dt.replace(minute=0, second=0, microsecond=0)
+            fim = dt.replace(minute=30, second=0, microsecond=0)
+        else:
+            inicio = dt.replace(minute=30, second=0, microsecond=0)
+            fim = (dt + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+        return inicio, fim
+
+    def gravar_bloco_cam(self, stream_name, pasta_final, gdrive_dir, escrever_log_cam):
+        agora = datetime.now()
+        inicio_bloco, fim_bloco = self.obter_faixa_horario(agora)
+        
+        data_dia = inicio_bloco.strftime("%Y-%m-%d")
+        hora_inicio = inicio_bloco.strftime("%H-%M")
+        hora_fim = fim_bloco.strftime("%H-%M")
+        
+        nome_arquivo = os.path.join(pasta_final, f"camera_{data_dia}_{hora_inicio}_ate_{hora_fim}.mp4")
+        escrever_log_cam(f"Iniciando gravacao do bloco: {os.path.basename(nome_arquivo)}")
+        
+        url = f"http://127.0.0.1:1984/api/stream.mp4?src={stream_name}"
+        
+        self.atualizar_heartbeat_cam(gdrive_dir, stream_name)
+        last_heartbeat_time = time.time()
+        
+        try:
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=15) as response:
+                with open(nome_arquivo, "wb") as out_file:
+                    while True:
+                        if not self.recording_active.get(stream_name, False):
+                            escrever_log_cam("Sinal de parada detectado.")
+                            return "parar"
+                            
+                        # Batimento cardíaco e detecção de duplicidade
+                        agora_ts = time.time()
+                        if agora_ts - last_heartbeat_time >= 30:
+                            conflito = self.verificar_duplicidade_rede_cam(gdrive_dir, stream_name)
+                            if conflito:
+                                escrever_log_cam(f"[ERRO_DUPLICADO] O computador {conflito['hostname']} ({conflito['ip']}) ja esta gravando.")
+                                return "duplicado"
+                            self.atualizar_heartbeat_cam(gdrive_dir, stream_name)
+                            last_heartbeat_time = agora_ts
+                            
+                        # Rotação de blocos
+                        if datetime.now() >= fim_bloco:
+                            escrever_log_cam("Bloco anterior finalizado e salvo no Drive.")
+                            return "rotacionar"
+                            
+                        # Leitura do fluxo de vídeo
+                        try:
+                            chunk = response.read(64 * 1024)
+                            if not chunk:
+                                escrever_log_cam("Fim da stream detectado.")
+                                break
+                            out_file.write(chunk)
+                        except socket.timeout:
+                            continue
+        except Exception as e:
+            escrever_log_cam(f"Erro na conexao com a stream: {str(e)}")
+            if os.path.exists(nome_arquivo) and os.path.getsize(nome_arquivo) == 0:
+                try:
+                    os.remove(nome_arquivo)
+                except Exception:
+                    pass
+            return "erro"
+            
+        return "reconectar"
 
     # ================= CLIQUES DE BOTÕES =================
     def click_iniciar(self):
-        self.add_log("Iniciando gravação do sistema...")
+        if not self.silent:
+            self.add_log("Iniciando gravação do sistema...")
         threading.Thread(target=self.run_start_sequence, daemon=True).start()
 
     def run_start_sequence(self):
-        # Encerra processos ativos
+        # Encerra processos e threads anteriores
         self.run_stop_sequence()
         time.sleep(1.5)
         
         try:
-            # 1. Liga a ponte RTSP go2rtc.exe
-            self.add_log("Ligando Ponte RTSP (go2rtc.exe)...")
-            subprocess.Popen(
-                [GO2RTC_EXE],
-                cwd=os.path.dirname(GO2RTC_EXE),
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-            
-            time.sleep(2.5)
-            
-            # Localiza pythonw.exe
-            python_dir = os.path.dirname(sys.executable)
-            pythonw_path = os.path.join(python_dir, "pythonw.exe")
-            if not os.path.exists(pythonw_path):
-                pythonw_path = "pythonw"
-                
-            # 2. Liga gravadores sob demanda para cada câmera configurada
-            for idx, stream in enumerate(self.streams):
-                gdrive_dir = self.get_gdrive_dir(stream, idx)
-                lock_file = f"gravando_{stream}.lock"
-                log_file = f"{stream}_erros.log"
-                
-                self.add_log(f"Iniciando gravador da camera {stream.upper()}...")
-                
+            # 1. Liga a ponte RTSP go2rtc.exe se não estiver rodando
+            if not self.check_process_go2rtc():
+                if not self.silent:
+                    self.add_log("Ligando Ponte RTSP (go2rtc.exe)...")
                 subprocess.Popen(
-                    [pythonw_path, RECORDER_SCRIPT, 
-                     "--stream", stream, 
-                     "--dir", gdrive_dir, 
-                     "--lock", lock_file, 
-                     "--log", log_file],
-                    cwd=PROJ_DIR,
+                    [GO2RTC_EXE],
+                    cwd=os.path.dirname(GO2RTC_EXE),
                     creationflags=subprocess.CREATE_NO_WINDOW
                 )
+                time.sleep(2.5)
                 
-            self.root.after(0, lambda: self.add_log("Inicialização concluída em segundo plano."))
+            # 2. Liga gravadores dinamicamente em threads separadas (NVR integrado)
+            for idx, stream in enumerate(self.streams):
+                if not self.silent:
+                    self.add_log(f"Iniciando thread de gravacao da camera {stream.upper()}...")
+                self.recording_active[stream] = True
+                threading.Thread(
+                    target=self.record_stream_thread, 
+                    args=(stream, idx), 
+                    daemon=True
+                ).start()
+                
+            if not self.silent:
+                self.root.after(0, lambda: self.add_log("Inicialização concluída em segundo plano."))
         except Exception as e:
-            self.root.after(0, lambda: self.add_log(f"ERRO ao iniciar gravação: {str(e)}"))
-            self.root.after(0, lambda: messagebox.showerror("Erro ao Iniciar", f"Não foi possível iniciar o serviço:\n{str(e)}"))
+            if not self.silent:
+                self.root.after(0, lambda: self.add_log(f"ERRO ao iniciar gravação: {str(e)}"))
+                self.root.after(0, lambda: messagebox.showerror("Erro ao Iniciar", f"Não foi possível iniciar o serviço:\n{str(e)}"))
 
     def click_parar(self):
-        self.add_log("Parando gravação e finalizando processos...")
+        if not self.silent:
+            self.add_log("Parando gravação e finalizando processos...")
         threading.Thread(target=self.run_stop_sequence_verbose, daemon=True).start()
 
     def run_stop_sequence(self):
-        # 1. Sinaliza parada para todos os gravadores removendo seus locks
+        # 1. Sinaliza parada para as threads locais
+        for stream in self.streams:
+            self.recording_active[stream] = False
+            
+        # 2. Lê os PIDs dos arquivos de lock e depois os remove
         pids = {}
         for stream in self.streams:
             lock_file = os.path.join(PROJ_DIR, f"gravando_{stream}.lock")
@@ -789,9 +1001,10 @@ class CameraManagerApp:
                 except Exception:
                     pass
                     
-        self.root.after(0, lambda: self.add_log("Enviando sinal de parada aos gravadores..."))
+        if not self.silent:
+            self.root.after(0, lambda: self.add_log("Finalizando tarefas de gravação..."))
         
-        # 2. Aguarda até 3 segundos para que os processos encerrem de forma graciosa
+        # 3. Aguarda até 3 segundos para que as threads locais ou externas encerrem
         for _ in range(15):
             any_running = False
             for stream, pid in pids.items():
@@ -801,21 +1014,24 @@ class CameraManagerApp:
                 break
             time.sleep(0.2)
             
-        # 3. Contingência: Força encerramento de qualquer gravador que ainda esteja rodando
+        # 4. Contingência: Finaliza à força qualquer instância externa de gravação (PID diferente do nosso)
+        my_pid = os.getpid()
         for stream, pid in pids.items():
-            if self.is_pid_running_and_python(pid):
+            if pid != my_pid and self.is_pid_running_and_python(pid):
                 try:
                     os.kill(pid, 9)
-                    self.root.after(0, lambda s=stream: self.add_log(f"Processo do gravador {s.upper()} finalizado à força."))
+                    if not self.silent:
+                        self.root.after(0, lambda s=stream: self.add_log(f"Processo do gravador {s.upper()} finalizado."))
                 except Exception:
                     pass
 
-        # 4. Encerra go2rtc.exe
+        # 5. Encerra go2rtc.exe
         subprocess.run('taskkill /F /IM go2rtc.exe', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def run_stop_sequence_verbose(self):
         self.run_stop_sequence()
-        self.root.after(0, lambda: self.add_log("Gravação interrompida. Todos os serviços parados!"))
+        if not self.silent:
+            self.root.after(0, lambda: self.add_log("Gravação interrompida. Todos os serviços parados!"))
 
     def click_abrir_pasta(self):
         if os.path.exists(GDRIVE_ROOT):
@@ -839,26 +1055,10 @@ class CameraManagerApp:
             startup_folder = os.path.join(os.getenv('APPDATA'), r"Microsoft\Windows\Start Menu\Programs\Startup")
             vbs_path = os.path.join(startup_folder, "iniciar_gravacao_farmacia.vbs")
             
-            # Gera as linhas de comando do VBS dinamicamente para cada câmera
-            recorders_commands = []
-            for idx, stream in enumerate(self.streams):
-                gdrive_dir = self.get_gdrive_dir(stream, idx)
-                lock_file = f"gravando_{stream}.lock"
-                log_file = f"{stream}_erros.log"
-                recorders_commands.append(
-                    f'WshShell.Run "pythonw.exe gravador_camera.py --stream {stream} --dir ""{gdrive_dir}"" --lock {lock_file} --log {log_file}", 0, False'
-                )
-            
-            commands_joined = "\n".join(recorders_commands)
-            
+            # Executa apenas o gerenciador.pyw em modo silencioso/headless
             vbs_content = f'''Set WshShell = CreateObject("WScript.Shell")
-WshShell.CurrentDirectory = "{PROJ_DIR}\\go2rtc"
-WshShell.Run """{PROJ_DIR}\\go2rtc\\go2rtc.exe""", 0, False
-
-WScript.Sleep 2500
-
 WshShell.CurrentDirectory = "{PROJ_DIR}"
-{commands_joined}
+WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
 '''
             with open(vbs_path, "w", encoding="utf-8") as f:
                 f.write(vbs_content)
@@ -869,6 +1069,82 @@ WshShell.CurrentDirectory = "{PROJ_DIR}"
             self.add_log(f"ERRO ao configurar inicialização: {str(e)}")
             messagebox.showerror("Erro de Configuração", f"Não foi possível salvar o arquivo de inicialização:\n{str(e)}")
 
+    # ================= SISTEMA DE ATUALIZAÇÃO AUTOMÁTICA =================
+    def check_for_updates_thread(self):
+        time.sleep(5)
+        self.add_log("Buscando atualizacoes no GitHub...")
+        
+        url_gerenciador = "https://raw.githubusercontent.com/WilliYY/camerafarmacia/main/gerenciador.pyw"
+        url_visualizador = "https://raw.githubusercontent.com/WilliYY/camerafarmacia/main/visualizador.html"
+        
+        try:
+            req = urllib.request.Request(url_gerenciador, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=8) as conn:
+                content = conn.read().decode('utf-8', errors='ignore')
+                
+            import re
+            match = re.search(r'VERSION\s*=\s*["\']([^"\']+)["\']', content)
+            if match:
+                online_version = match.group(1)
+                if online_version != VERSION:
+                    self.add_log(f"Nova versao v{online_version} encontrada! (Versao local: v{VERSION})")
+                    self.root.after(0, lambda: self.prompt_update(online_version, url_gerenciador, url_visualizador))
+                else:
+                    self.add_log(f"Sistema atualizado (v{VERSION}).")
+            else:
+                self.add_log("Nao foi possivel identificar a versao remota.")
+        except Exception as e:
+            self.add_log(f"Erro ao buscar atualizacoes: {str(e)}")
+            
+    def prompt_update(self, online_version, url_gerenciador, url_visualizador):
+        msg = f"Uma nova versao (v{online_version}) esta disponivel no GitHub!\n\nSua versao local e v{VERSION}.\n\nDeseja atualizar o sistema automaticamente agora?"
+        if messagebox.askyesno("Atualizacao Disponivel", msg):
+            threading.Thread(target=self.run_auto_update, args=(url_gerenciador, url_visualizador), daemon=True).start()
+            
+    def run_auto_update(self, url_gerenciador, url_visualizador):
+        self.add_log("Iniciando atualizacao automatica...")
+        
+        gerenciador_temp = os.path.join(PROJ_DIR, "gerenciador.pyw.tmp")
+        visualizador_temp = os.path.join(PROJ_DIR, "visualizador.html.tmp")
+        
+        try:
+            req_g = urllib.request.Request(url_gerenciador, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req_g, timeout=10) as conn:
+                g_content = conn.read()
+                
+            req_v = urllib.request.Request(url_visualizador, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req_v, timeout=10) as conn:
+                v_content = conn.read()
+                
+            with open(gerenciador_temp, "wb") as f:
+                f.write(g_content)
+            with open(visualizador_temp, "wb") as f:
+                f.write(v_content)
+                
+            self.add_log("Parando gravacoes para aplicar atualizacao...")
+            self.run_stop_sequence()
+            time.sleep(1.0)
+            
+            shutil.move(gerenciador_temp, os.path.join(PROJ_DIR, "gerenciador.pyw"))
+            shutil.move(visualizador_temp, os.path.join(PROJ_DIR, "visualizador.html"))
+            
+            self.add_log("Sistema atualizado com sucesso!")
+            self.root.after(0, lambda: messagebox.showinfo("Atualizado", "O sistema foi atualizado com sucesso para a nova versao!\n\nO aplicativo sera reiniciado agora."))
+            
+            # Restart
+            subprocess.Popen([sys.executable, os.path.join(PROJ_DIR, "gerenciador.pyw")])
+            self.root.after(0, self.root.quit)
+        except Exception as e:
+            self.add_log(f"ERRO durante a atualizacao: {str(e)}")
+            for temp_file in [gerenciador_temp, visualizador_temp]:
+                if os.path.exists(temp_file):
+                    try:
+                        os.remove(temp_file)
+                    except Exception:
+                        pass
+            self.root.after(0, lambda: messagebox.showerror("Erro de Atualizacao", f"Nao foi possivel atualizar o sistema:\n{str(e)}"))
+
+    # ================= DIAGNÓSTICOS =================
     def click_diagnostico(self):
         self.add_log("Gerando relatório de diagnóstico detalhado...")
         threading.Thread(target=self.run_diagnostics_sequence, daemon=True).start()
@@ -886,8 +1162,7 @@ WshShell.CurrentDirectory = "{PROJ_DIR}"
             "Pasta do Projeto": PROJ_DIR,
             "Executável go2rtc": GO2RTC_EXE,
             "Configuração go2rtc.yaml": os.path.join(PROJ_DIR, "go2rtc", "go2rtc.yaml"),
-            "Script de Gravação": RECORDER_SCRIPT,
-            "Script Gerenciador": os.path.join(PROJ_DIR, "gerenciador.pyw")
+            "Script Gerenciador (NVR)": os.path.join(PROJ_DIR, "gerenciador.pyw")
         }
         for name, path in files_to_check.items():
             exists = os.path.exists(path)
@@ -936,7 +1211,7 @@ WshShell.CurrentDirectory = "{PROJ_DIR}"
         go2rtc_running = self.check_process_go2rtc()
         log.append(f" - Processo go2rtc.exe: {'RODANDO' if go2rtc_running else 'PARADO'}")
         for stream in self.streams:
-            c_running = self.check_process_recorder(f"gravando_{stream}.lock")
+            c_running = self.check_process_recorder(f"gravando_{stream}.lock", stream)
             log.append(f" - Gravador Câmera {stream.upper()}: {'RODANDO' if c_running else 'PARADO'}")
 
         # 5. Portas Locais e API go2rtc
@@ -977,6 +1252,11 @@ WshShell.CurrentDirectory = "{PROJ_DIR}"
             self.root.after(0, lambda: messagebox.showerror("Erro Diagnóstico", f"Não foi possível salvar o arquivo:\n{str(e)}"))
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Gerenciador NVR Câmeras Farmácia")
+    parser.add_argument("--silent", action="store_true", help="Inicia o sistema de gravação em segundo plano sem abrir a janela")
+    args_cli = parser.parse_args()
+    
     try:
         from ctypes import windll
         windll.shcore.SetProcessDpiAwareness(1)
@@ -984,5 +1264,10 @@ if __name__ == "__main__":
         pass
         
     root = tk.Tk()
-    app = CameraManagerApp(root)
+    if args_cli.silent:
+        root.withdraw() # Esconde a janela principal!
+        app = CameraManagerApp(root, silent=True)
+    else:
+        app = CameraManagerApp(root, silent=False)
+        
     root.mainloop()
