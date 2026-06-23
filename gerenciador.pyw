@@ -13,11 +13,16 @@ import shutil
 from datetime import datetime, timedelta
 
 # Versão do Sistema (usada para o auto-update)
-VERSION = "3.6"
+VERSION = "3.7"
 
 # Configurações do Projeto
 PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
 GO2RTC_EXE = os.path.join(PROJ_DIR, "go2rtc", "go2rtc.exe")
+LOGS_DIR = os.path.join(PROJ_DIR, "logs")
+
+# Garante a existência das pastas do projeto
+os.makedirs(LOGS_DIR, exist_ok=True)
+os.makedirs(os.path.join(PROJ_DIR, "backup_gravacoes"), exist_ok=True)
 
 GDRIVE_ROOT = r"G:\Meu Drive\CAMERAS"
 
@@ -202,6 +207,15 @@ class CameraManagerApp:
         tk.Label(row_gdrive, text="Google Drive G: ", font=("Segoe UI", 9), fg=TEXT_COLOR, bg=CARD_COLOR).pack(side="left")
         self.lbl_val_gdrive = tk.Label(row_gdrive, text="Verificando...", font=("Segoe UI", 9, "bold"), fg=ORANGE_COLOR, bg=CARD_COLOR)
         self.lbl_val_gdrive.pack(side="left")
+        
+        # Linha Backups Locais Pendentes
+        row_backups = tk.Frame(self.card_global, bg=CARD_COLOR, pady=1)
+        row_backups.pack(anchor="w")
+        self.led_backups = StatusLED(row_backups, size=10, bg_color=CARD_COLOR)
+        self.led_backups.pack(side="left", padx=(0, 6), pady=4)
+        tk.Label(row_backups, text="Backups Pendentes: ", font=("Segoe UI", 9), fg=TEXT_COLOR, bg=CARD_COLOR).pack(side="left")
+        self.lbl_val_backups = tk.Label(row_backups, text="Calculando...", font=("Segoe UI", 9, "bold"), fg=ORANGE_COLOR, bg=CARD_COLOR)
+        self.lbl_val_backups.pack(side="left")
         
         # Card 2: Endereço IP
         self.card_network = tk.Frame(top_cards_frame, bg=CARD_COLOR, bd=1, relief="flat", padx=15, pady=8)
@@ -418,6 +432,9 @@ class CameraManagerApp:
             # 3. Coleta visualizadores ao vivo
             live_viewers = self.get_live_viewers(go2rtc_ok)
             
+            # 3.5. Coleta estatísticas de backups locais pendentes na pasta do projeto
+            backup_count, backup_size = self.get_backup_stats()
+            
             # 4. Verifica status de cada câmera individualmente
             cam_states = {}
             for idx, stream in enumerate(self.streams):
@@ -432,7 +449,7 @@ class CameraManagerApp:
                 # Checa por erro de duplicidade nos logs se o gravador estiver parado
                 duplicate_msg = None
                 if not c_grav_ok:
-                    duplicate_msg = self.check_log_for_duplicate_error(os.path.join(PROJ_DIR, log_file))
+                    duplicate_msg = self.check_log_for_duplicate_error(os.path.join(LOGS_DIR, log_file))
                     if duplicate_msg and stream not in self.alerted_duplicates:
                         self.alerted_duplicates[stream] = True
                         if not self.silent:
@@ -450,10 +467,26 @@ class CameraManagerApp:
             
             # Atualiza a interface (se não estiver em modo silencioso)
             if not self.silent:
-                self.root.after(0, self.update_ui_states, go2rtc_ok, gdrive_ok, live_viewers, cam_states)
+                self.root.after(0, self.update_ui_states, go2rtc_ok, gdrive_ok, live_viewers, cam_states, backup_count, backup_size)
             
             # Dorme por 3 segundos
             time.sleep(3)
+
+    def get_backup_stats(self):
+        backup_dir = os.path.join(PROJ_DIR, "backup_gravacoes")
+        if not os.path.exists(backup_dir):
+            return 0, 0
+        total_files = 0
+        total_size = 0
+        try:
+            for root_dir, _, files in os.walk(backup_dir):
+                for f in files:
+                    if f.endswith(".mp4"):
+                        total_files += 1
+                        total_size += os.path.getsize(os.path.join(root_dir, f))
+        except Exception:
+            pass
+        return total_files, total_size
 
     def check_process_go2rtc(self):
         try:
@@ -493,7 +526,7 @@ class CameraManagerApp:
         if self.recording_active.get(stream_name, False):
             return True
             
-        lock_path = os.path.join(PROJ_DIR, lock_filename)
+        lock_path = os.path.join(LOGS_DIR, lock_filename)
         if not os.path.exists(lock_path):
             return False
         try:
@@ -618,7 +651,7 @@ class CameraManagerApp:
         return viewers
 
     # ================= ATUALIZAÇÃO DA GUI =================
-    def update_ui_states(self, go2rtc_ok, gdrive_ok, live_viewers, cam_states):
+    def update_ui_states(self, go2rtc_ok, gdrive_ok, live_viewers, cam_states, backup_count, backup_size):
         with self.status_lock:
             if self.silent:
                 return
@@ -638,6 +671,15 @@ class CameraManagerApp:
             else:
                 self.lbl_val_gdrive.configure(text="DESCONECTADO", fg=RED_COLOR)
                 self.led_gdrive.set_status(RED_COLOR, "#991B1B")
+                
+            # 2.5. Backups pendentes status
+            if backup_count == 0:
+                self.lbl_val_backups.configure(text="NENHUM", fg=GREEN_COLOR)
+                self.led_backups.set_status(GREEN_COLOR, "#065F46")
+            else:
+                size_mb = backup_size / (1024 * 1024)
+                self.lbl_val_backups.configure(text=f"{backup_count} vídeo(s) ({size_mb:.1f} MB)", fg=ORANGE_COLOR)
+                self.led_backups.set_status(ORANGE_COLOR, "#78350F")
                 
             # 3. Atualiza os visualizadores ao vivo
             if live_viewers:
@@ -738,8 +780,8 @@ class CameraManagerApp:
         lock_file = f"gravando_{stream_name}.lock"
         log_file = f"{stream_name}_erros.log"
         
-        lock_path = os.path.join(PROJ_DIR, lock_file)
-        log_path = os.path.join(PROJ_DIR, log_file)
+        lock_path = os.path.join(LOGS_DIR, lock_file)
+        log_path = os.path.join(LOGS_DIR, log_file)
         
         # Cria a trava local
         try:
@@ -987,7 +1029,7 @@ class CameraManagerApp:
         # 2. Lê os PIDs dos arquivos de lock e depois os remove
         pids = {}
         for stream in self.streams:
-            lock_file = os.path.join(PROJ_DIR, f"gravando_{stream}.lock")
+            lock_file = os.path.join(LOGS_DIR, f"gravando_{stream}.lock")
             if os.path.exists(lock_file):
                 try:
                     with open(lock_file, "r") as f:
