@@ -13,7 +13,7 @@ import shutil
 from datetime import datetime, timedelta
 
 # Versão do Sistema (usada para o auto-update)
-VERSION = "3.8.2"
+VERSION = "3.8.3"
 
 # Configurações do Projeto
 PROJ_DIR = os.path.dirname(os.path.abspath(__file__))

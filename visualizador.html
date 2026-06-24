@@ -455,7 +455,7 @@
             <span>Servidor ativo em:</span>
             <span class="indicator-pill" id="ip-display">127.0.0.1</span>
         </div>
-        <div>v3.8.2 Dashboard de Segurança Profissional</div>
+        <div>v3.8.3 Dashboard de Segurança Profissional</div>
     </footer>
 
     <script>
@@ -583,7 +583,7 @@
             card.className = "camera-card";
             card.id = `card-${streamName}`;
             
-            const webrtcUrl = `http://${currentIP}:1984/webrtc.html?src=${streamName}`;
+            const webrtcUrl = `http://${currentIP}:1984/video.html?src=${streamName}`;
             
             card.innerHTML = `
                 <div class="camera-titlebar">
