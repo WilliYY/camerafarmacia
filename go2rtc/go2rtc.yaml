@@ -2,6 +2,9 @@ api:
   listen: ":1984"
   static_dir: ".."
 
+ffmpeg:
+  bin: "C:\\Users\\Thiesen\\Desktop\\CAMERA~1\\go2rtc\\ffmpeg.exe"
+
 streams:
   # Câmeras originais (H.265 bruto - Usadas para as gravações em 0% CPU)
   farmacia: "tuya://protect-us.ismartlife.me?device_id=eb227d7fd83d2a794c4gvc&email=willian13258%40gmail.com&password=biscoito123"
@@ -10,3 +13,8 @@ streams:
   # Câmeras para Visualização Web (Transcodificadas sob demanda para H.264)
   farmacia_live: "ffmpeg:farmacia#video=h264"
   farmacia2_live: "ffmpeg:farmacia2#video=h264"
+
+  # Câmeras para Stream MJPEG (Transcodificadas sob demanda para MJPEG)
+  farmacia_mjpeg: "ffmpeg:farmacia#video=mjpeg"
+  farmacia2_mjpeg: "ffmpeg:farmacia2#video=mjpeg"
+

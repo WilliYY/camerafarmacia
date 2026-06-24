@@ -244,7 +244,7 @@ class LiveCameraWidget(tk.Frame):
 
     def stream_loop(self):
         """Loop principal de exibição via MJPEG stream (conexão persistente, ~15 FPS)"""
-        mjpeg_url = f"http://127.0.0.1:1984/api/stream.mjpeg?src={self.stream_name}"
+        mjpeg_url = f"http://127.0.0.1:1984/api/stream.mjpeg?src={self.stream_name}_mjpeg"
         time.sleep(0.3)
         
         while self.running:
@@ -307,7 +307,7 @@ class LiveCameraWidget(tk.Frame):
         fs_response = [None]
         
         def fs_loop():
-            mjpeg_url = f"http://127.0.0.1:1984/api/stream.mjpeg?src={self.stream_name}"
+            mjpeg_url = f"http://127.0.0.1:1984/api/stream.mjpeg?src={self.stream_name}_mjpeg"
             while fs_running[0]:
                 try:
                     req = urllib.request.Request(mjpeg_url)
