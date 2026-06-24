@@ -13,7 +13,7 @@ import shutil
 from datetime import datetime, timedelta
 
 # Versão do Sistema (usada para o auto-update)
-VERSION = "3.8"
+VERSION = "3.8.2"
 
 # Configurações do Projeto
 PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1114,13 +1114,9 @@ class CameraManagerApp:
             messagebox.showerror("Erro de Acesso", "Não foi possível abrir o Google Drive. Verifique se ele está rodando.")
 
     def click_monitor(self):
-        html_path = os.path.join(PROJ_DIR, "visualizador.html")
-        if os.path.exists(html_path):
-            self.add_log("Abrindo Monitor no navegador...")
-            os.startfile(html_path)
-        else:
-            self.add_log("ERRO: visualizador.html não encontrado!")
-            messagebox.showerror("Erro de Acesso", "O arquivo visualizador.html não foi encontrado na pasta do projeto.")
+        self.add_log("Abrindo Monitor no navegador...")
+        import webbrowser
+        webbrowser.open("http://127.0.0.1:1984/visualizador.html")
 
     def click_configurar_inicializacao(self):
         try:

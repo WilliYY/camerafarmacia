@@ -1,3 +1,7 @@
+api:
+  listen: ":1984"
+  static_dir: ".."
+
 streams:
   farmacia: "tuya://protect-us.ismartlife.me?device_id=eb227d7fd83d2a794c4gvc&email=willian13258%40gmail.com&password=biscoito123"
   farmacia2: "tuya://protect-us.ismartlife.me?device_id=ebb17fa4c624a5e72ec6gk&email=willian13258%40gmail.com&password=biscoito123"

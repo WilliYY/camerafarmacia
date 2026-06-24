@@ -455,12 +455,12 @@
             <span>Servidor ativo em:</span>
             <span class="indicator-pill" id="ip-display">127.0.0.1</span>
         </div>
-        <div>v3.8 Dashboard de Segurança Profissional</div>
+        <div>v3.8.2 Dashboard de Segurança Profissional</div>
     </footer>
 
     <script>
-        // Carrega IP do servidor do localStorage ou assume 127.0.0.1
-        let currentIP = localStorage.getItem("camera_server_ip") || "127.0.0.1";
+        // Carrega IP do servidor do localStorage ou assume o host atual
+        let currentIP = localStorage.getItem("camera_server_ip") || window.location.hostname || "127.0.0.1";
         let currentLayout = localStorage.getItem("camera_layout_mode") || "auto";
 
         const cameraGrid = document.getElementById("camera-grid");
