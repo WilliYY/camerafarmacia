@@ -272,6 +272,10 @@ class CameraManagerApp:
         self.root = root
         self.silent = silent
         
+        # Variáveis de Controle de Threads
+        self.running_monitor = True
+        self.running_sync = True
+        
         # Variáveis de Gravação em Memória (NVR Integrado)
         self.recording_active = {}
         self.status_lock = threading.Lock()
