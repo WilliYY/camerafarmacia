@@ -419,7 +419,7 @@
         
         <div class="input-group">
             <label for="ip-input">IP do Servidor go2rtc</label>
-            <input type="text" id="ip-input" placeholder="Ex: 192.168.7.12 ou localhost">
+            <input type="text" id="ip-input" placeholder="Ex: 192.168.7.12 ou 127.0.0.1">
         </div>
 
         <div class="input-group">
@@ -433,7 +433,7 @@
         </div>
 
         <button class="primary" style="margin-top: 15px; width: 100%; justify-content: center;" onclick="saveIP()">Salvar e Aplicar</button>
-        <button style="width: 100%; justify-content: center;" onclick="resetIP()">Usar Localhost</button>
+        <button style="width: 100%; justify-content: center;" onclick="resetIP()">Usar IP Local (127.0.0.1)</button>
     </div>
 
     <!-- Container Principal das Câmeras -->
@@ -453,14 +453,14 @@
     <footer>
         <div class="footer-left">
             <span>Servidor ativo em:</span>
-            <span class="indicator-pill" id="ip-display">localhost</span>
+            <span class="indicator-pill" id="ip-display">127.0.0.1</span>
         </div>
         <div>v3.8 Dashboard de Segurança Profissional</div>
     </footer>
 
     <script>
-        // Carrega IP do servidor do localStorage ou assume localhost
-        let currentIP = localStorage.getItem("camera_server_ip") || "localhost";
+        // Carrega IP do servidor do localStorage ou assume 127.0.0.1
+        let currentIP = localStorage.getItem("camera_server_ip") || "127.0.0.1";
         let currentLayout = localStorage.getItem("camera_layout_mode") || "auto";
 
         const cameraGrid = document.getElementById("camera-grid");
@@ -484,6 +484,10 @@
 
         // Inicializa a interface
         function init() {
+            if (currentIP === "localhost") {
+                currentIP = "127.0.0.1";
+                localStorage.setItem("camera_server_ip", "127.0.0.1");
+            }
             ipInput.value = currentIP;
             ipDisplay.textContent = currentIP;
             layoutSelect.value = currentLayout;
@@ -514,7 +518,7 @@
         // Salva as configurações de IP
         function saveIP() {
             let ipValue = ipInput.value.trim();
-            if (ipValue === "") ipValue = "localhost";
+            if (ipValue === "") ipValue = "127.0.0.1";
             
             // Remove protocolos desnecessários se colados pelo usuário
             ipValue = ipValue.replace(/^(http:\/\/|https:\/\/)/, "").split(":")[0];
@@ -527,9 +531,9 @@
             loadActiveStreams();
         }
 
-        // Reseta o IP para localhost
+        // Reseta o IP para 127.0.0.1
         function resetIP() {
-            ipInput.value = "localhost";
+            ipInput.value = "127.0.0.1";
             saveIP();
         }
 
