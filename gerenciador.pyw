@@ -13,7 +13,7 @@ import shutil
 from datetime import datetime, timedelta
 
 # Versão do Sistema (usada para o auto-update)
-VERSION = "4.0"
+VERSION = "4.1"
 
 # Configurações do Projeto
 PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -25,7 +25,36 @@ os.makedirs(LOGS_DIR, exist_ok=True)
 os.makedirs(os.path.join(PROJ_DIR, "backup_gravacoes"), exist_ok=True)
 os.makedirs(os.path.join(PROJ_DIR, "gravando_temp"), exist_ok=True)
 
-GDRIVE_ROOT = r"G:\Meu Drive\CAMERAS"
+# Arquivo de configuração local
+CONFIG_PATH = os.path.join(PROJ_DIR, "config.json")
+
+def carregar_config():
+    padrao = {"gdrive_root": r"G:\Meu Drive\CAMERAS"}
+    if not os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(padrao, f, indent=4)
+        except Exception:
+            pass
+        return padrao
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            config = json.load(f)
+            if "gdrive_root" not in config:
+                config["gdrive_root"] = padrao["gdrive_root"]
+            return config
+    except Exception:
+        return padrao
+
+def salvar_config(config):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=4)
+    except Exception:
+        pass
+
+CONFIG = carregar_config()
+GDRIVE_ROOT = CONFIG.get("gdrive_root", r"G:\Meu Drive\CAMERAS")
 
 # Cores do Tema Escuro Premium
 BG_COLOR = "#0D0E12"       # Fundo principal cinza escuro azulado
@@ -63,16 +92,30 @@ class CameraManagerApp:
         # 1. Configura título e layout se não estiver em modo silencioso
         if not self.silent:
             self.root.title(f"Controle das Câmeras - Farmácia (NVR Unificado v{VERSION})")
-            self.root.geometry("680x700")
+            self.root.geometry("680x740")
             self.root.configure(bg=BG_COLOR)
             self.root.resizable(False, False)
             
             self.setup_styles()
             self.create_widgets()
             
+            # Intercepta o fechamento no X do Tkinter para desligar de forma segura
+            self.root.protocol("WM_DELETE_WINDOW", self.on_close_window)
+            
             # Thread de verificação de atualizações no GitHub
             threading.Thread(target=self.check_for_updates_thread, daemon=True).start()
             
+        # Sinais do sistema para encerramento limpo (SIGINT, SIGTERM)
+        import signal
+        try:
+            signal.signal(signal.SIGINT, self.handle_exit_signal)
+            signal.signal(signal.SIGTERM, self.handle_exit_signal)
+        except Exception:
+            pass
+
+        # Auto-provisionamento de rede e recuperação de órfãos
+        self.auto_provision_system()
+
         # 2. Inicia a thread de monitoramento em tempo real
         self.running_monitor = True
         self.monitor_thread = threading.Thread(target=self.monitor_loop, daemon=True)
@@ -416,6 +459,49 @@ class CameraManagerApp:
             command=self.click_configurar_inicializacao
         )
         self.btn_setup_startup.pack(fill="x", padx=4, pady=2)
+
+        # 4.5. CONFIGURAÇÕES DE CAMINHO E INTEGRIDADE
+        config_frame = tk.Frame(self.root, bg=BG_COLOR, pady=2)
+        config_frame.pack(fill="x", padx=20, pady=2)
+        
+        path_label = tk.Label(config_frame, text="Pasta Drive/Rede:", font=("Segoe UI", 9, "bold"), fg=TEXT_MUTED, bg=BG_COLOR)
+        path_label.pack(side="left", padx=4)
+        
+        self.entry_path = tk.Entry(config_frame, bg="#161822", fg=TEXT_COLOR, font=("Segoe UI", 9), bd=1, relief="solid", width=36)
+        self.entry_path.insert(0, GDRIVE_ROOT)
+        self.entry_path.pack(side="left", padx=4)
+        
+        btn_save_path = tk.Button(
+            config_frame,
+            text="Salvar",
+            font=("Segoe UI", 8, "bold"),
+            fg=TEXT_COLOR,
+            bg="#3B82F6",
+            activebackground="#2563EB",
+            activeforeground=TEXT_COLOR,
+            bd=0,
+            cursor="hand2",
+            padx=8,
+            pady=2,
+            command=self.click_salvar_caminho
+        )
+        btn_save_path.pack(side="left", padx=4)
+        
+        btn_scan = tk.Button(
+            config_frame,
+            text="🔍 Escanear Corrompidos",
+            font=("Segoe UI", 8, "bold"),
+            fg=TEXT_COLOR,
+            bg="#1F2937",
+            activebackground="#374151",
+            activeforeground=TEXT_COLOR,
+            bd=0,
+            cursor="hand2",
+            padx=8,
+            pady=2,
+            command=self.click_escanear_corrompidos
+        )
+        btn_scan.pack(side="right", padx=4)
 
         # 5. LOG DE EVENTOS (CONSOLE)
         log_title_frame = tk.Frame(self.root, bg=BG_COLOR)
@@ -1220,6 +1306,192 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             self.add_log(f"ERRO ao configurar inicialização: {str(e)}")
             messagebox.showerror("Erro de Configuração", f"Não foi possível salvar o arquivo de inicialização:\n{str(e)}")
 
+    def click_salvar_caminho(self):
+        global GDRIVE_ROOT
+        novo_caminho = self.entry_path.get().strip()
+        if not novo_caminho:
+            messagebox.showerror("Erro", "O caminho do Drive/Rede não pode ser vazio.")
+            return
+            
+        GDRIVE_ROOT = novo_caminho
+        CONFIG["gdrive_root"] = GDRIVE_ROOT
+        salvar_config(CONFIG)
+        
+        self.add_log(f"Caminho do Google Drive/Rede atualizado para: {GDRIVE_ROOT}")
+        messagebox.showinfo("Caminho Salvo", f"O caminho foi atualizado com sucesso para:\n{GDRIVE_ROOT}")
+
+    def click_escanear_corrompidos(self):
+        threading.Thread(target=self.escanear_videos_corrompidos_thread, daemon=True).start()
+
+    def escanear_videos_corrompidos_thread(self):
+        if not self.silent:
+            self.add_log("Iniciando escaneamento de arquivos corrompidos...")
+            
+        ffmpeg_bin = os.path.join(PROJ_DIR, "go2rtc", "ffmpeg.exe")
+        if not os.path.exists(ffmpeg_bin):
+            if not self.silent:
+                self.add_log("ERRO: ffmpeg.exe não encontrado para escanear.")
+            return
+            
+        dirs_to_scan = []
+        for idx, stream in enumerate(self.streams):
+            dirs_to_scan.append((stream, os.path.join(PROJ_DIR, "backup_gravacoes", stream)))
+            if os.path.exists(GDRIVE_ROOT):
+                dirs_to_scan.append((stream, self.get_gdrive_dir(stream, idx)))
+                 
+        corrupted_count = 0
+        scanned_count = 0
+        
+        for stream_name, directory in dirs_to_scan:
+            if not os.path.exists(directory):
+                continue
+             
+            corrompidos_dir = os.path.join(directory, ".corrompidos")
+             
+            try:
+                files = [f for f in os.listdir(directory) if f.endswith(".mp4")]
+                for filename in files:
+                    filepath = os.path.join(directory, filename)
+                    scanned_count += 1
+                     
+                    is_corrupt = False
+                     
+                    if os.path.getsize(filepath) == 0:
+                        is_corrupt = True
+                    else:
+                        try:
+                            # Executa verificação rápida no ffmpeg
+                            cmd = f'"{ffmpeg_bin}" -v error -i "{filepath}" -t 1 -f null -'
+                            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
+                            if res.returncode != 0:
+                                is_corrupt = True
+                        except subprocess.TimeoutExpired:
+                            is_corrupt = True
+                        except Exception:
+                            is_corrupt = True
+                             
+                    if is_corrupt:
+                        corrupted_count += 1
+                        os.makedirs(corrompidos_dir, exist_ok=True)
+                        dest_file = os.path.join(corrompidos_dir, filename)
+                        try:
+                            shutil.move(filepath, dest_file)
+                            if not self.silent:
+                                self.add_log(f"Arquivo corrompido isolado: {filename}")
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+                 
+        if not self.silent:
+            self.add_log(f"Escaneamento concluído. {scanned_count} arquivos analisados, {corrupted_count} corrompidos isolados.")
+            messagebox.showinfo("Scanner de Integridade", f"Varredura concluída!\n\nArquivos escaneados: {scanned_count}\nArquivos corrompidos detectados: {corrupted_count}\n\nOs arquivos corrompidos foram isolados na pasta '.corrompidos' de cada diretório.")
+
+    def on_close_window(self):
+        if not self.silent:
+            self.add_log("Fechando aplicativo... Finalizando gravações de forma segura...")
+            self.root.update_idletasks()
+        threading.Thread(target=self.graceful_shutdown, daemon=False).start()
+
+    def handle_exit_signal(self, signum, frame):
+        self.graceful_shutdown()
+
+    def graceful_shutdown(self):
+        self.run_stop_sequence()
+        time.sleep(1.0)
+        if not self.silent:
+            try:
+                self.root.destroy()
+            except Exception:
+                pass
+        sys.exit(0)
+
+    def auto_provision_system(self):
+        self.recuperar_videos_orfaos()
+        threading.Thread(target=self.verificar_e_aplicar_firewall, daemon=True).start()
+
+    def recuperar_videos_orfaos(self):
+        temp_root = os.path.join(PROJ_DIR, "gravando_temp")
+        if not os.path.exists(temp_root):
+            return
+        try:
+            for stream in self.streams:
+                stream_temp_dir = os.path.join(temp_root, stream)
+                if not os.path.exists(stream_temp_dir):
+                    continue
+                files = [f for f in os.listdir(stream_temp_dir) if f.endswith(".mp4")]
+                if not files:
+                    continue
+                
+                dest_dir = os.path.join(PROJ_DIR, "backup_gravacoes", stream)
+                os.makedirs(dest_dir, exist_ok=True)
+                
+                for filename in files:
+                    temp_file = os.path.join(stream_temp_dir, filename)
+                    if os.path.exists(temp_file):
+                        if os.path.getsize(temp_file) > 0:
+                            nome_novo = filename.replace("temp_camera_", "recuperado_camera_")
+                            dest_file = os.path.join(dest_dir, nome_novo)
+                            try:
+                                shutil.move(temp_file, dest_file)
+                                if not self.silent:
+                                    self.add_log(f"Arquivo orfao recuperado da queda de energia: {nome_novo}")
+                            except Exception:
+                                pass
+                        else:
+                            try:
+                                os.remove(temp_file)
+                            except Exception:
+                                pass
+        except Exception:
+            pass
+
+    def verificar_e_aplicar_firewall(self):
+        marker_file = os.path.join(LOGS_DIR, ".firewall_configured")
+        if os.path.exists(marker_file):
+            return
+            
+        try:
+            res = subprocess.run(
+                'netsh advfirewall firewall show rule name="Camera Farmacia - API (1984)"',
+                shell=True, capture_output=True, text=True
+            )
+            if "api (1984)" in res.stdout.lower() or "câmera farmácia" in res.stdout.lower() or res.returncode == 0:
+                with open(marker_file, "w") as f:
+                    f.write("ok")
+                return
+        except Exception:
+            pass
+            
+        if not self.silent:
+            self.add_log("Configurando regras de Firewall do Windows (Solicitando permissão Admin)...")
+            
+        try:
+            ps_cmd = (
+                "New-NetFirewallRule -DisplayName 'Camera Farmacia - API (1984)' -Direction Inbound -LocalPort 1984 -Protocol TCP -Action Allow -ErrorAction SilentlyContinue; "
+                "New-NetFirewallRule -DisplayName 'Camera Farmacia - RTSP (8554)' -Direction Inbound -LocalPort 8554 -Protocol TCP -Action Allow -ErrorAction SilentlyContinue; "
+                "New-NetFirewallRule -DisplayName 'Camera Farmacia - WebRTC (8555)' -Direction Inbound -LocalPort 8555 -Protocol UDP -Action Allow -ErrorAction SilentlyContinue; "
+                "New-NetFirewallRule -DisplayName 'Camera Farmacia - WebRTC TCP (8555)' -Direction Inbound -LocalPort 8555 -Protocol TCP -Action Allow -ErrorAction SilentlyContinue"
+            )
+            
+            ctypes.windll.shell32.ShellExecuteW(
+                None, 
+                "runas", 
+                "powershell.exe", 
+                f"-NoProfile -WindowStyle Hidden -Command \"{ps_cmd}\"", 
+                None, 
+                0
+            )
+            
+            with open(marker_file, "w") as f:
+                f.write("ok")
+                
+            if not self.silent:
+                self.add_log("Regras de Firewall configuradas com sucesso!")
+        except Exception as e:
+            if not self.silent:
+                self.add_log(f"Falha ao configurar Firewall: {str(e)}")
+
     # ================= SISTEMA DE ATUALIZAÇÃO AUTOMÁTICA =================
     def check_for_updates_thread(self):
         time.sleep(5)
@@ -1246,6 +1518,12 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
                 self.add_log("Nao foi possivel identificar a versao remota.")
         except Exception as e:
             self.add_log(f"Erro ao buscar atualizacoes: {str(e)}")
+
+        # Agenda nova verificação automática para daqui a 1 hora
+        self.root.after(3600000, self.trigger_periodic_update)
+
+    def trigger_periodic_update(self):
+        threading.Thread(target=self.check_for_updates_thread, daemon=True).start()
             
     def prompt_update(self, online_version, url_gerenciador, url_visualizador):
         msg = f"Uma nova versao (v{online_version}) esta disponivel no GitHub!\n\nSua versao local e v{VERSION}.\n\nDeseja atualizar o sistema automaticamente agora?"

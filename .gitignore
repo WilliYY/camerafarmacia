@@ -5,6 +5,7 @@ diagnostico.txt
 *.lock
 gravando_temp/
 go2rtc/ffmpeg.exe
+config.json
 
 # Cache do Python
 __pycache__/
