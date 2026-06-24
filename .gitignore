@@ -6,6 +6,7 @@ diagnostico.txt
 gravando_temp/
 go2rtc/ffmpeg.exe
 config.json
+.firewall_configured
 
 # Cache do Python
 __pycache__/
