@@ -100,7 +100,7 @@ class LiveCameraWidget(tk.Frame):
         # Botão de cabeçalho para expandir/recolher
         self.header_btn = tk.Button(
             self,
-            text=f" ▶️ VER TRANSMISSÃO: {stream_name.upper()}",
+            text=f" ▶️ CÂMERA: {stream_name.upper()}",
             font=("Segoe UI", 9, "bold"),
             fg=TEXT_COLOR,
             bg="#1F2937",
@@ -150,14 +150,14 @@ class LiveCameraWidget(tk.Frame):
 
     def expand(self):
         self.expanded = True
-        self.header_btn.configure(text=f" ▼️ RECOLHER TRANSMISSÃO: {self.stream_name.upper()}", bg="#111827")
+        self.header_btn.configure(text=f" ▼️ RECOLHER: {self.stream_name.upper()}", bg="#111827")
         self.body_frame.pack(fill="x", expand=True)
         self.start_stream()
         self.app.adjust_window_size()
 
     def collapse(self):
         self.expanded = False
-        self.header_btn.configure(text=f" ▶️ VER TRANSMISSÃO: {self.stream_name.upper()}", bg="#1F2937")
+        self.header_btn.configure(text=f" ▶️ CÂMERA: {self.stream_name.upper()}", bg="#1F2937")
         self.stop_stream()
         self.body_frame.pack_forget()
         self.app.adjust_window_size()
@@ -184,7 +184,7 @@ class LiveCameraWidget(tk.Frame):
                 
             try:
                 req = urllib.request.Request(url)
-                with urllib.request.urlopen(req, timeout=2.0) as response:
+                with urllib.request.urlopen(req, timeout=6.0) as response:
                     img_data = response.read()
                     
                 if not img_data:
@@ -234,7 +234,7 @@ class LiveCameraWidget(tk.Frame):
                         h = fs_win.winfo_screenheight()
                         
                     req = urllib.request.Request(url)
-                    with urllib.request.urlopen(req, timeout=2.0) as response:
+                    with urllib.request.urlopen(req, timeout=6.0) as response:
                         img_data = response.read()
                         
                     if img_data and fs_running[0]:
@@ -554,14 +554,14 @@ class CameraManagerApp:
                 col = 0
                 row += 1
 
-        # 3.5. CONTAINERS DAS CÂMERAS AO VIVO (Tkinter Canvas/Label)
+        # 3.5. CONTAINERS DAS CÂMERAS AO VIVO (Tkinter Canvas/Label) - Lado a Lado
         self.live_cams_container = tk.Frame(self.root, bg=BG_COLOR)
         self.live_cams_container.pack(fill="x", padx=20, pady=4)
         
         self.camera_widgets = {}
         for stream in self.streams:
             cam_widget = LiveCameraWidget(self.live_cams_container, stream, self)
-            cam_widget.pack(fill="x", pady=4)
+            cam_widget.pack(side="left", fill="both", expand=True, padx=4)
             self.camera_widgets[stream] = cam_widget
 
         # 4. CONTROLES / BOTÕES
@@ -1742,11 +1742,17 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         # Altura base do gerenciador com todas as câmeras recolhidas
         height = 820
         
-        # Soma altura extra para cada câmera expandida (~210px por widget)
+        # Como as câmeras agora são exibidas lado a lado, se pelo menos uma
+        # estiver expandida, adicionamos a altura de um único vídeo (~220px)
+        any_expanded = False
         if hasattr(self, "camera_widgets"):
             for cam_widget in self.camera_widgets.values():
                 if cam_widget.expanded:
-                    height += 210
+                    any_expanded = True
+                    break
+                    
+        if any_expanded:
+            height += 220
                     
         self.root.geometry(f"680x{height}")
 
