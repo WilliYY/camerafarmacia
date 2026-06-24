@@ -13,7 +13,7 @@ import shutil
 from datetime import datetime, timedelta
 
 # Versão do Sistema (usada para o auto-update)
-VERSION = "4.1"
+VERSION = "4.2"
 
 # Configurações do Projeto
 PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1372,20 +1372,19 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
                              
                     if is_corrupt:
                         corrupted_count += 1
-                        os.makedirs(corrompidos_dir, exist_ok=True)
-                        dest_file = os.path.join(corrompidos_dir, filename)
                         try:
-                            shutil.move(filepath, dest_file)
+                            os.remove(filepath)
                             if not self.silent:
-                                self.add_log(f"Arquivo corrompido isolado: {filename}")
-                        except Exception:
-                            pass
+                                self.add_log(f"[EXCLUÍDO] Arquivo corrompido deletado: {filename}")
+                        except Exception as e_del:
+                            if not self.silent:
+                                self.add_log(f"Erro ao deletar {filename}: {str(e_del)}")
             except Exception:
                 pass
                  
         if not self.silent:
-            self.add_log(f"Escaneamento concluído. {scanned_count} arquivos analisados, {corrupted_count} corrompidos isolados.")
-            messagebox.showinfo("Scanner de Integridade", f"Varredura concluída!\n\nArquivos escaneados: {scanned_count}\nArquivos corrompidos detectados: {corrupted_count}\n\nOs arquivos corrompidos foram isolados na pasta '.corrompidos' de cada diretório.")
+            self.add_log(f"Escaneamento concluído. {scanned_count} arquivos analisados, {corrupted_count} corrompidos excluídos.")
+            messagebox.showinfo("Scanner de Integridade", f"Varredura concluída!\n\nArquivos escaneados: {scanned_count}\nArquivos corrompidos deletados: {corrupted_count}\n\nOs arquivos corrompidos foram excluídos permanentemente para poupar espaço e limpar diretórios.")
 
     def on_close_window(self):
         if not self.silent:
