@@ -432,6 +432,17 @@
             </select>
         </div>
 
+        <div class="input-group">
+            <label for="mode-select">Modo de Transmissão (Player)</label>
+            <select id="mode-select" onchange="changeMode()">
+                <option value="auto">Automático (Padrão)</option>
+                <option value="mse">MSE (H.265 / Melhor Sincronia)</option>
+                <option value="webrtc">WebRTC (Ultra Baixa Latência)</option>
+                <option value="hls">HLS (Modo Compatibilidade)</option>
+                <option value="mjpeg">MJPEG (Imagens Estáticas)</option>
+            </select>
+        </div>
+
         <button class="primary" style="margin-top: 15px; width: 100%; justify-content: center;" onclick="saveIP()">Salvar e Aplicar</button>
         <button style="width: 100%; justify-content: center;" onclick="resetIP()">Usar IP Local (127.0.0.1)</button>
     </div>
@@ -455,13 +466,14 @@
             <span>Servidor ativo em:</span>
             <span class="indicator-pill" id="ip-display">127.0.0.1</span>
         </div>
-        <div>v3.8.3 Dashboard de Segurança Profissional</div>
+        <div>v3.8.4 Dashboard de Segurança Profissional</div>
     </footer>
 
     <script>
         // Carrega IP do servidor do localStorage ou assume o host atual
         let currentIP = localStorage.getItem("camera_server_ip") || window.location.hostname || "127.0.0.1";
         let currentLayout = localStorage.getItem("camera_layout_mode") || "auto";
+        let currentMode = localStorage.getItem("camera_player_mode") || "auto";
 
         const cameraGrid = document.getElementById("camera-grid");
         const emptyState = document.getElementById("empty-state");
@@ -491,6 +503,7 @@
             ipInput.value = currentIP;
             ipDisplay.textContent = currentIP;
             layoutSelect.value = currentLayout;
+            document.getElementById("mode-select").value = currentMode;
             applyLayoutClass(currentLayout);
             loadActiveStreams();
         }
@@ -506,6 +519,14 @@
             localStorage.setItem("camera_layout_mode", mode);
             currentLayout = mode;
             applyLayoutClass(mode);
+        }
+
+        // Altera o modo do player de vídeo manualmente
+        function changeMode() {
+            const mode = document.getElementById("mode-select").value;
+            localStorage.setItem("camera_player_mode", mode);
+            currentMode = mode;
+            loadActiveStreams();
         }
 
         function applyLayoutClass(mode) {
@@ -583,7 +604,10 @@
             card.className = "camera-card";
             card.id = `card-${streamName}`;
             
-            const webrtcUrl = `http://${currentIP}:1984/video.html?src=${streamName}`;
+            let webrtcUrl = `http://${currentIP}:1984/video.html?src=${streamName}&media=video`;
+            if (currentMode !== "auto") {
+                webrtcUrl += `&mode=${currentMode}`;
+            }
             
             card.innerHTML = `
                 <div class="camera-titlebar">
