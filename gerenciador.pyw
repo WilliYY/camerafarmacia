@@ -15,7 +15,7 @@ import io
 from PIL import Image, ImageTk
 
 # Versão do Sistema (usada para o auto-update)
-VERSION = "4.6"
+VERSION = "4.7"
 
 # Configurações do Projeto
 PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -192,7 +192,7 @@ class LiveCameraWidget(tk.Frame):
                     
                 image = Image.open(io.BytesIO(img_data))
                 # Preview menor de 320x180 para caber perfeitamente no layout do painel
-                image = image.resize((320, 180), Image.Resampling.LANCZOS)
+                image = image.resize((320, 180), Image.Resampling.BILINEAR)
                 
                 if self.running:
                     self.update_image(image)
@@ -249,7 +249,7 @@ class LiveCameraWidget(tk.Frame):
                             new_w = w
                             new_h = int(w / img_aspect)
                             
-                        image = image.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                        image = image.resize((new_w, new_h), Image.Resampling.BILINEAR)
                         photo = ImageTk.PhotoImage(image)
                         fs_lbl.photo = photo
                         fs_win.after(0, lambda p=photo: fs_lbl.configure(image=p))
@@ -287,10 +287,10 @@ class CameraManagerApp:
         
         # 1. Configura título e layout se não estiver em modo silencioso
         if not self.silent:
-            self.root.title(f"Controle das Câmeras - Farmácia (NVR Unificado v{VERSION})")
-            self.root.geometry("680x760")
+            self.root.title(f"Painel Câmeras - Farmácia (NVR Unificado v{VERSION})")
+            self.root.geometry("760x700")
             self.root.configure(bg=BG_COLOR)
-            self.root.resizable(False, True) # Permite redimensionar verticalmente para as câmeras
+            self.root.resizable(False, False)
             
             self.setup_styles()
             self.create_widgets()
@@ -390,13 +390,23 @@ class CameraManagerApp:
         style.configure("TLabel", background=BG_COLOR, foreground=TEXT_COLOR, font=("Segoe UI", 10))
 
     def create_widgets(self):
-        # 1. HEADER / CABEÇALHO
-        header_frame = tk.Frame(self.root, bg=BG_COLOR, pady=10)
-        header_frame.pack(fill="x", padx=20)
+        # Container principal dividido em duas colunas (Esquerda e Direita)
+        split_container = tk.Frame(self.root, bg=BG_COLOR)
+        split_container.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        left_col = tk.Frame(split_container, bg=BG_COLOR, width=360)
+        left_col.pack(side="left", fill="both", expand=True)
+        
+        right_col = tk.Frame(split_container, bg=BG_COLOR, width=360)
+        right_col.pack(side="right", fill="both", expand=True)
+
+        # 1. HEADER / CABEÇALHO (na coluna da esquerda)
+        header_frame = tk.Frame(left_col, bg=BG_COLOR, pady=5)
+        header_frame.pack(fill="x", padx=10)
         
         title_label = tk.Label(
             header_frame, 
-            text=" 🎥 NVR Câmeras Farmácia", 
+            text=" 🎥 Painel Câmeras Farmácia", 
             font=("Segoe UI", 16, "bold"), 
             fg=TEXT_COLOR, 
             bg=BG_COLOR
@@ -413,12 +423,12 @@ class CameraManagerApp:
         subtitle_label.pack(side="left", padx=10, pady=6)
         
         # Divisor horizontal elegante
-        separator = tk.Frame(self.root, height=1, bg="#1F2937")
-        separator.pack(fill="x", padx=20)
+        separator = tk.Frame(left_col, height=1, bg="#1F2937")
+        separator.pack(fill="x", padx=10)
 
         # 2. CARDS GLOBAIS (SERVIÇOS E REDE)
-        top_cards_frame = tk.Frame(self.root, bg=BG_COLOR, pady=6)
-        top_cards_frame.pack(fill="x", padx=20)
+        top_cards_frame = tk.Frame(left_col, bg=BG_COLOR, pady=4)
+        top_cards_frame.pack(fill="x", padx=10)
         
         # Card 1: Serviços Globais
         self.card_global = tk.Frame(top_cards_frame, bg=CARD_COLOR, bd=1, relief="flat", padx=15, pady=8)
@@ -453,8 +463,8 @@ class CameraManagerApp:
         self.lbl_val_backups.pack(side="left")
 
         # 3. GRID DINÂMICO DE CÂMERAS
-        self.cameras_main_frame = tk.Frame(self.root, bg=BG_COLOR)
-        self.cameras_main_frame.pack(fill="both", expand=True, padx=20, pady=4)
+        self.cameras_main_frame = tk.Frame(left_col, bg=BG_COLOR)
+        self.cameras_main_frame.pack(fill="x", padx=10, pady=4)
         
         self.cameras_main_frame.columnconfigure(0, weight=1, uniform="cam_grid")
         self.cameras_main_frame.columnconfigure(1, weight=1, uniform="cam_grid")
@@ -498,7 +508,7 @@ class CameraManagerApp:
             lbl_web.pack(side="left")
             
             # Última gravação/Sync
-            lbl_sync = tk.Label(card, text="Buscando arquivos...", font=("Segoe UI", 8, "bold"), fg=TEXT_MUTED, bg=CARD_COLOR, justify="left", wraplength=280)
+            lbl_sync = tk.Label(card, text="Buscando arquivos...", font=("Segoe UI", 8, "bold"), fg=TEXT_MUTED, bg=CARD_COLOR, justify="left", wraplength=150)
             lbl_sync.pack(anchor="w", pady=(4, 0))
             
             # Salva referências para atualização
@@ -517,19 +527,9 @@ class CameraManagerApp:
                 col = 0
                 row += 1
 
-        # 3.5. CONTAINERS DAS CÂMERAS AO VIVO (Tkinter Canvas/Label) - Lado a Lado
-        self.live_cams_container = tk.Frame(self.root, bg=BG_COLOR)
-        self.live_cams_container.pack(fill="x", padx=20, pady=4)
-        
-        self.camera_widgets = {}
-        for stream in self.streams:
-            cam_widget = LiveCameraWidget(self.live_cams_container, stream, self)
-            cam_widget.pack(side="left", fill="both", expand=True, padx=4)
-            self.camera_widgets[stream] = cam_widget
-
         # 4. CONTROLES / BOTÕES
-        btn_frame = tk.Frame(self.root, bg=BG_COLOR, pady=6)
-        btn_frame.pack(fill="x", padx=20)
+        btn_frame = tk.Frame(left_col, bg=BG_COLOR, pady=4)
+        btn_frame.pack(fill="x", padx=10)
         
         self.btn_action = tk.Button(
             btn_frame, 
@@ -542,7 +542,7 @@ class CameraManagerApp:
             bd=0, 
             cursor="hand2",
             padx=20, 
-            pady=10,
+            pady=8,
             command=self.click_iniciar
         )
         self.btn_action.pack(fill="x", padx=4, pady=4, expand=True)
@@ -550,8 +550,8 @@ class CameraManagerApp:
         self.btn_action.bind("<Leave>", self.on_btn_action_leave)
 
         # Ações extras
-        actions_frame = tk.Frame(self.root, bg=BG_COLOR, pady=2)
-        actions_frame.pack(fill="x", padx=20)
+        actions_frame = tk.Frame(left_col, bg=BG_COLOR, pady=2)
+        actions_frame.pack(fill="x", padx=10)
         
         self.btn_diag = tk.Button(
             actions_frame, 
@@ -584,12 +584,10 @@ class CameraManagerApp:
             command=self.click_abrir_pasta
         )
         self.btn_open_folder.pack(side="left", padx=4, expand=True, fill="x")
-        
-        # O botão Monitor Lado a Lado foi removido conforme especificação da v4.6
 
         # Inicialização automática
-        startup_frame = tk.Frame(self.root, bg=BG_COLOR, pady=2)
-        startup_frame.pack(fill="x", padx=20)
+        startup_frame = tk.Frame(left_col, bg=BG_COLOR, pady=2)
+        startup_frame.pack(fill="x", padx=10)
         
         self.btn_setup_startup = tk.Button(
             startup_frame, 
@@ -608,15 +606,15 @@ class CameraManagerApp:
         self.btn_setup_startup.pack(fill="x", padx=4, pady=2)
 
         # 4.5. CONFIGURAÇÕES DE CAMINHO E INTEGRIDADE
-        config_frame = tk.Frame(self.root, bg=BG_COLOR, pady=2)
-        config_frame.pack(fill="x", padx=20, pady=2)
+        config_frame = tk.Frame(left_col, bg=BG_COLOR, pady=2)
+        config_frame.pack(fill="x", padx=10, pady=2)
         
         path_label = tk.Label(config_frame, text="Pasta Drive/Rede:", font=("Segoe UI", 9, "bold"), fg=TEXT_MUTED, bg=BG_COLOR)
-        path_label.pack(side="left", padx=4)
+        path_label.pack(side="left", padx=2)
         
-        self.entry_path = tk.Entry(config_frame, bg="#161822", fg=TEXT_COLOR, font=("Segoe UI", 9), bd=1, relief="solid", width=36)
+        self.entry_path = tk.Entry(config_frame, bg="#161822", fg=TEXT_COLOR, font=("Segoe UI", 9), bd=1, relief="solid", width=22)
         self.entry_path.insert(0, GDRIVE_ROOT)
-        self.entry_path.pack(side="left", padx=4)
+        self.entry_path.pack(side="left", padx=2)
         
         self.btn_save_path = tk.Button(
             config_frame,
@@ -632,32 +630,26 @@ class CameraManagerApp:
             pady=2,
             command=self.click_salvar_caminho
         )
-        self.btn_save_path.pack(side="left", padx=4)
-        
-        btn_scan = tk.Button(
-            config_frame,
-            text="🔍 Escanear Corrompidos",
-            font=("Segoe UI", 8, "bold"),
-            fg=TEXT_COLOR,
-            bg="#1F2937",
-            activebackground="#374151",
-            activeforeground=TEXT_COLOR,
-            bd=0,
-            cursor="hand2",
-            padx=8,
-            pady=2,
-            command=self.click_escanear_corrompidos
-        )
-        btn_scan.pack(side="right", padx=4)
+        self.btn_save_path.pack(side="left", padx=2)
 
         # 5. LOG DE EVENTOS (CONSOLE)
-        log_title_frame = tk.Frame(self.root, bg=BG_COLOR)
-        log_title_frame.pack(fill="x", padx=25, pady=(4,0))
+        log_title_frame = tk.Frame(left_col, bg=BG_COLOR)
+        log_title_frame.pack(fill="x", padx=15, pady=(2,0))
         tk.Label(log_title_frame, text="Log de Eventos:", font=("Segoe UI", 8, "bold"), fg=TEXT_MUTED, bg=BG_COLOR).pack(anchor="w")
         
-        self.txt_log = tk.Text(self.root, height=5, bg="#030712", fg="#34D399", font=("Consolas", 9), bd=0, padx=10, pady=5)
-        self.txt_log.pack(fill="x", padx=20, pady=(2, 6))
+        self.txt_log = tk.Text(left_col, height=4, bg="#030712", fg="#34D399", font=("Consolas", 9), bd=0, padx=10, pady=5)
+        self.txt_log.pack(fill="x", padx=10, pady=(2, 4))
         self.txt_log.configure(state="disabled")
+
+        # 3.5. CONTAINERS DAS CÂMERAS AO VIVO (na coluna da direita)
+        self.live_cams_container = tk.Frame(right_col, bg=BG_COLOR)
+        self.live_cams_container.pack(fill="both", expand=True, padx=10, pady=4)
+        
+        self.camera_widgets = {}
+        for stream in self.streams:
+            cam_widget = LiveCameraWidget(self.live_cams_container, stream, self)
+            cam_widget.pack(side="top", fill="both", expand=True, pady=4)
+            self.camera_widgets[stream] = cam_widget
 
     # ================= LOG DE EVENTOS =================
     def add_log(self, msg):
@@ -818,7 +810,7 @@ class CameraManagerApp:
             with urllib.request.urlopen("http://127.0.0.1:1984/api/streams", timeout=1.0) as conn:
                 data = json.loads(conn.read().decode())
                 if stream_name in data:
-                    producers = data[stream_name].get("producers", [])
+                    producers = data[stream_name].get("producers") or []
                     if producers:
                         return "Sinal OK"
                     else:
@@ -845,8 +837,8 @@ class CameraManagerApp:
                 data = json.loads(conn.read().decode())
                 if live_name in data:
                     stream_data = data[live_name]
-                    consumers = stream_data.get("consumers", [])
-                    producers = stream_data.get("producers", [])
+                    consumers = stream_data.get("consumers") or []
+                    producers = stream_data.get("producers") or []
                     
                     # Filtra consumidores internos (ignora Python/FFmpeg)
                     real_consumers = []
@@ -932,7 +924,8 @@ class CameraManagerApp:
             with urllib.request.urlopen("http://127.0.0.1:1984/api/streams", timeout=1.0) as conn:
                 data = json.loads(conn.read().decode())
             for stream_name, stream_data in data.items():
-                consumers = stream_data.get("consumers", [])
+                consumers = stream_data.get("consumers") or []
+                producers = stream_data.get("producers") or []
                 for consumer in consumers:
                     addr = consumer.get("remote_addr", "")
                     ua = consumer.get("user_agent", "").lower()
@@ -1629,7 +1622,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         threading.Thread(target=self.escanear_videos_corrompidos_thread, args=(show_popup,), daemon=True).start()
 
     def escanear_videos_corrompidos_thread(self, show_popup=True):
-        if not self.silent:
+        if not self.silent and show_popup:
             self.add_log("Iniciando escaneamento de arquivos corrompidos...")
             
         ffmpeg_bin = os.path.join(PROJ_DIR, "go2rtc", "ffmpeg.exe")
@@ -1711,8 +1704,6 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         self.root.after(1500, lambda: button.configure(text=old_text, bg=old_bg))
 
     def trigger_periodic_scan(self):
-        if not self.silent:
-            self.add_log("Iniciando escaneamento automático periódico de arquivos corrompidos...")
         self.click_escanear_corrompidos(show_popup=False)
         self.root.after(10800000, self.trigger_periodic_scan)
 
@@ -1724,25 +1715,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         return None
 
     def adjust_window_size(self):
-        if self.silent:
-            return
-            
-        # Altura base do gerenciador com todas as câmeras recolhidas
-        height = 760
-        
-        # Como as câmeras agora são exibidas lado a lado, se pelo menos uma
-        # estiver expandida, adicionamos a altura de um único vídeo (~220px)
-        any_expanded = False
-        if hasattr(self, "camera_widgets"):
-            for cam_widget in self.camera_widgets.values():
-                if cam_widget.expanded:
-                    any_expanded = True
-                    break
-                    
-        if any_expanded:
-            height += 220
-                    
-        self.root.geometry(f"680x{height}")
+        pass
 
     def on_close_window(self):
         if not self.silent:
@@ -1865,7 +1838,6 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
 
     def check_for_updates_thread(self):
         time.sleep(5)
-        self.add_log("Buscando atualizacoes no GitHub...")
         
         url_gerenciador = "https://raw.githubusercontent.com/WilliYY/camerafarmacia/main/gerenciador.pyw"
         url_visualizador = "https://raw.githubusercontent.com/WilliYY/camerafarmacia/main/visualizador.html"
@@ -1882,8 +1854,6 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
                 if self.is_version_newer(online_version, VERSION):
                     self.add_log(f"Nova versao v{online_version} encontrada! (Versao local: v{VERSION})")
                     self.root.after(0, lambda: self.prompt_update(online_version, url_gerenciador, url_visualizador))
-                else:
-                    self.add_log(f"Sistema atualizado (v{VERSION}).")
             else:
                 self.add_log("Nao foi possivel identificar a versao remota.")
         except Exception as e:
