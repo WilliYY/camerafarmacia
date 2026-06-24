@@ -13,7 +13,7 @@ import shutil
 from datetime import datetime, timedelta
 
 # Versão do Sistema (usada para o auto-update)
-VERSION = "4.2"
+VERSION = "4.3"
 
 # Configurações do Projeto
 PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -668,7 +668,7 @@ class CameraManagerApp:
         if not go2rtc_ok:
             return "Indisponível"
         try:
-            with urllib.request.urlopen("http://localhost:1984/api/streams", timeout=1.0) as conn:
+            with urllib.request.urlopen("http://127.0.0.1:1984/api/streams", timeout=1.0) as conn:
                 data = json.loads(conn.read().decode())
                 if stream_name in data:
                     producers = data[stream_name].get("producers", [])
@@ -694,7 +694,7 @@ class CameraManagerApp:
         
         live_name = stream_name + "_live"
         try:
-            with urllib.request.urlopen("http://localhost:1984/api/streams", timeout=1.0) as conn:
+            with urllib.request.urlopen("http://127.0.0.1:1984/api/streams", timeout=1.0) as conn:
                 data = json.loads(conn.read().decode())
                 if live_name in data:
                     stream_data = data[live_name]
@@ -776,7 +776,7 @@ class CameraManagerApp:
             return []
         viewers = []
         try:
-            with urllib.request.urlopen("http://localhost:1984/api/streams", timeout=1.0) as conn:
+            with urllib.request.urlopen("http://127.0.0.1:1984/api/streams", timeout=1.0) as conn:
                 data = json.loads(conn.read().decode())
             for stream_name, stream_data in data.items():
                 consumers = stream_data.get("consumers", [])
@@ -1659,7 +1659,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             s1984.connect(('127.0.0.1', 1984))
             log.append(" - Porta API (1984): ABERTA")
             s1984.close()
-            with urllib.request.urlopen("http://localhost:1984/api/streams", timeout=1.0) as conn:
+            with urllib.request.urlopen("http://127.0.0.1:1984/api/streams", timeout=1.0) as conn:
                 data = json.loads(conn.read().decode())
                 log.append(f" - Configuração de streams na API: {json.dumps(data, indent=2)}")
         except Exception as e:
