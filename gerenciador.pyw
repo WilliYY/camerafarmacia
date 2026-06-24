@@ -11,9 +11,11 @@ import time
 import ctypes
 import shutil
 from datetime import datetime, timedelta
+import io
+from PIL import Image, ImageTk
 
 # Versão do Sistema (usada para o auto-update)
-VERSION = "4.4"
+VERSION = "4.5"
 
 # Configurações do Projeto
 PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -84,6 +86,187 @@ class StatusLED(tk.Canvas):
     def set_status(self, color, border_color):
         self.itemconfig(self.led, fill=color, outline=border_color)
 
+class LiveCameraWidget(tk.Frame):
+    """Widget de visualização de câmera ao vivo embutida, colapsável e com modo tela cheia"""
+    def __init__(self, parent, stream_name, app_instance):
+        super().__init__(parent, bg=BG_COLOR)
+        self.stream_name = stream_name
+        self.app = app_instance
+        self.expanded = False
+        self.thread = None
+        self.running = False
+        self.photo = None
+        
+        # Botão de cabeçalho para expandir/recolher
+        self.header_btn = tk.Button(
+            self,
+            text=f" ▶️ VER TRANSMISSÃO: {stream_name.upper()}",
+            font=("Segoe UI", 9, "bold"),
+            fg=TEXT_COLOR,
+            bg="#1F2937",
+            activebackground="#374151",
+            activeforeground=TEXT_COLOR,
+            bd=0,
+            cursor="hand2",
+            padx=10,
+            pady=5,
+            anchor="w",
+            command=self.toggle
+        )
+        self.header_btn.pack(fill="x", pady=2)
+        
+        # Frame de conteúdo que será exibido/ocultado
+        self.body_frame = tk.Frame(self, bg="#020204")
+        
+        # Label para renderização da imagem
+        self.video_lbl = tk.Label(self.body_frame, bg="#020204")
+        self.video_lbl.pack(pady=4)
+        
+        # Frame de controles inferiores da câmera
+        self.controls_frame = tk.Frame(self.body_frame, bg="#020204")
+        self.controls_frame.pack(fill="x")
+        
+        self.btn_fullscreen = tk.Button(
+            self.controls_frame,
+            text=" 📺 Tela Cheia",
+            font=("Segoe UI", 8, "bold"),
+            fg=TEXT_COLOR,
+            bg="#111827",
+            activebackground="#1F2937",
+            activeforeground=TEXT_COLOR,
+            bd=0,
+            cursor="hand2",
+            padx=8,
+            pady=3,
+            command=self.open_fullscreen
+        )
+        self.btn_fullscreen.pack(side="right", padx=10, pady=2)
+
+    def toggle(self):
+        if self.expanded:
+            self.collapse()
+        else:
+            self.expand()
+
+    def expand(self):
+        self.expanded = True
+        self.header_btn.configure(text=f" ▼️ RECOLHER TRANSMISSÃO: {self.stream_name.upper()}", bg="#111827")
+        self.body_frame.pack(fill="x", expand=True)
+        self.start_stream()
+        self.app.adjust_window_size()
+
+    def collapse(self):
+        self.expanded = False
+        self.header_btn.configure(text=f" ▶️ VER TRANSMISSÃO: {self.stream_name.upper()}", bg="#1F2937")
+        self.stop_stream()
+        self.body_frame.pack_forget()
+        self.app.adjust_window_size()
+
+    def start_stream(self):
+        self.running = True
+        self.thread = threading.Thread(target=self.stream_loop, daemon=True)
+        self.thread.start()
+
+    def stop_stream(self):
+        self.running = False
+        self.video_lbl.configure(image="")
+        self.photo = None
+
+    def stream_loop(self):
+        url = f"http://127.0.0.1:1984/api/frame.jpeg?src={self.stream_name}"
+        time.sleep(0.5)
+        
+        while self.running:
+            if not self.app.check_process_go2rtc():
+                self.show_error_message("Ponte RTSP offline")
+                time.sleep(1.0)
+                continue
+                
+            try:
+                req = urllib.request.Request(url)
+                with urllib.request.urlopen(req, timeout=2.0) as response:
+                    img_data = response.read()
+                    
+                if not img_data:
+                    raise Exception("Sem dados")
+                    
+                image = Image.open(io.BytesIO(img_data))
+                # Preview menor de 320x180 para caber perfeitamente no layout do painel
+                image = image.resize((320, 180), Image.Resampling.LANCZOS)
+                
+                if self.running:
+                    self.update_image(image)
+                    
+                time.sleep(0.14) # Aprox 7 FPS para economizar CPU
+            except Exception as e:
+                self.show_error_message(f"Reconectando à stream...\n({str(e)})")
+                time.sleep(1.5)
+
+    def show_error_message(self, msg):
+        if not self.running:
+            return
+        self.app.root.after(0, lambda: self.video_lbl.configure(image="", text=msg, fg=ORANGE_COLOR, font=("Segoe UI", 9, "bold"), compound="center"))
+
+    def update_image(self, pil_image):
+        photo = ImageTk.PhotoImage(pil_image)
+        self.photo = photo
+        self.app.root.after(0, lambda: self.video_lbl.configure(image=photo, text="", compound="none"))
+
+    def open_fullscreen(self):
+        fs_win = tk.Toplevel(self.app.root)
+        fs_win.title(f"Visualizador Câmera: {self.stream_name.upper()}")
+        fs_win.configure(bg="#000000")
+        fs_win.state("zoomed") # Tela cheia maximizada
+        
+        fs_lbl = tk.Label(fs_win, bg="#000000")
+        fs_lbl.pack(fill="both", expand=True)
+        
+        fs_running = [True]
+        
+        def fs_loop():
+            url = f"http://127.0.0.1:1984/api/frame.jpeg?src={self.stream_name}"
+            while fs_running[0]:
+                try:
+                    w = fs_lbl.winfo_width()
+                    h = fs_lbl.winfo_height()
+                    if w < 100 or h < 100:
+                        w = fs_win.winfo_screenwidth()
+                        h = fs_win.winfo_screenheight()
+                        
+                    req = urllib.request.Request(url)
+                    with urllib.request.urlopen(req, timeout=2.0) as response:
+                        img_data = response.read()
+                        
+                    if img_data and fs_running[0]:
+                        image = Image.open(io.BytesIO(img_data))
+                        
+                        img_aspect = image.width / image.height
+                        win_aspect = w / h
+                        if win_aspect > img_aspect:
+                            new_h = h
+                            new_w = int(h * img_aspect)
+                        else:
+                            new_w = w
+                            new_h = int(w / img_aspect)
+                            
+                        image = image.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                        photo = ImageTk.PhotoImage(image)
+                        fs_lbl.photo = photo
+                        fs_win.after(0, lambda p=photo: fs_lbl.configure(image=p))
+                        
+                    time.sleep(0.1) # 10 FPS na janela maximizada
+                except Exception:
+                    time.sleep(1.0)
+                    
+        fs_thread = threading.Thread(target=fs_loop, daemon=True)
+        fs_thread.start()
+        
+        def on_close():
+            fs_running[0] = False
+            fs_win.destroy()
+            
+        fs_win.protocol("WM_DELETE_WINDOW", on_close)
+
 class CameraManagerApp:
     def __init__(self, root, silent=False):
         self.root = root
@@ -100,9 +283,9 @@ class CameraManagerApp:
         # 1. Configura título e layout se não estiver em modo silencioso
         if not self.silent:
             self.root.title(f"Controle das Câmeras - Farmácia (NVR Unificado v{VERSION})")
-            self.root.geometry("680x740")
+            self.root.geometry("680x820")
             self.root.configure(bg=BG_COLOR)
-            self.root.resizable(False, False)
+            self.root.resizable(False, True) # Permite redimensionar verticalmente para as câmeras
             
             self.setup_styles()
             self.create_widgets()
@@ -110,6 +293,9 @@ class CameraManagerApp:
             # Inicializa a máquina de estados do botão e animação
             self.button_state = "STOPPED"
             self.animate_pulse()
+            
+            # Agenda escaneamento automático a cada 3 horas (3 * 3600 * 1000 ms)
+            self.root.after(10800000, self.trigger_periodic_scan)
             
             # Intercepta o fechamento no X do Tkinter para desligar de forma segura
             self.root.protocol("WM_DELETE_WINDOW", self.on_close_window)
@@ -364,6 +550,16 @@ class CameraManagerApp:
                 col = 0
                 row += 1
 
+        # 3.5. CONTAINERS DAS CÂMERAS AO VIVO (Tkinter Canvas/Label)
+        self.live_cams_container = tk.Frame(self.root, bg=BG_COLOR)
+        self.live_cams_container.pack(fill="x", padx=20, pady=4)
+        
+        self.camera_widgets = {}
+        for stream in self.streams:
+            cam_widget = LiveCameraWidget(self.live_cams_container, stream, self)
+            cam_widget.pack(fill="x", pady=4)
+            self.camera_widgets[stream] = cam_widget
+
         # 4. CONTROLES / BOTÕES
         btn_frame = tk.Frame(self.root, bg=BG_COLOR, pady=6)
         btn_frame.pack(fill="x", padx=20)
@@ -469,7 +665,7 @@ class CameraManagerApp:
         self.entry_path.insert(0, GDRIVE_ROOT)
         self.entry_path.pack(side="left", padx=4)
         
-        btn_save_path = tk.Button(
+        self.btn_save_path = tk.Button(
             config_frame,
             text="Salvar",
             font=("Segoe UI", 8, "bold"),
@@ -483,7 +679,7 @@ class CameraManagerApp:
             pady=2,
             command=self.click_salvar_caminho
         )
-        btn_save_path.pack(side="left", padx=4)
+        self.btn_save_path.pack(side="left", padx=4)
         
         btn_scan = tk.Button(
             config_frame,
@@ -734,10 +930,16 @@ class CameraManagerApp:
             return "Nenhuma gravação encontrada."
             
         try:
-            files = [os.path.join(read_path, f) for f in os.listdir(read_path) if f.endswith(".mp4")]
-            if not files:
+            mp4_files = []
+            for root_dir, _, files in os.walk(read_path):
+                for f in files:
+                    if f.endswith(".mp4"):
+                        mp4_files.append(os.path.join(root_dir, f))
+                        
+            if not mp4_files:
                 return "Sem gravações nesta pasta."
-            last_file = max(files, key=os.path.getmtime)
+                
+            last_file = max(mp4_files, key=os.path.getmtime)
             mtime = os.path.getmtime(last_file)
             mtime_dt = datetime.fromtimestamp(mtime)
             delta = datetime.now() - mtime_dt
@@ -908,42 +1110,53 @@ class CameraManagerApp:
                     if not os.path.exists(stream_backup_dir):
                         continue
                         
-                    files = [f for f in os.listdir(stream_backup_dir) if f.endswith(".mp4")]
-                    if not files:
-                        continue
-                        
                     gdrive_dest = self.get_gdrive_dir(stream, idx)
-                    os.makedirs(gdrive_dest, exist_ok=True)
                     
-                    # Testa permissão de escrita no Drive
-                    teste_path = os.path.join(gdrive_dest, ".sync_test")
-                    try:
-                        with open(teste_path, "w") as tf:
-                            tf.write("test")
-                        os.remove(teste_path)
-                    except Exception:
-                        continue
-                        
-                    for filename in files:
-                        local_filepath = os.path.join(stream_backup_dir, filename)
-                        dest_filepath = os.path.join(gdrive_dest, filename)
-                        
-                        mtime = os.path.getmtime(local_filepath)
-                        if time.time() - mtime < 60:
+                    # Varre a pasta de backup recursivamente para achar vídeos organizados em subpastas de data
+                    for root_dir, _, files in os.walk(stream_backup_dir):
+                        mp4_files = [f for f in files if f.endswith(".mp4")]
+                        if not mp4_files:
                             continue
                             
-                        if not self.silent:
-                            self.root.after(0, lambda fn=filename, s=stream: self.add_log(f"Subindo backup de {s.upper()}: {fn}..."))
-                        
-                        try:
-                            shutil.copy2(local_filepath, dest_filepath)
-                            if os.path.getsize(local_filepath) == os.path.getsize(dest_filepath):
-                                os.remove(local_filepath)
-                                if not self.silent:
-                                    self.root.after(0, lambda fn=filename, s=stream: self.add_log(f"Sincronizado e apagado local: {fn}"))
-                        except Exception as e:
+                        for filename in mp4_files:
+                            local_filepath = os.path.join(root_dir, filename)
+                            
+                            # Organização por dia no Drive: extrai a data do nome do arquivo
+                            data_dia = self.extrair_data_do_arquivo(filename)
+                            if data_dia:
+                                dest_folder = os.path.join(gdrive_dest, data_dia)
+                            else:
+                                dest_folder = gdrive_dest
+                                
+                            os.makedirs(dest_folder, exist_ok=True)
+                            
+                            # Testa permissão de escrita no Drive
+                            teste_path = os.path.join(dest_folder, ".sync_test")
+                            try:
+                                with open(teste_path, "w") as tf:
+                                    tf.write("test")
+                                os.remove(teste_path)
+                            except Exception:
+                                continue
+                                
+                            dest_filepath = os.path.join(dest_folder, filename)
+                            
+                            mtime = os.path.getmtime(local_filepath)
+                            if time.time() - mtime < 60:
+                                continue
+                                
                             if not self.silent:
-                                self.root.after(0, lambda fn=filename, err=str(e): self.add_log(f"Erro ao subir {fn}: {err}"))
+                                self.root.after(0, lambda fn=filename, s=stream: self.add_log(f"Subindo backup de {s.upper()}: {fn}..."))
+                            
+                            try:
+                                shutil.copy2(local_filepath, dest_filepath)
+                                if os.path.getsize(local_filepath) == os.path.getsize(dest_filepath):
+                                    os.remove(local_filepath)
+                                    if not self.silent:
+                                        self.root.after(0, lambda fn=filename, s=stream: self.add_log(f"Sincronizado e apagado local: {fn}"))
+                            except Exception as e:
+                                if not self.silent:
+                                    self.root.after(0, lambda fn=filename, err=str(e): self.add_log(f"Erro ao subir {fn}: {err}"))
             except Exception as e:
                 if not self.silent:
                     self.root.after(0, lambda err=str(e): self.add_log(f"Erro no loop de sincronizacao: {err}"))
@@ -1097,7 +1310,11 @@ class CameraManagerApp:
         hora_inicio = inicio_bloco.strftime("%H-%M")
         hora_fim = fim_bloco.strftime("%H-%M")
         
-        nome_arquivo = os.path.join(pasta_final, f"camera_{data_dia}_{hora_inicio}_ate_{hora_fim}.mp4")
+        # Cria subpasta com a data do dia dentro do destino para melhor organização visual
+        pasta_dia_final = os.path.join(pasta_final, data_dia)
+        os.makedirs(pasta_dia_final, exist_ok=True)
+        
+        nome_arquivo = os.path.join(pasta_dia_final, f"camera_{data_dia}_{hora_inicio}_ate_{hora_fim}.mp4")
         
         # Gravação local temporária para evitar bloqueio e erros de sincronização no Google Drive
         temp_dir = os.path.join(PROJ_DIR, "gravando_temp", stream_name)
@@ -1156,18 +1373,18 @@ class CameraManagerApp:
         if os.path.exists(nome_temp):
             if os.path.getsize(nome_temp) > 0:
                 try:
-                    # Garante que a pasta final exista
-                    os.makedirs(pasta_final, exist_ok=True)
+                    # Garante que a subpasta do dia exista no Drive/Rede
+                    os.makedirs(pasta_dia_final, exist_ok=True)
                     shutil.move(nome_temp, nome_arquivo)
-                    escrever_log_cam(f"Bloco movido com sucesso para a pasta definitiva: {os.path.basename(nome_arquivo)}")
+                    escrever_log_cam(f"Bloco movido com sucesso para a pasta definitiva: {os.path.join(data_dia, os.path.basename(nome_arquivo))}")
                 except Exception as e_move:
-                    escrever_log_cam(f"Erro ao mover bloco para {pasta_final} ({str(e_move)}). Tentando salvar no backup local.")
+                    escrever_log_cam(f"Erro ao mover bloco para {pasta_dia_final} ({str(e_move)}). Tentando salvar no backup local.")
                     try:
-                        backup_dir = os.path.join(PROJ_DIR, "backup_gravacoes", stream_name)
-                        os.makedirs(backup_dir, exist_ok=True)
-                        backup_arquivo = os.path.join(backup_dir, os.path.basename(nome_arquivo))
+                        backup_dia_dir = os.path.join(PROJ_DIR, "backup_gravacoes", stream_name, data_dia)
+                        os.makedirs(backup_dia_dir, exist_ok=True)
+                        backup_arquivo = os.path.join(backup_dia_dir, f"camera_{data_dia}_{hora_inicio}_ate_{hora_fim}.mp4")
                         shutil.move(nome_temp, backup_arquivo)
-                        escrever_log_cam(f"Bloco salvo no backup local de contingencia: {os.path.basename(nome_arquivo)}")
+                        escrever_log_cam(f"Bloco salvo no backup local de contingencia: {os.path.join(data_dia, os.path.basename(backup_arquivo))}")
                     except Exception as e_backup:
                         escrever_log_cam(f"ERRO CRITICO: Nao foi possivel salvar no backup local ({str(e_backup)})")
             else:
@@ -1370,16 +1587,11 @@ class CameraManagerApp:
         # 5. Encerra go2rtc.exe
         subprocess.run('taskkill /F /IM go2rtc.exe', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    def run_stop_sequence_verbose(self):
-        self.run_stop_sequence()
-        if not self.silent:
-            self.root.after(0, lambda: self.add_log("Gravação interrompida. Todos os serviços parados!"))
-            self.root.after(0, lambda: self.set_button_state("STOPPED"))
-
     def click_abrir_pasta(self):
         if os.path.exists(GDRIVE_ROOT):
             self.add_log("Abrindo pasta de câmeras do Google Drive...")
             os.startfile(GDRIVE_ROOT)
+            self.flash_button(self.btn_open_folder, "✔️ Pasta Aberta!", "#10B981")
         else:
             self.add_log("ERRO: Pasta G:\\Meu Drive\\CAMERAS inacessível.")
             messagebox.showerror("Erro de Acesso", "Não foi possível abrir o Google Drive. Verifique se ele está rodando.")
@@ -1388,6 +1600,7 @@ class CameraManagerApp:
         self.add_log("Abrindo Monitor no navegador...")
         import webbrowser
         webbrowser.open("http://127.0.0.1:1984/visualizador.html")
+        self.flash_button(self.btn_monitor, "🌐 Abrindo...", "#3B82F6")
 
     def click_configurar_inicializacao(self):
         try:
@@ -1404,6 +1617,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
                 
             self.add_log("Inicialização automática configurada com sucesso!")
             messagebox.showinfo("Sucesso", f"O script de inicialização automática foi gerado com sucesso em:\n{vbs_path}\n\nAgora o sistema iniciará em segundo plano ao fazer logon.")
+            self.flash_button(self.btn_setup_startup, "✔️ Configurado!", "#10B981")
         except Exception as e:
             self.add_log(f"ERRO ao configurar inicialização: {str(e)}")
             messagebox.showerror("Erro de Configuração", f"Não foi possível salvar o arquivo de inicialização:\n{str(e)}")
@@ -1421,11 +1635,15 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         
         self.add_log(f"Caminho do Google Drive/Rede atualizado para: {GDRIVE_ROOT}")
         messagebox.showinfo("Caminho Salvo", f"O caminho foi atualizado com sucesso para:\n{GDRIVE_ROOT}")
+        if hasattr(self, "btn_save_path"):
+            self.flash_button(self.btn_save_path, "✔️ Salvo!", "#10B981")
 
-    def click_escanear_corrompidos(self):
-        threading.Thread(target=self.escanear_videos_corrompidos_thread, daemon=True).start()
+    def click_escanear_corrompidos(self, show_popup=True):
+        if not self.silent and hasattr(self, "btn_scan"):
+            self.btn_scan.configure(text="⏳ Escaneando...", state="disabled", bg="#374151")
+        threading.Thread(target=self.escanear_videos_corrompidos_thread, args=(show_popup,), daemon=True).start()
 
-    def escanear_videos_corrompidos_thread(self):
+    def escanear_videos_corrompidos_thread(self, show_popup=True):
         if not self.silent:
             self.add_log("Iniciando escaneamento de arquivos corrompidos...")
             
@@ -1433,6 +1651,8 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         if not os.path.exists(ffmpeg_bin):
             if not self.silent:
                 self.add_log("ERRO: ffmpeg.exe não encontrado para escanear.")
+            if not self.silent and hasattr(self, "btn_scan"):
+                self.root.after(0, lambda: self.btn_scan.configure(text="🔍 Escanear Corrompidos", state="normal", bg="#1F2937"))
             return
             
         dirs_to_scan = []
@@ -1448,45 +1668,83 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             if not os.path.exists(directory):
                 continue
              
-            corrompidos_dir = os.path.join(directory, ".corrompidos")
-             
             try:
-                files = [f for f in os.listdir(directory) if f.endswith(".mp4")]
-                for filename in files:
-                    filepath = os.path.join(directory, filename)
-                    scanned_count += 1
-                     
-                    is_corrupt = False
-                     
-                    if os.path.getsize(filepath) == 0:
-                        is_corrupt = True
-                    else:
-                        try:
-                            # Executa verificação rápida no ffmpeg
-                            cmd = f'"{ffmpeg_bin}" -v error -i "{filepath}" -t 1 -f null -'
-                            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
-                            if res.returncode != 0:
+                # Escaneia recursivamente incluindo as subpastas organizadas por data
+                for root_dir, _, files in os.walk(directory):
+                    mp4_files = [f for f in files if f.endswith(".mp4")]
+                    for filename in mp4_files:
+                        filepath = os.path.join(root_dir, filename)
+                        scanned_count += 1
+                         
+                        is_corrupt = False
+                         
+                        if os.path.getsize(filepath) == 0:
+                            is_corrupt = True
+                        else:
+                            try:
+                                # Executa verificação rápida no ffmpeg
+                                cmd = f'"{ffmpeg_bin}" -v error -i "{filepath}" -t 1 -f null -'
+                                res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
+                                if res.returncode != 0:
+                                    is_corrupt = True
+                            except subprocess.TimeoutExpired:
                                 is_corrupt = True
-                        except subprocess.TimeoutExpired:
-                            is_corrupt = True
-                        except Exception:
-                            is_corrupt = True
-                             
-                    if is_corrupt:
-                        corrupted_count += 1
-                        try:
-                            os.remove(filepath)
-                            if not self.silent:
-                                self.add_log(f"[EXCLUÍDO] Arquivo corrompido deletado: {filename}")
-                        except Exception as e_del:
-                            if not self.silent:
-                                self.add_log(f"Erro ao deletar {filename}: {str(e_del)}")
+                            except Exception:
+                                is_corrupt = True
+                                 
+                        if is_corrupt:
+                            corrupted_count += 1
+                            try:
+                                os.remove(filepath)
+                                if not self.silent:
+                                    self.add_log(f"[EXCLUÍDO] Arquivo corrompido deletado: {filename}")
+                            except Exception as e_del:
+                                if not self.silent:
+                                    self.add_log(f"Erro ao deletar {filename}: {str(e_del)}")
             except Exception:
                 pass
                  
         if not self.silent:
             self.add_log(f"Escaneamento concluído. {scanned_count} arquivos analisados, {corrupted_count} corrompidos excluídos.")
-            messagebox.showinfo("Scanner de Integridade", f"Varredura concluída!\n\nArquivos escaneados: {scanned_count}\nArquivos corrompidos deletados: {corrupted_count}\n\nOs arquivos corrompidos foram excluídos permanentemente para poupar espaço e limpar diretórios.")
+            if hasattr(self, "btn_scan"):
+                self.root.after(0, lambda: self.btn_scan.configure(text="🔍 Escanear Corrompidos", state="normal", bg="#1F2937"))
+            
+            if show_popup:
+                self.root.after(0, lambda: messagebox.showinfo("Scanner de Integridade", f"Varredura concluída!\n\nArquivos escaneados: {scanned_count}\nArquivos corrompidos deletados: {corrupted_count}\n\nOs arquivos corrompidos foram excluídos permanentemente para poupar espaço e limpar diretórios."))
+
+    def flash_button(self, button, temp_text, temp_bg):
+        old_text = button.cget("text")
+        old_bg = button.cget("bg")
+        button.configure(text=temp_text, bg=temp_bg)
+        self.root.after(1500, lambda: button.configure(text=old_text, bg=old_bg))
+
+    def trigger_periodic_scan(self):
+        if not self.silent:
+            self.add_log("Iniciando escaneamento automático periódico de arquivos corrompidos...")
+        self.click_escanear_corrompidos(show_popup=False)
+        self.root.after(10800000, self.trigger_periodic_scan)
+
+    def extrair_data_do_arquivo(self, nome_arquivo):
+        import re
+        match = re.search(r'(\d{4}-\d{2}-\d{2})', nome_arquivo)
+        if match:
+            return match.group(1)
+        return None
+
+    def adjust_window_size(self):
+        if self.silent:
+            return
+            
+        # Altura base do gerenciador com todas as câmeras recolhidas
+        height = 820
+        
+        # Soma altura extra para cada câmera expandida (~210px por widget)
+        if hasattr(self, "camera_widgets"):
+            for cam_widget in self.camera_widgets.values():
+                if cam_widget.expanded:
+                    height += 210
+                    
+        self.root.geometry(f"680x{height}")
 
     def on_close_window(self):
         if not self.silent:
@@ -1498,6 +1756,11 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         self.graceful_shutdown()
 
     def graceful_shutdown(self):
+        # Para as conexões de vídeo das câmeras embutidas antes do encerramento
+        if hasattr(self, "camera_widgets"):
+            for cam_widget in self.camera_widgets.values():
+                cam_widget.stop_stream()
+                
         self.run_stop_sequence()
         time.sleep(1.0)
         if not self.silent:
@@ -1708,6 +1971,8 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
     # ================= DIAGNÓSTICOS =================
     def click_diagnostico(self):
         self.add_log("Gerando relatório de diagnóstico detalhado...")
+        if hasattr(self, "btn_diag"):
+            self.btn_diag.configure(text="⏳ Gerando...", state="disabled", bg="#374151")
         threading.Thread(target=self.run_diagnostics_sequence, daemon=True).start()
 
     def run_diagnostics_sequence(self):
@@ -1811,6 +2076,9 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         except Exception as e:
             self.root.after(0, lambda: self.add_log(f"ERRO ao salvar diagnóstico: {str(e)}"))
             self.root.after(0, lambda: messagebox.showerror("Erro Diagnóstico", f"Não foi possível salvar o arquivo:\n{str(e)}"))
+        finally:
+            if not self.silent and hasattr(self, "btn_diag"):
+                self.root.after(0, lambda: self.btn_diag.configure(text=" 🩺 Gerar Diagnóstico", state="normal", bg="#1F2937"))
 
 if __name__ == "__main__":
     import argparse
