@@ -1,6 +1,6 @@
-# 🎥 Controle e Gravação de Câmeras - Farmácia (v4.6 NVR Unificado)
+# 🎥 Controle e Gravação de Câmeras - Farmácia (v4.8.4 NVR Unificado)
 
-Este projeto é uma solução de NVR (Network Video Recorder) de baixíssimo consumo de hardware, projetada para capturar, gravar, monitorar e gerenciar múltiplas câmeras inteligentes (compatíveis com o ecossistema Tuya/Positivo) em um único arquivo unificado, com portabilidade total, prevenção de duplicidade na rede, visualização embutida no painel e auto-atualização direta via GitHub.
+Este projeto é uma solução de NVR (Network Video Recorder) de baixíssimo consumo de hardware, projetada para capturar, gravar, monitorar e gerenciar múltiplas câmeras inteligentes (compatíveis com o ecossistema Tuya/Positivo) em um único arquivo unificado, com portabilidade total, prevenção de duplicidade na rede, visualização embutida de baixíssima latência e auto-atualização direta via GitHub.
 
 ---
 
@@ -19,24 +19,25 @@ O sistema é 100% integrado em um único arquivo gerenciador (`gerenciador.pyw`)
    - **Sincronizador Automático Inteligente**: Uma thread dedicada monitora o Google Drive e, assim que a conexão é restabelecida, realiza o upload em segundo plano dos vídeos da pasta `backup_gravacoes/` para suas respectivas pastas de dia no Google Drive, deletando a cópia local para não encher o HD.
    - **Detecção de Conflitos na Rede**: Envia batimentos cardíacos (heartbeat) a cada 30 segundos para o Google Drive em formato JSON (`.active_recorder_{stream}.json`). Se outra máquina tentar gravar a mesma câmera no mesmo diretório, o conflito é detectado e o segundo gravador cessa a gravação imediatamente para evitar corrupção e duplicidade.
 
-3. **Visualização ao Vivo Embutida (Pillow Preview)**:
-   - O painel exibe streams ao vivo das câmeras de forma direta no Tkinter usando widgets colapsáveis (`LiveCameraWidget`).
-   - Ele solicita imagens estáticas à API do go2rtc (`/api/frame.jpeg?src={camera}`) a cada ~140ms (7 FPS) em uma thread secundária por câmera para exibir o vídeo sem travar a interface e sem sobrecarregar a CPU.
-   - Quando colapsadas, as streams são encerradas para poupar CPU, rede e memória RAM.
-   - Possui botão **Tela Cheia** que abre uma janela maximizada exibindo a stream com redimensionamento automático de proporção de aspecto (aspect ratio) a 10 FPS.
+3. **Visualização ao Vivo Nativa (MJPEG Stream)**:
+   - O painel exibe transmissões ao vivo das câmeras diretamente no Tkinter usando widgets colapsáveis (`LiveCameraWidget`).
+   - Usa **transmissão MJPEG contínua** (`/api/stream.mjpeg?src={camera}_mjpeg`) através de conexões HTTP persistentes (Keep-Alive). Uma thread dedicada por câmera varre o buffer de rede em tempo real buscando marcadores JPEG (`\xff\xd8` e `\xff\xd9`) para decodificar e desenhar frames instantaneamente com delay baixíssimo (~50ms-80ms).
+   - Limita a exibição a **~15 FPS** no painel principal (para balancear suavidade e uso de CPU) e **~20 FPS** na janela maximizada de **Tela Cheia** (que mantém proporção ideal do monitor sem recortar o enquadramento).
+   - Quando colapsados, os streams são encerrados imediatamente para poupar CPU, largura de banda e memória RAM.
 
-4. **Escaneamento Periódico de Corrompidos (a cada 3 horas)**:
-   - Varre a pasta local e de nuvem de forma recursiva (incluindo subpastas de data) procurando arquivos de vídeo que estejam corrompidos ou com 0 bytes.
-   - Os arquivos corrompidos são excluídos permanentemente e um aviso de log é exibido no painel de eventos.
-   - O escaneamento é acionado automaticamente a cada 3 horas em segundo plano (sem exibir caixas de mensagem popups para não incomodar o usuário) e também pode ser executado manualmente a qualquer momento pelo botão na GUI.
+4. **Escaneamento de Corrompidos e Diagnóstico Automáticos**:
+   - **Escaneamento (a cada 3 horas)**: Varre a pasta local e de nuvem recursivamente procurando arquivos de vídeo que estejam corrompidos ou com 0 bytes, deletando-os automaticamente e registrando a ação no log de eventos.
+   - **Diagnóstico (a cada 6 horas)**: Gera de forma automática um relatório completo de saúde do sistema (`diagnostico.txt`), checando integridade de arquivos, processos ativos, conectividade externa do Google Drive e DNS, sem interromper o usuário.
 
-5. **Interface 100% Interativa e Responsiva**:
-   - Cada botão possui um sistema de feedback visual (`flash_button` e estados de transição).
-   - Ao clicar em botões demorados (como *Gerar Diagnóstico* ou *Escanear Corrompidos*), o botão é desabilitado e exibe uma animação/texto de carregamento (`⏳ Gerando...`, `⏳ Escaneando...`).
-   - Ao salvar ou executar ações com sucesso, o botão pisca temporariamente em verde com um checkmark (`✔️ Salvo!`, `✔️ Pasta Aberta!`), fornecendo confirmação visual em tempo real.
+5. **Interface Premium e Layout Inteligente**:
+   - **Visual Premium**: Design refinado com barras superiores em cor accent azul (`#3B82F6`) nos cards de controle, tipografia maior, bordas e divisores geométricos dinâmicos.
+   - **Dimensionamento Dinâmico**: A janela é fixada em **1280x830** com a coluna de controle expandida para **430px** para evitar cortes de palavras. As câmeras calculam seu tamanho dinamicamente: se ambas estiverem abertas, ajustam-se lado a lado para **560x315** cada. Se apenas uma estiver aberta, assume largura máxima de **~800px** com proporção 16:9 travada para mostrar o sinal da câmera por inteiro e sem cortes.
+   - **Logs Coloridos**: Histórico de eventos de 6 linhas com cores dinâmicas (Vermelho = Erro, Verde = Sucesso/Ativo, Azul = Info, Amarelo = Avisos), rolagem automática e auto-cleanup para no máximo 200 linhas.
 
 6. **Atualização Automática Inteligente**:
    - Compara a versão do GitHub contra a versão local e realiza o download apenas se a versão na nuvem for estritamente mais nova (prevenindo downgrades).
+
+---b contra a versão local e realiza o download apenas se a versão na nuvem for estritamente mais nova (prevenindo downgrades).
 
 ---
 
@@ -94,10 +95,11 @@ Se você é uma Inteligência Artificial atuando neste repositório para manuten
    - A gravação do vídeo das câmeras deve usar estritamente `urllib.request` para baixar o stream MP4/H.264 bruto do `go2rtc`.
    - **NUNCA** decodifique os frames gravados no disco usando OpenCV, FFmpeg ou similares, pois isso exige poder de processamento desnecessário, quebrando o princípio de baixíssimo consumo de hardware do NVR.
    
-2. **Visualização Embutida no Tkinter (Pillow Preview)**:
-   - A visualização ao vivo no Tkinter é feita via `LiveCameraWidget` que lê `/api/frame.jpeg?src={camera}` de forma cíclica e renderiza em um `Label` através do Pillow (`Image` e `ImageTk`).
-   - A requisição de imagem deve rodar em uma thread separada para não congelar a GUI do Tkinter.
-   - O loop de frame-fetching **DEVE** parar imediatamente se a câmera for recolhida (`collapse()`) ou se a janela for fechada (`graceful_shutdown()`) para liberar as sockets e evitar vazamento de memória e processamento fantasma.
+2. **Visualização Embutida no Tkinter (MJPEG Real-Time Stream)**:
+   - A visualização ao vivo no Tkinter é feita via `LiveCameraWidget` que abre a rota `/api/stream.mjpeg?src={camera}_mjpeg` e consome a conexão contínua via socket HTTP.
+   - O código lê pedaços de dados em bytes, localizando os marcadores de SOI (`\xff\xd8`) e EOI (`\xff\xd9`) para remontar as imagens JPEG e exibí-las via Pillow (`Image` e `ImageTk`).
+   - A leitura e reconstrução devem rodar em threads separadas para não congelar a GUI do Tkinter.
+   - O loop de streaming **DEVE** parar imediatamente (fechando a conexão HTTP e o loop) se a câmera for recolhida (`collapse()`) ou se a janela for fechada (`graceful_shutdown()`), garantindo que não haja vazamentos de socket ou uso de rede desnecessário.
    
 3. **Caminhos de Gravação Diários**:
    - As gravações devem ser salvas em subpastas de data (`YYYY-MM-DD`) dentro do diretório de destino.
