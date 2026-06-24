@@ -191,8 +191,8 @@ class LiveCameraWidget(tk.Frame):
                     raise Exception("Sem dados")
                     
                 image = Image.open(io.BytesIO(img_data))
-                # Preview menor de 320x180 para caber perfeitamente no layout do painel
-                image = image.resize((320, 180), Image.Resampling.BILINEAR)
+                # Preview de 480x270 para caber perfeitamente no layout do painel
+                image = image.resize((480, 270), Image.Resampling.BILINEAR)
                 
                 if self.running:
                     self.update_image(image)
@@ -288,7 +288,7 @@ class CameraManagerApp:
         # 1. Configura título e layout se não estiver em modo silencioso
         if not self.silent:
             self.root.title(f"Painel Câmeras - Farmácia (NVR Unificado v{VERSION})")
-            self.root.geometry("760x700")
+            self.root.geometry("880x700")
             self.root.configure(bg=BG_COLOR)
             self.root.resizable(False, False)
             
@@ -397,7 +397,7 @@ class CameraManagerApp:
         left_col = tk.Frame(split_container, bg=BG_COLOR, width=360)
         left_col.pack(side="left", fill="both", expand=True)
         
-        right_col = tk.Frame(split_container, bg=BG_COLOR, width=360)
+        right_col = tk.Frame(split_container, bg=BG_COLOR, width=500)
         right_col.pack(side="right", fill="both", expand=True)
 
         # 1. HEADER / CABEÇALHO (na coluna da esquerda)
