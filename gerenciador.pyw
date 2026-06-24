@@ -13,7 +13,7 @@ import shutil
 from datetime import datetime, timedelta
 
 # Versão do Sistema (usada para o auto-update)
-VERSION = "3.8.4"
+VERSION = "4.0"
 
 # Configurações do Projeto
 PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -57,7 +57,7 @@ class CameraManagerApp:
         self.status_lock = threading.Lock()
         self.alerted_duplicates = {} # Evita exibir alerta popup repetidamente
         
-        self.streams = self.parse_streams()
+        self.streams = [s for s in self.parse_streams() if not s.endswith("_live")]
         self.local_ip = self.get_local_ip()
         
         # 1. Configura título e layout se não estiver em modo silencioso
@@ -218,6 +218,15 @@ class CameraManagerApp:
         self.lbl_val_backups = tk.Label(row_backups, text="Calculando...", font=("Segoe UI", 9, "bold"), fg=ORANGE_COLOR, bg=CARD_COLOR)
         self.lbl_val_backups.pack(side="left")
         
+        # Linha Monitor Lado a Lado Web
+        row_web_monitor = tk.Frame(self.card_global, bg=CARD_COLOR, pady=1)
+        row_web_monitor.pack(anchor="w")
+        self.led_web_monitor = StatusLED(row_web_monitor, size=10, bg_color=CARD_COLOR)
+        self.led_web_monitor.pack(side="left", padx=(0, 6), pady=4)
+        tk.Label(row_web_monitor, text="Monitor Lado a Lado: ", font=("Segoe UI", 9), fg=TEXT_COLOR, bg=CARD_COLOR).pack(side="left")
+        self.lbl_val_web_monitor = tk.Label(row_web_monitor, text="INATIVO", font=("Segoe UI", 9, "bold"), fg=RED_COLOR, bg=CARD_COLOR)
+        self.lbl_val_web_monitor.pack(side="left")
+        
         # Card 2: Endereço IP
         self.card_network = tk.Frame(top_cards_frame, bg=CARD_COLOR, bd=1, relief="flat", padx=15, pady=8)
         self.card_network.grid(row=0, column=1, padx=4, pady=4, sticky="nsew")
@@ -270,6 +279,15 @@ class CameraManagerApp:
             tk.Label(row_grav, text="Gravação: ", font=("Segoe UI", 9), fg=TEXT_COLOR, bg=CARD_COLOR).pack(side="left")
             lbl_grav = tk.Label(row_grav, text="Verificando...", font=("Segoe UI", 9, "bold"), fg=ORANGE_COLOR, bg=CARD_COLOR)
             lbl_grav.pack(side="left")
+
+            # Web Stream
+            row_web = tk.Frame(card, bg=CARD_COLOR)
+            row_web.pack(anchor="w", pady=1)
+            led_web = StatusLED(row_web, size=10, bg_color=CARD_COLOR)
+            led_web.pack(side="left", padx=(0, 6), pady=2)
+            tk.Label(row_web, text="Web Stream: ", font=("Segoe UI", 9), fg=TEXT_COLOR, bg=CARD_COLOR).pack(side="left")
+            lbl_web = tk.Label(row_web, text="Verificando...", font=("Segoe UI", 9, "bold"), fg=ORANGE_COLOR, bg=CARD_COLOR)
+            lbl_web.pack(side="left")
             
             # Última gravação/Sync
             lbl_sync = tk.Label(card, text="Buscando arquivos...", font=("Segoe UI", 8, "bold"), fg=TEXT_MUTED, bg=CARD_COLOR, justify="left", wraplength=280)
@@ -281,6 +299,8 @@ class CameraManagerApp:
                 "lbl_sinal": lbl_sinal,
                 "led_grav": led_grav,
                 "lbl_grav": lbl_grav,
+                "led_web": led_web,
+                "lbl_web": lbl_web,
                 "lbl_sync": lbl_sync
             }
             
@@ -459,11 +479,15 @@ class CameraManagerApp:
                     if stream in self.alerted_duplicates:
                         del self.alerted_duplicates[stream]
                 
+                web_status, web_color, web_border = self.check_live_stream_status(go2rtc_ok, stream)
                 cam_states[stream] = {
                     "grav_ok": c_grav_ok,
                     "signal": c_signal_str,
                     "sync": last_file_str,
-                    "duplicate_error": duplicate_msg is not None
+                    "duplicate_error": duplicate_msg is not None,
+                    "web_status": web_status,
+                    "web_color": web_color,
+                    "web_border": web_border
                 }
             
             # Atualiza a interface (se não estiver em modo silencioso)
@@ -578,6 +602,45 @@ class CameraManagerApp:
             except Exception:
                 return "Erro API"
 
+    def check_live_stream_status(self, go2rtc_ok, stream_name):
+        if not go2rtc_ok:
+            return "Indisponível", RED_COLOR, "#991B1B"
+        
+        live_name = stream_name + "_live"
+        try:
+            with urllib.request.urlopen("http://localhost:1984/api/streams", timeout=1.0) as conn:
+                data = json.loads(conn.read().decode())
+                if live_name in data:
+                    stream_data = data[live_name]
+                    consumers = stream_data.get("consumers", [])
+                    producers = stream_data.get("producers", [])
+                    
+                    # Filtra consumidores internos (ignora Python/FFmpeg)
+                    real_consumers = []
+                    for c in consumers:
+                        ua = c.get("user_agent", "").lower()
+                        if "python" not in ua and "lavf" not in ua:
+                            real_consumers.append(c)
+                            
+                    if real_consumers:
+                        # Se há pessoas assistindo, verifica se o transcoding está ativo
+                        has_active_producer = False
+                        for p in producers:
+                            if p.get("tracks") or p.get("mediainfo") or p.get("active"):
+                                has_active_producer = True
+                                break
+                        
+                        if has_active_producer:
+                            return f"ATIVA ({len(real_consumers)})", GREEN_COLOR, "#065F46"
+                        else:
+                            return "ERRO TRANSCOD.", RED_COLOR, "#991B1B"
+                    else:
+                        return "DISPONÍVEL", GREEN_COLOR, "#065F46"
+                else:
+                    return "Não configurada", ORANGE_COLOR, "#78350F"
+        except Exception:
+            return "Erro API", RED_COLOR, "#991B1B"
+
     def check_last_recording(self, gdrive_ok, gdrive_path, stream_name):
         read_path = gdrive_path
         if not gdrive_ok or not os.path.exists(gdrive_path):
@@ -635,16 +698,19 @@ class CameraManagerApp:
                     addr = consumer.get("remote_addr", "")
                     ua = consumer.get("user_agent", "").lower()
                     
-                    if "127.0.0.1" in addr or "[::1]" in addr or "localhost" in addr:
-                        continue
-                    if "lavf" in ua:
+                    # Ignora conexões de gravação internas do Python e do ffmpeg
+                    if "python" in ua or "lavf" in ua:
                         continue
                         
                     ip = addr.split(":")[0] if ":" in addr else addr
+                    if ip == "127.0.0.1" or ip == "[::1]":
+                        ip = "Este PC"
+                        
                     browser = "Navegador"
                     if "chrome" in ua: browser = "Chrome"
                     elif "safari" in ua and "chrome" not in ua: browser = "Safari"
                     elif "firefox" in ua: browser = "Firefox"
+                    elif "edge" in ua: browser = "Edge"
                     
                     viewers.append(f"{ip} ({browser})")
         except Exception:
@@ -682,6 +748,14 @@ class CameraManagerApp:
                 self.lbl_val_backups.configure(text=f"{backup_count} vídeo(s) ({size_mb:.1f} MB)", fg=ORANGE_COLOR)
                 self.led_backups.set_status(ORANGE_COLOR, "#78350F")
                 
+            # 2.7. Monitor Web status
+            if live_viewers:
+                self.lbl_val_web_monitor.configure(text=f"ATIVO ({len(live_viewers)})", fg=GREEN_COLOR)
+                self.led_web_monitor.set_status(GREEN_COLOR, "#065F46")
+            else:
+                self.lbl_val_web_monitor.configure(text="INATIVO", fg=TEXT_MUTED)
+                self.led_web_monitor.set_status(RED_COLOR, "#991B1B")
+                
             # 3. Atualiza os visualizadores ao vivo
             if live_viewers:
                 self.lbl_viewers.configure(text=f"👁️ Assistindo: {len(live_viewers)} ({', '.join(live_viewers)})", fg=GREEN_COLOR)
@@ -714,6 +788,11 @@ class CameraManagerApp:
                     else:
                         card["lbl_grav"].configure(text="PARADO", fg=RED_COLOR)
                         card["led_grav"].set_status(RED_COLOR, "#991B1B")
+                        
+                    # Web Stream
+                    if "led_web" in card and "lbl_web" in card:
+                        card["lbl_web"].configure(text=state["web_status"], fg=state["web_color"])
+                        card["led_web"].set_status(state["web_color"], state["web_border"])
                         
                     card["lbl_sync"].configure(text=state["sync"])
 
@@ -1021,9 +1100,13 @@ class CameraManagerApp:
             if not self.check_process_go2rtc():
                 if not self.silent:
                     self.add_log("Ligando Ponte RTSP (go2rtc.exe)...")
+                go2rtc_dir = os.path.dirname(GO2RTC_EXE)
+                env = os.environ.copy()
+                env["PATH"] = go2rtc_dir + os.pathsep + env.get("PATH", "")
                 subprocess.Popen(
                     [GO2RTC_EXE],
-                    cwd=os.path.dirname(GO2RTC_EXE),
+                    cwd=go2rtc_dir,
+                    env=env,
                     creationflags=subprocess.CREATE_NO_WINDOW
                 )
                 time.sleep(2.5)

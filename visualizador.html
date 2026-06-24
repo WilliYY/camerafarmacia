@@ -466,7 +466,7 @@
             <span>Servidor ativo em:</span>
             <span class="indicator-pill" id="ip-display">127.0.0.1</span>
         </div>
-        <div>v3.8.4 Dashboard de Segurança Profissional</div>
+        <div>v3.9 Dashboard de Segurança Profissional</div>
     </footer>
 
     <script>
@@ -582,13 +582,20 @@
                         return;
                     }
                     
+                    // Filtra as streams para exibir apenas as versões _live se existirem
+                    let streamsToShow = streams;
+                    const liveStreams = streams.filter(s => s.endsWith("_live"));
+                    if (liveStreams.length > 0) {
+                        streamsToShow = liveStreams;
+                    }
+                    
                     // Sucesso! Esconde tela de vazio e atualiza badge
                     emptyState.style.display = "none";
-                    serverBadge.textContent = `ONLINE | ${streams.length} CAM`;
+                    serverBadge.textContent = `ONLINE | ${streamsToShow.length} CAM`;
                     serverBadge.classList.add("server-connected");
                     
                     // Renderiza cada câmera
-                    streams.forEach(stream => {
+                    streamsToShow.forEach(stream => {
                         createCameraCard(stream);
                     });
                 })
@@ -605,7 +612,9 @@
             card.id = `card-${streamName}`;
             
             let webrtcUrl = `http://${currentIP}:1984/video.html?src=${streamName}&media=video`;
-            if (currentMode !== "auto") {
+            if (currentMode === "auto") {
+                webrtcUrl += `&mode=webrtc,mse`;
+            } else {
                 webrtcUrl += `&mode=${currentMode}`;
             }
             
@@ -613,7 +622,7 @@
                 <div class="camera-titlebar">
                     <div class="camera-name">
                         <span class="pulse-dot"></span>
-                        <span>CÂMERA: ${streamName.toUpperCase()}</span>
+                        <span>CÂMERA: ${streamName.replace("_live", "").toUpperCase()}</span>
                     </div>
                     <div class="camera-actions">
                         <button class="card-icon-btn" title="Recarregar esta câmera" onclick="reloadCamera('${streamName}')">🔄</button>
