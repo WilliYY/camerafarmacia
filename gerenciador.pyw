@@ -13,7 +13,7 @@ import shutil
 from datetime import datetime, timedelta
 
 # Versão do Sistema (usada para o auto-update)
-VERSION = "3.7"
+VERSION = "3.8"
 
 # Configurações do Projeto
 PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -23,6 +23,7 @@ LOGS_DIR = os.path.join(PROJ_DIR, "logs")
 # Garante a existência das pastas do projeto
 os.makedirs(LOGS_DIR, exist_ok=True)
 os.makedirs(os.path.join(PROJ_DIR, "backup_gravacoes"), exist_ok=True)
+os.makedirs(os.path.join(PROJ_DIR, "gravando_temp"), exist_ok=True)
 
 GDRIVE_ROOT = r"G:\Meu Drive\CAMERAS"
 
@@ -924,21 +925,29 @@ class CameraManagerApp:
         hora_fim = fim_bloco.strftime("%H-%M")
         
         nome_arquivo = os.path.join(pasta_final, f"camera_{data_dia}_{hora_inicio}_ate_{hora_fim}.mp4")
-        escrever_log_cam(f"Iniciando gravacao do bloco: {os.path.basename(nome_arquivo)}")
+        
+        # Gravação local temporária para evitar bloqueio e erros de sincronização no Google Drive
+        temp_dir = os.path.join(PROJ_DIR, "gravando_temp", stream_name)
+        os.makedirs(temp_dir, exist_ok=True)
+        nome_temp = os.path.join(temp_dir, f"temp_camera_{data_dia}_{hora_inicio}_ate_{hora_fim}.mp4")
+        
+        escrever_log_cam(f"Iniciando gravacao temporaria do bloco: {os.path.basename(nome_arquivo)}")
         
         url = f"http://127.0.0.1:1984/api/stream.mp4?src={stream_name}"
         
         self.atualizar_heartbeat_cam(gdrive_dir, stream_name)
         last_heartbeat_time = time.time()
         
+        status_ret = "reconectar"
         try:
             req = urllib.request.Request(url)
             with urllib.request.urlopen(req, timeout=15) as response:
-                with open(nome_arquivo, "wb") as out_file:
+                with open(nome_temp, "wb") as out_file:
                     while True:
                         if not self.recording_active.get(stream_name, False):
                             escrever_log_cam("Sinal de parada detectado.")
-                            return "parar"
+                            status_ret = "parar"
+                            break
                             
                         # Batimento cardíaco e detecção de duplicidade
                         agora_ts = time.time()
@@ -946,14 +955,16 @@ class CameraManagerApp:
                             conflito = self.verificar_duplicidade_rede_cam(gdrive_dir, stream_name)
                             if conflito:
                                 escrever_log_cam(f"[ERRO_DUPLICADO] O computador {conflito['hostname']} ({conflito['ip']}) ja esta gravando.")
-                                return "duplicado"
+                                status_ret = "duplicado"
+                                break
                             self.atualizar_heartbeat_cam(gdrive_dir, stream_name)
                             last_heartbeat_time = agora_ts
                             
                         # Rotação de blocos
                         if datetime.now() >= fim_bloco:
-                            escrever_log_cam("Bloco anterior finalizado e salvo no Drive.")
-                            return "rotacionar"
+                            escrever_log_cam("Bloco anterior finalizado localmente.")
+                            status_ret = "rotacionar"
+                            break
                             
                         # Leitura do fluxo de vídeo
                         try:
@@ -966,14 +977,33 @@ class CameraManagerApp:
                             continue
         except Exception as e:
             escrever_log_cam(f"Erro na conexao com a stream: {str(e)}")
-            if os.path.exists(nome_arquivo) and os.path.getsize(nome_arquivo) == 0:
+            status_ret = "erro"
+            
+        # Após fechar o arquivo temporário, movemos ele para a pasta definitiva (G: Drive ou backup local se offline)
+        if os.path.exists(nome_temp):
+            if os.path.getsize(nome_temp) > 0:
                 try:
-                    os.remove(nome_arquivo)
+                    # Garante que a pasta final exista
+                    os.makedirs(pasta_final, exist_ok=True)
+                    shutil.move(nome_temp, nome_arquivo)
+                    escrever_log_cam(f"Bloco movido com sucesso para a pasta definitiva: {os.path.basename(nome_arquivo)}")
+                except Exception as e_move:
+                    escrever_log_cam(f"Erro ao mover bloco para {pasta_final} ({str(e_move)}). Tentando salvar no backup local.")
+                    try:
+                        backup_dir = os.path.join(PROJ_DIR, "backup_gravacoes", stream_name)
+                        os.makedirs(backup_dir, exist_ok=True)
+                        backup_arquivo = os.path.join(backup_dir, os.path.basename(nome_arquivo))
+                        shutil.move(nome_temp, backup_arquivo)
+                        escrever_log_cam(f"Bloco salvo no backup local de contingencia: {os.path.basename(nome_arquivo)}")
+                    except Exception as e_backup:
+                        escrever_log_cam(f"ERRO CRITICO: Nao foi possivel salvar no backup local ({str(e_backup)})")
+            else:
+                try:
+                    os.remove(nome_temp)
                 except Exception:
                     pass
-            return "erro"
-            
-        return "reconectar"
+                    
+        return status_ret
 
     # ================= CLIQUES DE BOTÕES =================
     def click_iniciar(self):

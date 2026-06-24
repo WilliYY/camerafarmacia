@@ -3,6 +3,7 @@ diagnostico.txt
 *.tmp
 *.log
 *.lock
+gravando_temp/
 
 # Cache do Python
 __pycache__/
