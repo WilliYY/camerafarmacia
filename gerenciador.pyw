@@ -13,7 +13,7 @@ import shutil
 from datetime import datetime, timedelta
 
 # Versão do Sistema (usada para o auto-update)
-VERSION = "4.2"
+VERSION = "4.4"
 
 # Configurações do Projeto
 PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -106,6 +106,10 @@ class CameraManagerApp:
             
             self.setup_styles()
             self.create_widgets()
+            
+            # Inicializa a máquina de estados do botão e animação
+            self.button_state = "STOPPED"
+            self.animate_pulse()
             
             # Intercepta o fechamento no X do Tkinter para desligar de forma segura
             self.root.protocol("WM_DELETE_WINDOW", self.on_close_window)
@@ -364,37 +368,23 @@ class CameraManagerApp:
         btn_frame = tk.Frame(self.root, bg=BG_COLOR, pady=6)
         btn_frame.pack(fill="x", padx=20)
         
-        self.btn_start = tk.Button(
+        self.btn_action = tk.Button(
             btn_frame, 
             text=" ▶️ Iniciar Todas as Gravações", 
-            font=("Segoe UI", 11, "bold"), 
+            font=("Segoe UI", 12, "bold"), 
             fg="#FFFFFF", 
             bg="#059669", 
             activebackground="#047857", 
             activeforeground="#FFFFFF",
             bd=0, 
             cursor="hand2",
-            padx=15, 
-            pady=6,
+            padx=20, 
+            pady=10,
             command=self.click_iniciar
         )
-        self.btn_start.pack(side="left", padx=4, expand=True, fill="x")
-        
-        self.btn_stop = tk.Button(
-            btn_frame, 
-            text=" ⏹️ Parar Todas as Gravações", 
-            font=("Segoe UI", 11, "bold"), 
-            fg="#FFFFFF", 
-            bg="#DC2626", 
-            activebackground="#B91C1C", 
-            activeforeground="#FFFFFF",
-            bd=0, 
-            cursor="hand2",
-            padx=15, 
-            pady=6,
-            command=self.click_parar
-        )
-        self.btn_stop.pack(side="left", padx=4, expand=True, fill="x")
+        self.btn_action.pack(fill="x", padx=4, pady=4, expand=True)
+        self.btn_action.bind("<Enter>", self.on_btn_action_enter)
+        self.btn_action.bind("<Leave>", self.on_btn_action_leave)
 
         # Ações extras
         actions_frame = tk.Frame(self.root, bg=BG_COLOR, pady=2)
@@ -676,7 +666,7 @@ class CameraManagerApp:
         if not go2rtc_ok:
             return "Indisponível"
         try:
-            with urllib.request.urlopen("http://localhost:1984/api/streams", timeout=1.0) as conn:
+            with urllib.request.urlopen("http://127.0.0.1:1984/api/streams", timeout=1.0) as conn:
                 data = json.loads(conn.read().decode())
                 if stream_name in data:
                     producers = data[stream_name].get("producers", [])
@@ -702,7 +692,7 @@ class CameraManagerApp:
         
         live_name = stream_name + "_live"
         try:
-            with urllib.request.urlopen("http://localhost:1984/api/streams", timeout=1.0) as conn:
+            with urllib.request.urlopen("http://127.0.0.1:1984/api/streams", timeout=1.0) as conn:
                 data = json.loads(conn.read().decode())
                 if live_name in data:
                     stream_data = data[live_name]
@@ -784,7 +774,7 @@ class CameraManagerApp:
             return []
         viewers = []
         try:
-            with urllib.request.urlopen("http://localhost:1984/api/streams", timeout=1.0) as conn:
+            with urllib.request.urlopen("http://127.0.0.1:1984/api/streams", timeout=1.0) as conn:
                 data = json.loads(conn.read().decode())
             for stream_name, stream_data in data.items():
                 consumers = stream_data.get("consumers", [])
@@ -816,6 +806,16 @@ class CameraManagerApp:
         with self.status_lock:
             if self.silent:
                 return
+                
+            # Sincroniza o estado do botão com a realidade se não estiver em transição
+            any_recording = any(state["grav_ok"] for state in cam_states.values())
+            if hasattr(self, "button_state") and self.button_state not in ("STARTING", "STOPPING"):
+                if any_recording:
+                    if self.button_state != "RECORDING":
+                        self.set_button_state("RECORDING")
+                else:
+                    if self.button_state != "STOPPED":
+                        self.set_button_state("STOPPED")
                 
             # 1. go2rtc status
             if go2rtc_ok:
@@ -1179,9 +1179,99 @@ class CameraManagerApp:
         return status_ret
 
     # ================= CLIQUES DE BOTÕES =================
+    def set_button_state(self, new_state):
+        if self.silent:
+            return
+        self.button_state = new_state
+        self.update_action_button()
+
+    def update_action_button(self):
+        if self.silent or not hasattr(self, "btn_action"):
+            return
+            
+        if self.button_state == "STOPPED":
+            self.btn_action.configure(
+                text=" ▶️ Iniciar Todas as Gravações",
+                bg="#059669",
+                activebackground="#047857",
+                state="normal",
+                command=self.click_iniciar
+            )
+        elif self.button_state == "STARTING":
+            self.btn_action.configure(
+                text=" ⏳ Inicializando Serviços...",
+                bg="#D97706",
+                activebackground="#D97706",
+                state="disabled",
+                command=None
+            )
+        elif self.button_state == "RECORDING":
+            self.btn_action.configure(
+                text=" 🔴 Gravando... Clique para Parar",
+                bg="#DC2626",
+                activebackground="#B91C1C",
+                state="normal",
+                command=self.click_parar
+            )
+        elif self.button_state == "STOPPING":
+            self.btn_action.configure(
+                text=" ⏳ Salvando Vídeos e Parando...",
+                bg="#4B5563",
+                activebackground="#4B5563",
+                state="disabled",
+                command=None
+            )
+
+    def on_btn_action_enter(self, event):
+        if self.button_state == "STOPPED":
+            self.btn_action.configure(bg="#10B981")
+        elif self.button_state == "RECORDING":
+            self.btn_action.configure(bg="#EF4444")
+        elif self.button_state == "STARTING":
+            self.btn_action.configure(bg="#F59E0B")
+        elif self.button_state == "STOPPING":
+            self.btn_action.configure(bg="#4B5563")
+
+    def on_btn_action_leave(self, event):
+        if self.button_state == "STOPPED":
+            self.btn_action.configure(bg="#059669")
+        elif self.button_state == "RECORDING":
+            self.btn_action.configure(bg="#DC2626")
+        elif self.button_state == "STARTING":
+            self.btn_action.configure(bg="#D97706")
+        elif self.button_state == "STOPPING":
+            self.btn_action.configure(bg="#4B5563")
+
+    def animate_pulse(self):
+        if not self.running_monitor:
+            return
+            
+        if not self.silent and hasattr(self, "button_state") and hasattr(self, "btn_action"):
+            if self.button_state == "RECORDING":
+                current_text = self.btn_action.cget("text")
+                if "🔴" in current_text:
+                    self.btn_action.configure(text=" ⭕ GRAVANDO... CLIQUE PARA PARAR")
+                else:
+                    self.btn_action.configure(text=" 🔴 GRAVANDO... CLIQUE PARA PARAR")
+            elif self.button_state == "STARTING":
+                current_text = self.btn_action.cget("text")
+                if "⏳" in current_text:
+                    self.btn_action.configure(text=" ⚙️ INICIALIZANDO SERVIÇOS...")
+                else:
+                    self.btn_action.configure(text=" ⏳ INICIALIZANDO SERVIÇOS...")
+            elif self.button_state == "STOPPING":
+                current_text = self.btn_action.cget("text")
+                if "⏳" in current_text:
+                    self.btn_action.configure(text=" ⚙️ SALVANDO VÍDEOS E PARANDO...")
+                else:
+                    self.btn_action.configure(text=" ⏳ SALVANDO VÍDEOS E PARANDO...")
+                    
+        self.root.after(800, self.animate_pulse)
+
     def click_iniciar(self):
         if not self.silent:
             self.add_log("Iniciando gravação do sistema...")
+            self.set_button_state("STARTING")
         threading.Thread(target=self.run_start_sequence, daemon=True).start()
 
     def run_start_sequence(self):
@@ -1218,14 +1308,17 @@ class CameraManagerApp:
                 
             if not self.silent:
                 self.root.after(0, lambda: self.add_log("Inicialização concluída em segundo plano."))
+                self.root.after(0, lambda: self.set_button_state("RECORDING"))
         except Exception as e:
             if not self.silent:
                 self.root.after(0, lambda: self.add_log(f"ERRO ao iniciar gravação: {str(e)}"))
                 self.root.after(0, lambda: messagebox.showerror("Erro ao Iniciar", f"Não foi possível iniciar o serviço:\n{str(e)}"))
+                self.root.after(0, lambda: self.set_button_state("STOPPED"))
 
     def click_parar(self):
         if not self.silent:
             self.add_log("Parando gravação e finalizando processos...")
+            self.set_button_state("STOPPING")
         threading.Thread(target=self.run_stop_sequence_verbose, daemon=True).start()
 
     def run_stop_sequence(self):
@@ -1281,6 +1374,7 @@ class CameraManagerApp:
         self.run_stop_sequence()
         if not self.silent:
             self.root.after(0, lambda: self.add_log("Gravação interrompida. Todos os serviços parados!"))
+            self.root.after(0, lambda: self.set_button_state("STOPPED"))
 
     def click_abrir_pasta(self):
         if os.path.exists(GDRIVE_ROOT):
@@ -1500,6 +1594,14 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
                 self.add_log(f"Falha ao configurar Firewall: {str(e)}")
 
     # ================= SISTEMA DE ATUALIZAÇÃO AUTOMÁTICA =================
+    def is_version_newer(self, online, local):
+        try:
+            o_parts = [int(x) for x in online.split(".")]
+            l_parts = [int(x) for x in local.split(".")]
+            return o_parts > l_parts
+        except Exception:
+            return online != local
+
     def check_for_updates_thread(self):
         time.sleep(5)
         self.add_log("Buscando atualizacoes no GitHub...")
@@ -1516,7 +1618,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             match = re.search(r'VERSION\s*=\s*["\']([^"\']+)["\']', content)
             if match:
                 online_version = match.group(1)
-                if online_version != VERSION:
+                if self.is_version_newer(online_version, VERSION):
                     self.add_log(f"Nova versao v{online_version} encontrada! (Versao local: v{VERSION})")
                     self.root.after(0, lambda: self.prompt_update(online_version, url_gerenciador, url_visualizador))
                 else:
@@ -1690,7 +1792,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             s1984.connect(('127.0.0.1', 1984))
             log.append(" - Porta API (1984): ABERTA")
             s1984.close()
-            with urllib.request.urlopen("http://localhost:1984/api/streams", timeout=1.0) as conn:
+            with urllib.request.urlopen("http://127.0.0.1:1984/api/streams", timeout=1.0) as conn:
                 data = json.loads(conn.read().decode())
                 log.append(f" - Configuração de streams na API: {json.dumps(data, indent=2)}")
         except Exception as e:
