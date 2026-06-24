@@ -15,7 +15,7 @@ import io
 from PIL import Image, ImageTk
 
 # Versão do Sistema (usada para o auto-update)
-VERSION = "4.5"
+VERSION = "4.6"
 
 # Configurações do Projeto
 PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -278,6 +278,7 @@ class CameraManagerApp:
         
         # Variáveis de Gravação em Memória (NVR Integrado)
         self.recording_active = {}
+        self.active_connections = {}
         self.status_lock = threading.Lock()
         self.alerted_duplicates = {} # Evita exibir alerta popup repetidamente
         
@@ -287,7 +288,7 @@ class CameraManagerApp:
         # 1. Configura título e layout se não estiver em modo silencioso
         if not self.silent:
             self.root.title(f"Controle das Câmeras - Farmácia (NVR Unificado v{VERSION})")
-            self.root.geometry("680x820")
+            self.root.geometry("680x760")
             self.root.configure(bg=BG_COLOR)
             self.root.resizable(False, True) # Permite redimensionar verticalmente para as câmeras
             
@@ -411,15 +412,6 @@ class CameraManagerApp:
         )
         subtitle_label.pack(side="left", padx=10, pady=6)
         
-        self.lbl_viewers = tk.Label(
-            header_frame,
-            text="👁️ Assistindo: 0",
-            font=("Segoe UI", 9, "bold"),
-            fg=ORANGE_COLOR,
-            bg=BG_COLOR
-        )
-        self.lbl_viewers.pack(side="right", pady=6)
-        
         # Divisor horizontal elegante
         separator = tk.Frame(self.root, height=1, bg="#1F2937")
         separator.pack(fill="x", padx=20)
@@ -428,12 +420,9 @@ class CameraManagerApp:
         top_cards_frame = tk.Frame(self.root, bg=BG_COLOR, pady=6)
         top_cards_frame.pack(fill="x", padx=20)
         
-        top_cards_frame.columnconfigure(0, weight=1, uniform="top_grid")
-        top_cards_frame.columnconfigure(1, weight=1, uniform="top_grid")
-        
         # Card 1: Serviços Globais
         self.card_global = tk.Frame(top_cards_frame, bg=CARD_COLOR, bd=1, relief="flat", padx=15, pady=8)
-        self.card_global.grid(row=0, column=0, padx=4, pady=4, sticky="nsew")
+        self.card_global.pack(fill="x", expand=True, padx=4, pady=4)
         tk.Label(self.card_global, text="Status dos Serviços", font=("Segoe UI", 9, "bold"), fg=TEXT_MUTED, bg=CARD_COLOR).pack(anchor="w")
         
         # Linha Ponte RTSP
@@ -462,32 +451,6 @@ class CameraManagerApp:
         tk.Label(row_backups, text="Backups Pendentes: ", font=("Segoe UI", 9), fg=TEXT_COLOR, bg=CARD_COLOR).pack(side="left")
         self.lbl_val_backups = tk.Label(row_backups, text="Calculando...", font=("Segoe UI", 9, "bold"), fg=ORANGE_COLOR, bg=CARD_COLOR)
         self.lbl_val_backups.pack(side="left")
-        
-        # Linha Monitor Lado a Lado Web
-        row_web_monitor = tk.Frame(self.card_global, bg=CARD_COLOR, pady=1)
-        row_web_monitor.pack(anchor="w")
-        self.led_web_monitor = StatusLED(row_web_monitor, size=10, bg_color=CARD_COLOR)
-        self.led_web_monitor.pack(side="left", padx=(0, 6), pady=4)
-        tk.Label(row_web_monitor, text="Monitor Lado a Lado: ", font=("Segoe UI", 9), fg=TEXT_COLOR, bg=CARD_COLOR).pack(side="left")
-        self.lbl_val_web_monitor = tk.Label(row_web_monitor, text="INATIVO", font=("Segoe UI", 9, "bold"), fg=RED_COLOR, bg=CARD_COLOR)
-        self.lbl_val_web_monitor.pack(side="left")
-        
-        # Card 2: Endereço IP
-        self.card_network = tk.Frame(top_cards_frame, bg=CARD_COLOR, bd=1, relief="flat", padx=15, pady=8)
-        self.card_network.grid(row=0, column=1, padx=4, pady=4, sticky="nsew")
-        tk.Label(self.card_network, text="Acesso na Rede Local (IP)", font=("Segoe UI", 9, "bold"), fg=TEXT_MUTED, bg=CARD_COLOR).pack(anchor="w")
-        tk.Label(self.card_network, text=f"IP: {self.local_ip}", font=("Segoe UI", 11, "bold"), fg=TEXT_COLOR, bg=CARD_COLOR).pack(anchor="w", pady=2)
-        
-        self.lbl_link = tk.Label(
-            self.card_network, 
-            text="Copiar link do painel Web", 
-            font=("Segoe UI", 8, "bold", "underline"), 
-            fg=ACCENT_COLOR, 
-            cursor="hand2", 
-            bg=CARD_COLOR
-        )
-        self.lbl_link.pack(anchor="w")
-        self.lbl_link.bind("<Button-1>", lambda e: self.copy_link_to_clipboard())
 
         # 3. GRID DINÂMICO DE CÂMERAS
         self.cameras_main_frame = tk.Frame(self.root, bg=BG_COLOR)
@@ -622,21 +585,7 @@ class CameraManagerApp:
         )
         self.btn_open_folder.pack(side="left", padx=4, expand=True, fill="x")
         
-        self.btn_monitor = tk.Button(
-            actions_frame, 
-            text=" 📺 Monitor Lado a Lado", 
-            font=("Segoe UI", 9, "bold"), 
-            fg=TEXT_COLOR, 
-            bg="#1F2937", 
-            activebackground="#374151", 
-            activeforeground=TEXT_COLOR,
-            bd=0, 
-            cursor="hand2",
-            padx=10, 
-            pady=5,
-            command=self.click_monitor
-        )
-        self.btn_monitor.pack(side="left", padx=4, expand=True, fill="x")
+        # O botão Monitor Lado a Lado foi removido conforme especificação da v4.6
 
         # Inicialização automática
         startup_frame = tk.Frame(self.root, bg=BG_COLOR, pady=2)
@@ -1049,18 +998,20 @@ class CameraManagerApp:
                 self.led_backups.set_status(ORANGE_COLOR, "#78350F")
                 
             # 2.7. Monitor Web status
-            if live_viewers:
-                self.lbl_val_web_monitor.configure(text=f"ATIVO ({len(live_viewers)})", fg=GREEN_COLOR)
-                self.led_web_monitor.set_status(GREEN_COLOR, "#065F46")
-            else:
-                self.lbl_val_web_monitor.configure(text="INATIVO", fg=TEXT_MUTED)
-                self.led_web_monitor.set_status(RED_COLOR, "#991B1B")
+            if hasattr(self, "lbl_val_web_monitor") and hasattr(self, "led_web_monitor"):
+                if live_viewers:
+                    self.lbl_val_web_monitor.configure(text=f"ATIVO ({len(live_viewers)})", fg=GREEN_COLOR)
+                    self.led_web_monitor.set_status(GREEN_COLOR, "#065F46")
+                else:
+                    self.lbl_val_web_monitor.configure(text="INATIVO", fg=TEXT_MUTED)
+                    self.led_web_monitor.set_status(RED_COLOR, "#991B1B")
                 
             # 3. Atualiza os visualizadores ao vivo
-            if live_viewers:
-                self.lbl_viewers.configure(text=f"👁️ Assistindo: {len(live_viewers)} ({', '.join(live_viewers)})", fg=GREEN_COLOR)
-            else:
-                self.lbl_viewers.configure(text="👁️ Assistindo: 0", fg=TEXT_MUTED)
+            if hasattr(self, "lbl_viewers"):
+                if live_viewers:
+                    self.lbl_viewers.configure(text=f"👁️ Assistindo: {len(live_viewers)} ({', '.join(live_viewers)})", fg=GREEN_COLOR)
+                else:
+                    self.lbl_viewers.configure(text="👁️ Assistindo: 0", fg=TEXT_MUTED)
                 
             # 4. Atualiza os cards das câmeras
             for stream, state in cam_states.items():
@@ -1161,6 +1112,15 @@ class CameraManagerApp:
                             except Exception as e:
                                 if not self.silent:
                                     self.root.after(0, lambda fn=filename, err=str(e): self.add_log(f"Erro ao subir {fn}: {err}"))
+                                    
+                # Walk backup_dir bottom-up and remove empty directories
+                for root_dir, dirs, files in os.walk(backup_dir, topdown=False):
+                    for d in dirs:
+                        dir_path = os.path.join(root_dir, d)
+                        try:
+                            os.rmdir(dir_path)
+                        except Exception:
+                            pass
             except Exception as e:
                 if not self.silent:
                     self.root.after(0, lambda err=str(e): self.add_log(f"Erro no loop de sincronizacao: {err}"))
@@ -1335,7 +1295,9 @@ class CameraManagerApp:
         status_ret = "reconectar"
         try:
             req = urllib.request.Request(url)
-            with urllib.request.urlopen(req, timeout=15) as response:
+            response = urllib.request.urlopen(req, timeout=15)
+            self.active_connections[stream_name] = response
+            try:
                 with open(nome_temp, "wb") as out_file:
                     while True:
                         if not self.recording_active.get(stream_name, False):
@@ -1369,9 +1331,13 @@ class CameraManagerApp:
                             out_file.write(chunk)
                         except socket.timeout:
                             continue
+            finally:
+                response.close()
         except Exception as e:
             escrever_log_cam(f"Erro na conexao com a stream: {str(e)}")
             status_ret = "erro"
+        finally:
+            self.active_connections.pop(stream_name, None)
             
         # Após fechar o arquivo temporário, movemos ele para a pasta definitiva (G: Drive ou backup local se offline)
         if os.path.exists(nome_temp):
@@ -1542,11 +1508,24 @@ class CameraManagerApp:
             self.set_button_state("STOPPING")
         threading.Thread(target=self.run_stop_sequence_verbose, daemon=True).start()
 
+    def run_stop_sequence_verbose(self):
+        self.run_stop_sequence()
+        if not self.silent:
+            self.root.after(0, lambda: self.add_log("Gravação finalizada com sucesso."))
+            self.root.after(0, lambda: self.set_button_state("STOPPED"))
+
     def run_stop_sequence(self):
         # 1. Sinaliza parada para as threads locais
         for stream in self.streams:
             self.recording_active[stream] = False
             
+        # Close all active connections before waiting for threads to exit
+        for stream, conn in list(self.active_connections.items()):
+            try:
+                conn.close()
+            except Exception:
+                pass
+
         # 2. Lê os PIDs dos arquivos de lock e depois os remove
         pids = {}
         for stream in self.streams:
@@ -1567,11 +1546,12 @@ class CameraManagerApp:
         if not self.silent:
             self.root.after(0, lambda: self.add_log("Finalizando tarefas de gravação..."))
         
-        # 3. Aguarda até 3 segundos para que as threads locais ou externas encerrem
+        # 3. Aguarda até 3 segundos para que as threads locais ou externas encerrem (ignora nosso próprio PID)
+        my_pid = os.getpid()
         for _ in range(15):
             any_running = False
             for stream, pid in pids.items():
-                if self.is_pid_running_and_python(pid):
+                if pid != my_pid and self.is_pid_running_and_python(pid):
                     any_running = True
             if not any_running:
                 break
@@ -1604,7 +1584,8 @@ class CameraManagerApp:
         self.add_log("Abrindo Monitor no navegador...")
         import webbrowser
         webbrowser.open("http://127.0.0.1:1984/visualizador.html")
-        self.flash_button(self.btn_monitor, "🌐 Abrindo...", "#3B82F6")
+        if hasattr(self, "btn_monitor"):
+            self.flash_button(self.btn_monitor, "🌐 Abrindo...", "#3B82F6")
 
     def click_configurar_inicializacao(self):
         try:
@@ -1702,6 +1683,13 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
                                 os.remove(filepath)
                                 if not self.silent:
                                     self.add_log(f"[EXCLUÍDO] Arquivo corrompido deletado: {filename}")
+                                log_filepath = os.path.join(LOGS_DIR, "corrompidos_excluidos.log")
+                                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                try:
+                                    with open(log_filepath, "a", encoding="utf-8") as log_f:
+                                        log_f.write(f"[{timestamp}] Deletado: {filepath}\n")
+                                except Exception:
+                                    pass
                             except Exception as e_del:
                                 if not self.silent:
                                     self.add_log(f"Erro ao deletar {filename}: {str(e_del)}")
@@ -1740,7 +1728,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             return
             
         # Altura base do gerenciador com todas as câmeras recolhidas
-        height = 820
+        height = 760
         
         # Como as câmeras agora são exibidas lado a lado, se pelo menos uma
         # estiver expandida, adicionamos a altura de um único vídeo (~220px)

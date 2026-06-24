@@ -1,4 +1,4 @@
-# 🎥 Controle e Gravação de Câmeras - Farmácia (v4.5 NVR Unificado)
+# 🎥 Controle e Gravação de Câmeras - Farmácia (v4.6 NVR Unificado)
 
 Este projeto é uma solução de NVR (Network Video Recorder) de baixíssimo consumo de hardware, projetada para capturar, gravar, monitorar e gerenciar múltiplas câmeras inteligentes (compatíveis com o ecossistema Tuya/Positivo) em um único arquivo unificado, com portabilidade total, prevenção de duplicidade na rede, visualização embutida no painel e auto-atualização direta via GitHub.
 
@@ -18,7 +18,6 @@ O sistema é 100% integrado em um único arquivo gerenciador (`gerenciador.pyw`)
    - **Contingência de Sincronização**: Se a pasta do Google Drive (`G:\Meu Drive\CAMERAS`) estiver offline, sem espaço ou sem permissão de escrita, o NVR desvia a gravação automaticamente para a pasta local `backup_gravacoes/{nome_camera}/{data_dia}/`.
    - **Sincronizador Automático Inteligente**: Uma thread dedicada monitora o Google Drive e, assim que a conexão é restabelecida, realiza o upload em segundo plano dos vídeos da pasta `backup_gravacoes/` para suas respectivas pastas de dia no Google Drive, deletando a cópia local para não encher o HD.
    - **Detecção de Conflitos na Rede**: Envia batimentos cardíacos (heartbeat) a cada 30 segundos para o Google Drive em formato JSON (`.active_recorder_{stream}.json`). Se outra máquina tentar gravar a mesma câmera no mesmo diretório, o conflito é detectado e o segundo gravador cessa a gravação imediatamente para evitar corrupção e duplicidade.
-   - **Monitor de Visualizadores**: Consulta a API do `go2rtc` e exibe em tempo real o IP e o navegador das pessoas que estão assistindo à live das câmeras no painel Web.
 
 3. **Visualização ao Vivo Embutida (Pillow Preview)**:
    - O painel exibe streams ao vivo das câmeras de forma direta no Tkinter usando widgets colapsáveis (`LiveCameraWidget`).
