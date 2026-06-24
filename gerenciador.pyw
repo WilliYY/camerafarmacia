@@ -194,40 +194,95 @@ class LiveCameraWidget(tk.Frame):
 
     def stop_stream(self):
         self.running = False
+        # Fecha a conexão MJPEG ativa para liberar imediatamente
+        if hasattr(self, '_mjpeg_response') and self._mjpeg_response:
+            try:
+                self._mjpeg_response.close()
+            except Exception:
+                pass
+            self._mjpeg_response = None
         self.video_lbl.configure(image="")
         self.photo = None
 
+    def _read_mjpeg_frames(self, url):
+        """Conecta ao stream MJPEG e gera frames JPEG continuamente via generator"""
+        req = urllib.request.Request(url)
+        response = urllib.request.urlopen(req, timeout=8.0)
+        self._mjpeg_response = response
+        
+        buf = b''
+        try:
+            while self.running:
+                chunk = response.read(16384)  # Lê blocos grandes para performance
+                if not chunk:
+                    break
+                buf += chunk
+                
+                # Busca frames JPEG completos pelos marcadores (SOI: FFD8, EOI: FFD9)
+                while True:
+                    start = buf.find(b'\xff\xd8')
+                    if start == -1:
+                        buf = buf[-2:]  # Mantém últimos 2 bytes para caso de marcador parcial
+                        break
+                    end = buf.find(b'\xff\xd9', start + 2)
+                    if end == -1:
+                        buf = buf[start:]  # Mantém do início do JPEG em diante
+                        if len(buf) > 2 * 1024 * 1024:  # Proteção: buffer > 2MB = frame corrompido
+                            buf = b''
+                        break
+                    
+                    # Frame JPEG completo extraído
+                    jpeg_data = buf[start:end + 2]
+                    buf = buf[end + 2:]
+                    yield jpeg_data
+        finally:
+            try:
+                response.close()
+            except Exception:
+                pass
+            self._mjpeg_response = None
+
     def stream_loop(self):
-        url = f"http://127.0.0.1:1984/api/frame.jpeg?src={self.stream_name}"
-        time.sleep(0.5)
+        """Loop principal de exibição via MJPEG stream (conexão persistente, ~15 FPS)"""
+        mjpeg_url = f"http://127.0.0.1:1984/api/stream.mjpeg?src={self.stream_name}"
+        time.sleep(0.3)
         
         while self.running:
             if not self.app.check_process_go2rtc():
                 self.show_error_message("Ponte RTSP offline")
                 time.sleep(1.0)
                 continue
-                
+            
             try:
-                req = urllib.request.Request(url)
-                with urllib.request.urlopen(req, timeout=6.0) as response:
-                    img_data = response.read()
-                    
-                if not img_data:
-                    raise Exception("Sem dados")
-                    
-                image = Image.open(io.BytesIO(img_data))
-                # Redimensiona dinamicamente para caber no painel (mantém 16:9)
-                tw = self.target_width
-                th = int(tw * 9 / 16)
-                image = image.resize((tw, th), Image.Resampling.BILINEAR)
+                last_frame_time = 0
+                min_interval = 0.066  # Limita a ~15 FPS para balancear fluidez e CPU
                 
-                if self.running:
-                    self.update_image(image)
+                for jpeg_data in self._read_mjpeg_frames(mjpeg_url):
+                    if not self.running:
+                        break
                     
-                time.sleep(0.14) # Aprox 7 FPS para economizar CPU
+                    # Rate limiter para não sobrecarregar a CPU
+                    now = time.time()
+                    if (now - last_frame_time) < min_interval:
+                        continue
+                    last_frame_time = now
+                    
+                    try:
+                        image = Image.open(io.BytesIO(jpeg_data))
+                        # Redimensiona mantendo 16:9 - mostra a imagem INTEIRA sem cortes
+                        tw = self.target_width
+                        th = int(tw * 9 / 16)
+                        image = image.resize((tw, th), Image.Resampling.BILINEAR)
+                        
+                        if self.running:
+                            self.update_image(image)
+                    except Exception:
+                        pass  # Frame corrompido, pula para o próximo
+                        
             except Exception as e:
-                self.show_error_message(f"Reconectando à stream...\n({str(e)})")
-                time.sleep(1.5)
+                if self.running:
+                    self.show_error_message(f"Reconectando...\n({type(e).__name__})")
+                    time.sleep(1.0)
 
     def show_error_message(self, msg):
         if not self.running:
@@ -243,53 +298,95 @@ class LiveCameraWidget(tk.Frame):
         fs_win = tk.Toplevel(self.app.root)
         fs_win.title(f"Visualizador Câmera: {self.stream_name.upper()}")
         fs_win.configure(bg="#000000")
-        fs_win.state("zoomed") # Tela cheia maximizada
+        fs_win.state("zoomed")
         
         fs_lbl = tk.Label(fs_win, bg="#000000")
         fs_lbl.pack(fill="both", expand=True)
         
         fs_running = [True]
+        fs_response = [None]
         
         def fs_loop():
-            url = f"http://127.0.0.1:1984/api/frame.jpeg?src={self.stream_name}"
+            mjpeg_url = f"http://127.0.0.1:1984/api/stream.mjpeg?src={self.stream_name}"
             while fs_running[0]:
                 try:
-                    w = fs_lbl.winfo_width()
-                    h = fs_lbl.winfo_height()
-                    if w < 100 or h < 100:
-                        w = fs_win.winfo_screenwidth()
-                        h = fs_win.winfo_screenheight()
+                    req = urllib.request.Request(mjpeg_url)
+                    response = urllib.request.urlopen(req, timeout=8.0)
+                    fs_response[0] = response
+                    
+                    buf = b''
+                    last_frame_time = 0
+                    min_interval = 0.05  # ~20 FPS para tela cheia (mais fluido)
+                    
+                    while fs_running[0]:
+                        chunk = response.read(32768)
+                        if not chunk:
+                            break
+                        buf += chunk
                         
-                    req = urllib.request.Request(url)
-                    with urllib.request.urlopen(req, timeout=6.0) as response:
-                        img_data = response.read()
-                        
-                    if img_data and fs_running[0]:
-                        image = Image.open(io.BytesIO(img_data))
-                        
-                        img_aspect = image.width / image.height
-                        win_aspect = w / h
-                        if win_aspect > img_aspect:
-                            new_h = h
-                            new_w = int(h * img_aspect)
-                        else:
-                            new_w = w
-                            new_h = int(w / img_aspect)
+                        while True:
+                            start = buf.find(b'\xff\xd8')
+                            if start == -1:
+                                buf = buf[-2:]
+                                break
+                            end = buf.find(b'\xff\xd9', start + 2)
+                            if end == -1:
+                                buf = buf[start:]
+                                if len(buf) > 2 * 1024 * 1024:
+                                    buf = b''
+                                break
                             
-                        image = image.resize((new_w, new_h), Image.Resampling.BILINEAR)
-                        photo = ImageTk.PhotoImage(image)
-                        fs_lbl.photo = photo
-                        fs_win.after(0, lambda p=photo: fs_lbl.configure(image=p))
-                        
-                    time.sleep(0.1) # 10 FPS na janela maximizada
+                            jpeg_data = buf[start:end + 2]
+                            buf = buf[end + 2:]
+                            
+                            now = time.time()
+                            if (now - last_frame_time) < min_interval:
+                                continue
+                            last_frame_time = now
+                            
+                            try:
+                                w = fs_lbl.winfo_width()
+                                h = fs_lbl.winfo_height()
+                                if w < 100 or h < 100:
+                                    w = fs_win.winfo_screenwidth()
+                                    h = fs_win.winfo_screenheight()
+                                
+                                image = Image.open(io.BytesIO(jpeg_data))
+                                # Escala mantendo proporção original (sem corte)
+                                img_aspect = image.width / image.height
+                                win_aspect = w / h
+                                if win_aspect > img_aspect:
+                                    new_h = h
+                                    new_w = int(h * img_aspect)
+                                else:
+                                    new_w = w
+                                    new_h = int(w / img_aspect)
+                                
+                                image = image.resize((new_w, new_h), Image.Resampling.BILINEAR)
+                                photo = ImageTk.PhotoImage(image)
+                                fs_lbl.photo = photo
+                                if fs_running[0]:
+                                    fs_win.after(0, lambda p=photo: fs_lbl.configure(image=p))
+                            except Exception:
+                                pass
+                    
+                    response.close()
                 except Exception:
-                    time.sleep(1.0)
+                    if fs_running[0]:
+                        time.sleep(1.0)
+                finally:
+                    fs_response[0] = None
                     
         fs_thread = threading.Thread(target=fs_loop, daemon=True)
         fs_thread.start()
         
         def on_close():
             fs_running[0] = False
+            if fs_response[0]:
+                try:
+                    fs_response[0].close()
+                except Exception:
+                    pass
             fs_win.destroy()
             
         fs_win.protocol("WM_DELETE_WINDOW", on_close)
