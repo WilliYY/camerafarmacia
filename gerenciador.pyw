@@ -412,7 +412,7 @@ class CameraManagerApp:
         self._cached_backup_stats = (0, 0)
         self._cached_backup_time = 0
         
-        self.streams = [s for s in self.parse_streams() if not s.endswith("_live")]
+        self.streams = [s for s in self.parse_streams() if not s.endswith("_live") and not s.endswith("_mjpeg")]
         self.local_ip = self.get_local_ip()
         
         # 1. Configura título e layout se não estiver em modo silencioso
