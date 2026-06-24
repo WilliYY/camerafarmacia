@@ -15,7 +15,7 @@ import io
 from PIL import Image, ImageTk
 
 # Versão do Sistema (usada para o auto-update)
-VERSION = "4.7"
+VERSION = "4.8"
 
 # Configurações do Projeto
 PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -191,8 +191,8 @@ class LiveCameraWidget(tk.Frame):
                     raise Exception("Sem dados")
                     
                 image = Image.open(io.BytesIO(img_data))
-                # Preview de 480x270 para caber perfeitamente no layout do painel
-                image = image.resize((480, 270), Image.Resampling.BILINEAR)
+                # Preview de 640x360 para visualização confortável no painel
+                image = image.resize((640, 360), Image.Resampling.BILINEAR)
                 
                 if self.running:
                     self.update_image(image)
@@ -282,13 +282,19 @@ class CameraManagerApp:
         self.status_lock = threading.Lock()
         self.alerted_duplicates = {} # Evita exibir alerta popup repetidamente
         
+        # Cache de performance para evitar chamadas repetidas
+        self._cached_streams_data = None
+        self._cached_streams_time = 0
+        self._cached_backup_stats = (0, 0)
+        self._cached_backup_time = 0
+        
         self.streams = [s for s in self.parse_streams() if not s.endswith("_live")]
         self.local_ip = self.get_local_ip()
         
         # 1. Configura título e layout se não estiver em modo silencioso
         if not self.silent:
-            self.root.title(f"Painel Câmeras - Farmácia (NVR Unificado v{VERSION})")
-            self.root.geometry("880x700")
+            self.root.title(f"Painel Câmeras Farmácia — NVR v{VERSION}")
+            self.root.geometry("1060x760")
             self.root.configure(bg=BG_COLOR)
             self.root.resizable(False, False)
             
@@ -301,6 +307,9 @@ class CameraManagerApp:
             
             # Agenda escaneamento automático a cada 3 horas (3 * 3600 * 1000 ms)
             self.root.after(10800000, self.trigger_periodic_scan)
+            
+            # Agenda diagnóstico automático a cada 6 horas (6 * 3600 * 1000 ms)
+            self.root.after(21600000, self.trigger_periodic_diagnostics)
             
             # Intercepta o fechamento no X do Tkinter para desligar de forma segura
             self.root.protocol("WM_DELETE_WINDOW", self.on_close_window)
@@ -394,20 +403,21 @@ class CameraManagerApp:
         split_container = tk.Frame(self.root, bg=BG_COLOR)
         split_container.pack(fill="both", expand=True, padx=10, pady=5)
         
-        left_col = tk.Frame(split_container, bg=BG_COLOR, width=360)
-        left_col.pack(side="left", fill="both", expand=True)
+        left_col = tk.Frame(split_container, bg=BG_COLOR, width=380)
+        left_col.pack(side="left", fill="both", expand=False)
+        left_col.pack_propagate(False)
         
-        right_col = tk.Frame(split_container, bg=BG_COLOR, width=500)
+        right_col = tk.Frame(split_container, bg=BG_COLOR, width=660)
         right_col.pack(side="right", fill="both", expand=True)
 
         # 1. HEADER / CABEÇALHO (na coluna da esquerda)
-        header_frame = tk.Frame(left_col, bg=BG_COLOR, pady=5)
-        header_frame.pack(fill="x", padx=10)
+        header_frame = tk.Frame(left_col, bg=BG_COLOR, pady=8)
+        header_frame.pack(fill="x", padx=12)
         
         title_label = tk.Label(
             header_frame, 
             text=" 🎥 Painel Câmeras Farmácia", 
-            font=("Segoe UI", 16, "bold"), 
+            font=("Segoe UI", 18, "bold"), 
             fg=TEXT_COLOR, 
             bg=BG_COLOR
         )
@@ -415,25 +425,30 @@ class CameraManagerApp:
         
         subtitle_label = tk.Label(
             header_frame, 
-            text=f"v{VERSION} Unificado", 
-            font=("Segoe UI", 9, "bold"), 
+            text=f"v{VERSION}", 
+            font=("Segoe UI", 10, "bold"), 
             fg=ACCENT_COLOR, 
             bg=BG_COLOR
         )
-        subtitle_label.pack(side="left", padx=10, pady=6)
+        subtitle_label.pack(side="left", padx=10, pady=8)
         
-        # Divisor horizontal elegante
-        separator = tk.Frame(left_col, height=1, bg="#1F2937")
-        separator.pack(fill="x", padx=10)
+        # Divisor horizontal elegante com accent
+        sep_canvas = tk.Canvas(left_col, height=2, bg=BG_COLOR, highlightthickness=0)
+        sep_canvas.pack(fill="x", padx=12)
+        sep_canvas.create_line(0, 1, 2000, 1, fill=ACCENT_COLOR, width=2)
 
         # 2. CARDS GLOBAIS (SERVIÇOS E REDE)
-        top_cards_frame = tk.Frame(left_col, bg=BG_COLOR, pady=4)
-        top_cards_frame.pack(fill="x", padx=10)
+        top_cards_frame = tk.Frame(left_col, bg=BG_COLOR, pady=6)
+        top_cards_frame.pack(fill="x", padx=12)
         
-        # Card 1: Serviços Globais
-        self.card_global = tk.Frame(top_cards_frame, bg=CARD_COLOR, bd=1, relief="flat", padx=15, pady=8)
-        self.card_global.pack(fill="x", expand=True, padx=4, pady=4)
-        tk.Label(self.card_global, text="Status dos Serviços", font=("Segoe UI", 9, "bold"), fg=TEXT_MUTED, bg=CARD_COLOR).pack(anchor="w")
+        # Card 1: Serviços Globais com borda accent superior
+        card_global_wrapper = tk.Frame(top_cards_frame, bg=ACCENT_COLOR, bd=0, padx=0, pady=0)
+        card_global_wrapper.pack(fill="x", expand=True, padx=4, pady=4)
+        # Barra accent superior de 3px
+        tk.Frame(card_global_wrapper, height=3, bg=ACCENT_COLOR).pack(fill="x")
+        self.card_global = tk.Frame(card_global_wrapper, bg=CARD_COLOR, bd=0, relief="flat", padx=15, pady=10)
+        self.card_global.pack(fill="x")
+        tk.Label(self.card_global, text="⚡ Status dos Serviços", font=("Segoe UI", 10, "bold"), fg=TEXT_COLOR, bg=CARD_COLOR).pack(anchor="w")
         
         # Linha Ponte RTSP
         row_go2rtc = tk.Frame(self.card_global, bg=CARD_COLOR, pady=1)
@@ -464,7 +479,7 @@ class CameraManagerApp:
 
         # 3. GRID DINÂMICO DE CÂMERAS
         self.cameras_main_frame = tk.Frame(left_col, bg=BG_COLOR)
-        self.cameras_main_frame.pack(fill="x", padx=10, pady=4)
+        self.cameras_main_frame.pack(fill="x", padx=12, pady=4)
         
         self.cameras_main_frame.columnconfigure(0, weight=1, uniform="cam_grid")
         self.cameras_main_frame.columnconfigure(1, weight=1, uniform="cam_grid")
@@ -474,11 +489,15 @@ class CameraManagerApp:
         row = 0
         
         for idx, stream in enumerate(self.streams):
-            card = tk.Frame(self.cameras_main_frame, bg=CARD_COLOR, bd=1, relief="flat", padx=12, pady=8)
-            card.grid(row=row, column=col, padx=4, pady=4, sticky="nsew")
+            # Wrapper com borda accent
+            card_wrapper = tk.Frame(self.cameras_main_frame, bg=ACCENT_COLOR, bd=0)
+            card_wrapper.grid(row=row, column=col, padx=4, pady=4, sticky="nsew")
+            tk.Frame(card_wrapper, height=3, bg=ACCENT_COLOR).pack(fill="x")
+            card = tk.Frame(card_wrapper, bg=CARD_COLOR, bd=0, relief="flat", padx=12, pady=8)
+            card.pack(fill="both", expand=True)
             
             # Título da Câmera
-            tk.Label(card, text=f"📷 CÂMERA: {stream.upper()}", font=("Segoe UI", 9, "bold"), fg=ACCENT_COLOR, bg=CARD_COLOR).pack(anchor="w", pady=(0, 4))
+            tk.Label(card, text=f"📷 CÂMERA: {stream.upper()}", font=("Segoe UI", 10, "bold"), fg=ACCENT_COLOR, bg=CARD_COLOR).pack(anchor="w", pady=(0, 4))
             
             # Sinal da Câmera
             row_sinal = tk.Frame(card, bg=CARD_COLOR)
@@ -528,8 +547,8 @@ class CameraManagerApp:
                 row += 1
 
         # 4. CONTROLES / BOTÕES
-        btn_frame = tk.Frame(left_col, bg=BG_COLOR, pady=4)
-        btn_frame.pack(fill="x", padx=10)
+        btn_frame = tk.Frame(left_col, bg=BG_COLOR, pady=6)
+        btn_frame.pack(fill="x", padx=12)
         
         self.btn_action = tk.Button(
             btn_frame, 
@@ -549,25 +568,9 @@ class CameraManagerApp:
         self.btn_action.bind("<Enter>", self.on_btn_action_enter)
         self.btn_action.bind("<Leave>", self.on_btn_action_leave)
 
-        # Ações extras
+        # Ações extras (sem botão de diagnóstico - agora é automático)
         actions_frame = tk.Frame(left_col, bg=BG_COLOR, pady=2)
-        actions_frame.pack(fill="x", padx=10)
-        
-        self.btn_diag = tk.Button(
-            actions_frame, 
-            text=" 🩺 Gerar Diagnóstico", 
-            font=("Segoe UI", 9, "bold"), 
-            fg=TEXT_COLOR, 
-            bg="#1F2937", 
-            activebackground="#374151", 
-            activeforeground=TEXT_COLOR,
-            bd=0, 
-            cursor="hand2",
-            padx=10, 
-            pady=5,
-            command=self.click_diagnostico
-        )
-        self.btn_diag.pack(side="left", padx=4, expand=True, fill="x")
+        actions_frame.pack(fill="x", padx=12)
         
         self.btn_open_folder = tk.Button(
             actions_frame, 
@@ -583,11 +586,11 @@ class CameraManagerApp:
             pady=5,
             command=self.click_abrir_pasta
         )
-        self.btn_open_folder.pack(side="left", padx=4, expand=True, fill="x")
+        self.btn_open_folder.pack(fill="x", padx=4, pady=2)
 
         # Inicialização automática
         startup_frame = tk.Frame(left_col, bg=BG_COLOR, pady=2)
-        startup_frame.pack(fill="x", padx=10)
+        startup_frame.pack(fill="x", padx=12)
         
         self.btn_setup_startup = tk.Button(
             startup_frame, 
@@ -607,12 +610,12 @@ class CameraManagerApp:
 
         # 4.5. CONFIGURAÇÕES DE CAMINHO E INTEGRIDADE
         config_frame = tk.Frame(left_col, bg=BG_COLOR, pady=2)
-        config_frame.pack(fill="x", padx=10, pady=2)
+        config_frame.pack(fill="x", padx=12, pady=2)
         
         path_label = tk.Label(config_frame, text="Pasta Drive/Rede:", font=("Segoe UI", 9, "bold"), fg=TEXT_MUTED, bg=BG_COLOR)
         path_label.pack(side="left", padx=2)
         
-        self.entry_path = tk.Entry(config_frame, bg="#161822", fg=TEXT_COLOR, font=("Segoe UI", 9), bd=1, relief="solid", width=22)
+        self.entry_path = tk.Entry(config_frame, bg="#161822", fg=TEXT_COLOR, font=("Segoe UI", 9), bd=1, relief="solid", width=20, insertbackground=TEXT_COLOR)
         self.entry_path.insert(0, GDRIVE_ROOT)
         self.entry_path.pack(side="left", padx=2)
         
@@ -632,14 +635,20 @@ class CameraManagerApp:
         )
         self.btn_save_path.pack(side="left", padx=2)
 
-        # 5. LOG DE EVENTOS (CONSOLE)
+        # 5. LOG DE EVENTOS (CONSOLE PREMIUM)
         log_title_frame = tk.Frame(left_col, bg=BG_COLOR)
-        log_title_frame.pack(fill="x", padx=15, pady=(2,0))
-        tk.Label(log_title_frame, text="Log de Eventos:", font=("Segoe UI", 8, "bold"), fg=TEXT_MUTED, bg=BG_COLOR).pack(anchor="w")
+        log_title_frame.pack(fill="x", padx=15, pady=(4,0))
+        tk.Label(log_title_frame, text="📝 Log de Eventos", font=("Segoe UI", 9, "bold"), fg=TEXT_COLOR, bg=BG_COLOR).pack(anchor="w")
         
-        self.txt_log = tk.Text(left_col, height=4, bg="#030712", fg="#34D399", font=("Consolas", 9), bd=0, padx=10, pady=5)
-        self.txt_log.pack(fill="x", padx=10, pady=(2, 4))
+        self.txt_log = tk.Text(left_col, height=6, bg="#030712", fg="#34D399", font=("Consolas", 9), bd=0, padx=10, pady=5, wrap="word")
+        self.txt_log.pack(fill="both", expand=True, padx=12, pady=(2, 6))
         self.txt_log.configure(state="disabled")
+        # Configura tags de cores para diferentes tipos de mensagens
+        self.txt_log.tag_configure("tag_erro", foreground="#EF4444")
+        self.txt_log.tag_configure("tag_ok", foreground="#10B981")
+        self.txt_log.tag_configure("tag_info", foreground="#60A5FA")
+        self.txt_log.tag_configure("tag_warn", foreground="#F59E0B")
+        self.txt_log.tag_configure("tag_default", foreground="#34D399")
 
         # 3.5. CONTAINERS DAS CÂMERAS AO VIVO (na coluna da direita)
         self.live_cams_container = tk.Frame(right_col, bg=BG_COLOR)
@@ -655,8 +664,28 @@ class CameraManagerApp:
     def add_log(self, msg):
         timestamp = datetime.now().strftime("%H:%M:%S")
         formatted = f"[{timestamp}] {msg}\n"
+        
+        # Determina a tag de cor baseada no conteúdo
+        msg_lower = msg.lower()
+        if "erro" in msg_lower or "falha" in msg_lower or "crítico" in msg_lower or "excluído" in msg_lower:
+            tag = "tag_erro"
+        elif "sucesso" in msg_lower or "concluíd" in msg_lower or "ativo" in msg_lower or "ok" in msg_lower or "configurad" in msg_lower:
+            tag = "tag_ok"
+        elif "iniciando" in msg_lower or "escaneamento" in msg_lower or "diagnóstico" in msg_lower or "verificando" in msg_lower or "automátic" in msg_lower:
+            tag = "tag_info"
+        elif "aviso" in msg_lower or "aguardando" in msg_lower or "tentando" in msg_lower or "parando" in msg_lower:
+            tag = "tag_warn"
+        else:
+            tag = "tag_default"
+        
         self.txt_log.configure(state="normal")
-        self.txt_log.insert(tk.END, formatted)
+        self.txt_log.insert(tk.END, formatted, tag)
+        
+        # Auto-cleanup: limita o log a 200 linhas para evitar consumo de memória
+        line_count = int(self.txt_log.index('end-1c').split('.')[0])
+        if line_count > 200:
+            self.txt_log.delete('1.0', f'{line_count - 200}.0')
+        
         self.txt_log.see(tk.END)
         self.txt_log.configure(state="disabled")
 
@@ -667,6 +696,20 @@ class CameraManagerApp:
         messagebox.showinfo("Copiado", f"O link http://{self.local_ip}:1984 foi copiado com sucesso!")
 
     # ================= MONITOR LOOP (THREAD SEPARADA) =================
+    def get_cached_streams_data(self):
+        """Obtém dados da API /api/streams com cache de 3 segundos para evitar chamadas HTTP duplicadas"""
+        now = time.time()
+        if self._cached_streams_data is not None and (now - self._cached_streams_time) < 3.0:
+            return self._cached_streams_data
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:1984/api/streams", timeout=1.5) as conn:
+                data = json.loads(conn.read().decode())
+            self._cached_streams_data = data
+            self._cached_streams_time = now
+            return data
+        except Exception:
+            return self._cached_streams_data  # Retorna cache antigo em caso de erro
+
     def monitor_loop(self):
         while self.running_monitor:
             # 1. Verifica se go2rtc está ativo
@@ -678,7 +721,7 @@ class CameraManagerApp:
             # 3. Coleta visualizadores ao vivo
             live_viewers = self.get_live_viewers(go2rtc_ok)
             
-            # 3.5. Coleta estatísticas de backups locais pendentes na pasta do projeto
+            # 3.5. Coleta estatísticas de backups locais (com cache de 30s)
             backup_count, backup_size = self.get_backup_stats()
             
             # 4. Verifica status de cada câmera individualmente
@@ -723,8 +766,15 @@ class CameraManagerApp:
             time.sleep(3)
 
     def get_backup_stats(self):
+        """Retorna contagem e tamanho dos backups locais pendentes com cache de 30 segundos"""
+        now = time.time()
+        if (now - self._cached_backup_time) < 30.0:
+            return self._cached_backup_stats
+        
         backup_dir = os.path.join(PROJ_DIR, "backup_gravacoes")
         if not os.path.exists(backup_dir):
+            self._cached_backup_stats = (0, 0)
+            self._cached_backup_time = now
             return 0, 0
         total_files = 0
         total_size = 0
@@ -736,6 +786,8 @@ class CameraManagerApp:
                         total_size += os.path.getsize(os.path.join(root_dir, f))
         except Exception:
             pass
+        self._cached_backup_stats = (total_files, total_size)
+        self._cached_backup_time = now
         return total_files, total_size
 
     def check_process_go2rtc(self):
@@ -807,25 +859,19 @@ class CameraManagerApp:
         if not go2rtc_ok:
             return "Indisponível"
         try:
-            with urllib.request.urlopen("http://127.0.0.1:1984/api/streams", timeout=1.0) as conn:
-                data = json.loads(conn.read().decode())
-                if stream_name in data:
-                    producers = data[stream_name].get("producers") or []
-                    if producers:
-                        return "Sinal OK"
-                    else:
-                        return "Conectando..."
-                else:
-                    return "Não configurada"
-        except Exception:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(0.5)
-            try:
-                s.connect(('127.0.0.1', 1984))
-                s.close()
-                return "Porta OK"
-            except Exception:
+            data = self.get_cached_streams_data()
+            if data is None:
                 return "Erro API"
+            if stream_name in data:
+                producers = data[stream_name].get("producers") or []
+                if producers:
+                    return "Sinal OK"
+                else:
+                    return "Conectando..."
+            else:
+                return "Não configurada"
+        except Exception:
+            return "Erro API"
 
     def check_live_stream_status(self, go2rtc_ok, stream_name):
         if not go2rtc_ok:
@@ -833,36 +879,37 @@ class CameraManagerApp:
         
         live_name = stream_name + "_live"
         try:
-            with urllib.request.urlopen("http://127.0.0.1:1984/api/streams", timeout=1.0) as conn:
-                data = json.loads(conn.read().decode())
-                if live_name in data:
-                    stream_data = data[live_name]
-                    consumers = stream_data.get("consumers") or []
-                    producers = stream_data.get("producers") or []
-                    
-                    # Filtra consumidores internos (ignora Python/FFmpeg)
-                    real_consumers = []
-                    for c in consumers:
-                        ua = c.get("user_agent", "").lower()
-                        if "python" not in ua and "lavf" not in ua:
-                            real_consumers.append(c)
-                            
-                    if real_consumers:
-                        # Se há pessoas assistindo, verifica se o transcoding está ativo
-                        has_active_producer = False
-                        for p in producers:
-                            if p.get("tracks") or p.get("mediainfo") or p.get("active"):
-                                has_active_producer = True
-                                break
+            data = self.get_cached_streams_data()
+            if data is None:
+                return "Erro API", RED_COLOR, "#991B1B"
+            if live_name in data:
+                stream_data = data[live_name]
+                consumers = stream_data.get("consumers") or []
+                producers = stream_data.get("producers") or []
+                
+                # Filtra consumidores internos (ignora Python/FFmpeg)
+                real_consumers = []
+                for c in consumers:
+                    ua = c.get("user_agent", "").lower()
+                    if "python" not in ua and "lavf" not in ua:
+                        real_consumers.append(c)
                         
-                        if has_active_producer:
-                            return f"ATIVA ({len(real_consumers)})", GREEN_COLOR, "#065F46"
-                        else:
-                            return "ERRO TRANSCOD.", RED_COLOR, "#991B1B"
+                if real_consumers:
+                    # Se há pessoas assistindo, verifica se o transcoding está ativo
+                    has_active_producer = False
+                    for p in producers:
+                        if p.get("tracks") or p.get("mediainfo") or p.get("active"):
+                            has_active_producer = True
+                            break
+                    
+                    if has_active_producer:
+                        return f"ATIVA ({len(real_consumers)})", GREEN_COLOR, "#065F46"
                     else:
-                        return "DISPONÍVEL", GREEN_COLOR, "#065F46"
+                        return "ERRO TRANSCOD.", RED_COLOR, "#991B1B"
                 else:
-                    return "Não configurada", ORANGE_COLOR, "#78350F"
+                    return "DISPONÍVEL", GREEN_COLOR, "#065F46"
+            else:
+                return "Não configurada", ORANGE_COLOR, "#78350F"
         except Exception:
             return "Erro API", RED_COLOR, "#991B1B"
 
@@ -921,11 +968,11 @@ class CameraManagerApp:
             return []
         viewers = []
         try:
-            with urllib.request.urlopen("http://127.0.0.1:1984/api/streams", timeout=1.0) as conn:
-                data = json.loads(conn.read().decode())
+            data = self.get_cached_streams_data()
+            if data is None:
+                return []
             for stream_name, stream_data in data.items():
                 consumers = stream_data.get("consumers") or []
-                producers = stream_data.get("producers") or []
                 for consumer in consumers:
                     addr = consumer.get("remote_addr", "")
                     ua = consumer.get("user_agent", "").lower()
@@ -990,21 +1037,7 @@ class CameraManagerApp:
                 self.lbl_val_backups.configure(text=f"{backup_count} vídeo(s) ({size_mb:.1f} MB)", fg=ORANGE_COLOR)
                 self.led_backups.set_status(ORANGE_COLOR, "#78350F")
                 
-            # 2.7. Monitor Web status
-            if hasattr(self, "lbl_val_web_monitor") and hasattr(self, "led_web_monitor"):
-                if live_viewers:
-                    self.lbl_val_web_monitor.configure(text=f"ATIVO ({len(live_viewers)})", fg=GREEN_COLOR)
-                    self.led_web_monitor.set_status(GREEN_COLOR, "#065F46")
-                else:
-                    self.lbl_val_web_monitor.configure(text="INATIVO", fg=TEXT_MUTED)
-                    self.led_web_monitor.set_status(RED_COLOR, "#991B1B")
-                
-            # 3. Atualiza os visualizadores ao vivo
-            if hasattr(self, "lbl_viewers"):
-                if live_viewers:
-                    self.lbl_viewers.configure(text=f"👁️ Assistindo: {len(live_viewers)} ({', '.join(live_viewers)})", fg=GREEN_COLOR)
-                else:
-                    self.lbl_viewers.configure(text="👁️ Assistindo: 0", fg=TEXT_MUTED)
+            # 3. (Removido: lbl_viewers e lbl_val_web_monitor não existem mais na UI)
                 
             # 4. Atualiza os cards das câmeras
             for stream, state in cam_states.items():
@@ -1288,7 +1321,7 @@ class CameraManagerApp:
         status_ret = "reconectar"
         try:
             req = urllib.request.Request(url)
-            response = urllib.request.urlopen(req, timeout=15)
+            response = urllib.request.urlopen(req, timeout=8)
             self.active_connections[stream_name] = response
             try:
                 with open(nome_temp, "wb") as out_file:
@@ -1617,20 +1650,15 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             self.flash_button(self.btn_save_path, "✔️ Salvo!", "#10B981")
 
     def click_escanear_corrompidos(self, show_popup=True):
-        if not self.silent and hasattr(self, "btn_scan"):
-            self.btn_scan.configure(text="⏳ Escaneando...", state="disabled", bg="#374151")
+        if not self.silent:
+            self.add_log("🔄 Escaneamento automático de arquivos corrompidos em andamento...")
         threading.Thread(target=self.escanear_videos_corrompidos_thread, args=(show_popup,), daemon=True).start()
 
     def escanear_videos_corrompidos_thread(self, show_popup=True):
-        if not self.silent and show_popup:
-            self.add_log("Iniciando escaneamento de arquivos corrompidos...")
-            
         ffmpeg_bin = os.path.join(PROJ_DIR, "go2rtc", "ffmpeg.exe")
         if not os.path.exists(ffmpeg_bin):
             if not self.silent:
                 self.add_log("ERRO: ffmpeg.exe não encontrado para escanear.")
-            if not self.silent and hasattr(self, "btn_scan"):
-                self.root.after(0, lambda: self.btn_scan.configure(text="🔍 Escanear Corrompidos", state="normal", bg="#1F2937"))
             return
             
         dirs_to_scan = []
@@ -1691,8 +1719,6 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
                  
         if not self.silent:
             self.add_log(f"Escaneamento concluído. {scanned_count} arquivos analisados, {corrupted_count} corrompidos excluídos.")
-            if hasattr(self, "btn_scan"):
-                self.root.after(0, lambda: self.btn_scan.configure(text="🔍 Escanear Corrompidos", state="normal", bg="#1F2937"))
             
             if show_popup:
                 self.root.after(0, lambda: messagebox.showinfo("Scanner de Integridade", f"Varredura concluída!\n\nArquivos escaneados: {scanned_count}\nArquivos corrompidos deletados: {corrupted_count}\n\nOs arquivos corrompidos foram excluídos permanentemente para poupar espaço e limpar diretórios."))
@@ -1706,6 +1732,13 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
     def trigger_periodic_scan(self):
         self.click_escanear_corrompidos(show_popup=False)
         self.root.after(10800000, self.trigger_periodic_scan)
+
+    def trigger_periodic_diagnostics(self):
+        """Executa diagnóstico automaticamente a cada 6 horas"""
+        if not self.silent:
+            self.add_log("🩺 Diagnóstico automático agendado em execução...")
+        threading.Thread(target=self.run_diagnostics_sequence_auto, daemon=True).start()
+        self.root.after(21600000, self.trigger_periodic_diagnostics)
 
     def extrair_data_do_arquivo(self, nome_arquivo):
         import re
@@ -2044,9 +2077,50 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         except Exception as e:
             self.root.after(0, lambda: self.add_log(f"ERRO ao salvar diagnóstico: {str(e)}"))
             self.root.after(0, lambda: messagebox.showerror("Erro Diagnóstico", f"Não foi possível salvar o arquivo:\n{str(e)}"))
-        finally:
-            if not self.silent and hasattr(self, "btn_diag"):
-                self.root.after(0, lambda: self.btn_diag.configure(text=" 🩺 Gerar Diagnóstico", state="normal", bg="#1F2937"))
+
+    def run_diagnostics_sequence_auto(self):
+        """Versão automática do diagnóstico - salva arquivo sem abrir"""
+        # Reutiliza a lógica principal de coleta de dados
+        log = []
+        log.append("==================================================")
+        log.append("       RELATÓRIO DE DIAGNÓSTICO DA CÂMERA       ")
+        log.append(f"       Gerado automaticamente em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+        log.append("==================================================")
+        
+        log.append("\n--- [1] VERIFICAÇÃO DE ARQUIVOS ---")
+        files_to_check = {
+            "Pasta do Projeto": PROJ_DIR,
+            "Executável go2rtc": GO2RTC_EXE,
+            "Configuração go2rtc.yaml": os.path.join(PROJ_DIR, "go2rtc", "go2rtc.yaml"),
+        }
+        for name, path in files_to_check.items():
+            exists = os.path.exists(path)
+            status = "OK" if exists else "NÃO ENCONTRADO"
+            log.append(f" - {name}: {status}")
+        
+        log.append("\n--- [2] PROCESSOS ---")
+        go2rtc_running = self.check_process_go2rtc()
+        log.append(f" - go2rtc.exe: {'RODANDO' if go2rtc_running else 'PARADO'}")
+        for stream in self.streams:
+            c_running = self.check_process_recorder(f"gravando_{stream}.lock", stream)
+            log.append(f" - Gravador {stream.upper()}: {'RODANDO' if c_running else 'PARADO'}")
+        
+        log.append(f"\n--- [3] Google Drive ---")
+        log.append(f" - Disponível: {'SIM' if os.path.exists(GDRIVE_ROOT) else 'NÃO'}")
+        
+        log.append(f"\n--- [4] AMBIENTE ---")
+        log.append(f" - Python: {sys.version}")
+        log.append(f" - IP Local: {self.local_ip}")
+        
+        diag_file = os.path.join(PROJ_DIR, "diagnostico.txt")
+        try:
+            with open(diag_file, "w", encoding="utf-8") as f:
+                f.write("\n".join(log))
+            if not self.silent:
+                self.root.after(0, lambda: self.add_log("Diagnóstico automático concluído com sucesso."))
+        except Exception as e:
+            if not self.silent:
+                self.root.after(0, lambda: self.add_log(f"Erro ao salvar diagnóstico automático: {str(e)}"))
 
 if __name__ == "__main__":
     import argparse
