@@ -14,8 +14,19 @@ from datetime import datetime, timedelta
 import io
 from PIL import Image, ImageTk
 
+# Estrutura para obter status de energia e bateria do Windows (queda de energia)
+class SYSTEM_POWER_STATUS(ctypes.Structure):
+    _fields_ = [
+        ("ACLineStatus", ctypes.c_byte),
+        ("BatteryFlag", ctypes.c_byte),
+        ("BatteryLifePercent", ctypes.c_byte),
+        ("SystemStatusFlag", ctypes.c_byte),
+        ("BatteryLifeTime", ctypes.c_ulong),
+        ("BatteryFullLifeTime", ctypes.c_ulong),
+    ]
+
 # Versão do Sistema (usada para o auto-update)
-VERSION = "4.8"
+VERSION = "4.9"
 
 # Configurações do Projeto
 PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -415,6 +426,11 @@ class CameraManagerApp:
         self.streams = [s for s in self.parse_streams() if not s.endswith("_live") and not s.endswith("_mjpeg")]
         self.local_ip = self.get_local_ip()
         
+        # Controle de energia (prevenção de suspensão e monitoramento de bateria/no-break)
+        self.on_battery = False
+        self.prevent_sleep_var = tk.BooleanVar(value=True)
+        self.apply_prevent_sleep(True)
+        
         # 1. Configura título e layout se não estiver em modo silencioso
         if not self.silent:
             self.root.title(f"Painel Câmeras Farmácia — NVR v{VERSION}")
@@ -724,6 +740,26 @@ class CameraManagerApp:
         )
         self.btn_setup_startup.pack(fill="x", padx=4, pady=2)
 
+        # Controle de suspensão de energia
+        sleep_frame = tk.Frame(left_col, bg=BG_COLOR, pady=2)
+        sleep_frame.pack(fill="x", padx=12)
+        
+        self.chk_prevent_sleep = tk.Checkbutton(
+            sleep_frame,
+            text=" 🖥️ Impedir Suspensão/Desligamento do PC",
+            variable=self.prevent_sleep_var,
+            font=("Segoe UI", 9, "bold"),
+            fg=TEXT_COLOR,
+            bg=BG_COLOR,
+            activebackground=BG_COLOR,
+            activeforeground=TEXT_COLOR,
+            selectcolor="#111827",
+            bd=0,
+            cursor="hand2",
+            command=self.toggle_prevent_sleep
+        )
+        self.chk_prevent_sleep.pack(anchor="w", padx=4, pady=2)
+
         # 4.5. CONFIGURAÇÕES DE CAMINHO E INTEGRIDADE
         config_frame = tk.Frame(left_col, bg=BG_COLOR, pady=2)
         config_frame.pack(fill="x", padx=12, pady=2)
@@ -828,6 +864,9 @@ class CameraManagerApp:
 
     def monitor_loop(self):
         while self.running_monitor:
+            # 0. Verifica quedas de energia / status da bateria do PC/Nobreak
+            self.check_power_status()
+            
             # 1. Verifica se go2rtc está ativo
             go2rtc_ok = self.check_process_go2rtc()
             
@@ -905,6 +944,80 @@ class CameraManagerApp:
         self._cached_backup_stats = (total_files, total_size)
         self._cached_backup_time = now
         return total_files, total_size
+
+    def toggle_prevent_sleep(self):
+        if self.prevent_sleep_var.get():
+            self.apply_prevent_sleep(True)
+        else:
+            self.apply_prevent_sleep(False)
+
+    def apply_prevent_sleep(self, enable):
+        try:
+            import ctypes
+            ES_CONTINUOUS = 0x80000000
+            ES_SYSTEM_REQUIRED = 0x00000001
+            ES_DISPLAY_REQUIRED = 0x00000002
+            
+            if enable:
+                # Informa ao Windows para manter o sistema ativo
+                ctypes.windll.kernel32.SetThreadExecutionState(
+                    ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
+                )
+                if not self.silent:
+                    self.add_log("🖥️ Suspensão do PC impedida automaticamente.")
+            else:
+                # Restaura as configurações padrão do Windows
+                ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+                if not self.silent:
+                    self.add_log("🖥️ Configurações padrão de energia restauradas.")
+        except Exception as e:
+            if not self.silent:
+                self.add_log(f"Erro ao configurar estado de energia: {str(e)}")
+
+    def check_power_status(self):
+        try:
+            import ctypes
+            status = SYSTEM_POWER_STATUS()
+            if ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(status)):
+                # ACLineStatus: 0 = Offline (rodando em bateria), 1 = Online (energia AC), 255 = Desconhecido
+                ac_status = status.ACLineStatus
+                battery_percent = status.BatteryLifePercent
+                
+                if ac_status == 0:  # Rodando em bateria (Queda de energia!)
+                    if not self.on_battery:
+                        self.on_battery = True
+                        if not self.silent:
+                            self.add_log("🔌 QUEDA DE ENERGIA DETECTADA! PC rodando em bateria/nobreak.")
+                    
+                    # Se a bateria estiver abaixo de 20%, inicia o desligamento seguro
+                    if battery_percent != 255 and battery_percent <= 20:
+                        if not self.silent:
+                            self.add_log(f"🚨 Bateria crítica ({battery_percent}%). Iniciando desligamento seguro...")
+                        self.graceful_shutdown_due_to_power_loss()
+                else:
+                    if self.on_battery:
+                        self.on_battery = False
+                        if not self.silent:
+                            self.add_log("🔌 ENERGIA ELÉTRICA RESTABELECIDA! Retornando ao modo AC.")
+        except Exception:
+            pass
+
+    def graceful_shutdown_due_to_power_loss(self):
+        # 1. Avisa por voz em segundo plano
+        self.speak("Queda de energia detectada. Salvando vídeos e desligando o computador para proteção.")
+        
+        # 2. Finaliza as gravações ativas de forma limpa (salva buffers no disco)
+        self.run_stop_sequence()
+        
+        # 3. Executa o comando de desligamento do Windows (com timer de 15s para segurança)
+        try:
+            subprocess.Popen("shutdown /s /t 15 /f /c \"Queda de Energia - Desligamento Seguro NVR\"", shell=True)
+        except Exception:
+            pass
+            
+        # 4. Encerra o aplicativo
+        self.root.destroy()
+        sys.exit(0)
 
     def check_process_go2rtc(self):
         try:
@@ -1895,6 +2008,9 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         self.graceful_shutdown()
 
     def graceful_shutdown(self):
+        # Restaura as configurações originais de suspensão do Windows
+        self.apply_prevent_sleep(False)
+        
         # Para as conexões de vídeo das câmeras embutidas antes do encerramento
         if hasattr(self, "camera_widgets"):
             for cam_widget in self.camera_widgets.values():
