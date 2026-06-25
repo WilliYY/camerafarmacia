@@ -123,7 +123,7 @@ def verificar_e_baixar_dependencias(proj_dir, silent=False):
         atualizar_go2rtc_yaml(proj_dir)
         return True
         
-    go2rtc_url = "https://github.com/AlexxIT/go2rtc/releases/download/v1.9.4/go2rtc_win64.zip"
+    go2rtc_url = "https://github.com/AlexxIT/go2rtc/releases/download/v1.9.14/go2rtc_win64.zip"
     ffmpeg_url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
     
     if silent:
