@@ -1,8 +1,29 @@
+import sys
+import subprocess
+
+# 0. Verificação e instalação automática de dependências (Pillow)
+try:
+    from PIL import Image, ImageTk
+except ImportError:
+    try:
+        # Tenta instalar silenciosamente a biblioteca Pillow
+        subprocess.run([sys.executable, "-m", "pip", "install", "Pillow"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        from PIL import Image, ImageTk
+    except Exception as e:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(
+            0,
+            f"Não foi possível instalar a biblioteca de imagens (Pillow) automaticamente.\n\n"
+            f"Erro: {str(e)}\n\n"
+            f"Por favor, execute o comando 'pip install Pillow' manualmente.",
+            "Erro de Dependência - NVR",
+            0x10 | 0x0
+        )
+        sys.exit(1)
+
 import tkinter as tk
 from tkinter import ttk, messagebox
-import subprocess
 import os
-import sys
 import socket
 import urllib.request
 import json
@@ -12,7 +33,306 @@ import ctypes
 import shutil
 from datetime import datetime, timedelta
 import io
-from PIL import Image, ImageTk
+import zipfile
+
+def get_short_path(long_path):
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(1024)
+        length = ctypes.windll.kernel32.GetShortPathNameW(long_path, buf, 1024)
+        if length > 0:
+            return buf.value
+    except Exception:
+        pass
+    return long_path
+
+def atualizar_go2rtc_yaml(proj_dir):
+    yaml_path = os.path.join(proj_dir, "go2rtc", "go2rtc.yaml")
+    ffmpeg_exe = os.path.join(proj_dir, "go2rtc", "ffmpeg.exe")
+    short_ffmpeg = get_short_path(ffmpeg_exe).replace("\\", "\\\\")
+    
+    conteudo_padrao = f'''api:
+  listen: ":1984"
+  static_dir: ".."
+
+ffmpeg:
+  bin: "{short_ffmpeg}"
+
+streams:
+  # Câmeras originais (H.265 bruto - Usadas para as gravações em 0% CPU)
+  farmacia: "tuya://protect-us.ismartlife.me?device_id=eb227d7fd83d2a794c4gvc&email=willian13258%40gmail.com&password=biscoito123"
+  farmacia2: "tuya://protect-us.ismartlife.me?device_id=ebb17fa4c624a5e72ec6gk&email=willian13258%40gmail.com&password=biscoito123"
+
+  # Câmeras para Visualização Web (Transcodificadas sob demanda para H.264)
+  farmacia_live: "ffmpeg:farmacia#video=h264"
+  farmacia2_live: "ffmpeg:farmacia2#video=h264"
+
+  # Câmeras para Stream MJPEG (Transcodificadas sob demanda para MJPEG)
+  farmacia_mjpeg: "ffmpeg:farmacia#video=mjpeg"
+  farmacia2_mjpeg: "ffmpeg:farmacia2#video=mjpeg"
+'''
+    if not os.path.exists(yaml_path):
+        os.makedirs(os.path.dirname(yaml_path), exist_ok=True)
+        with open(yaml_path, "w", encoding="utf-8") as f:
+            f.write(conteudo_padrao)
+        return
+        
+    try:
+        with open(yaml_path, "r", encoding="utf-8") as f:
+            linhas = f.readlines()
+            
+        modificado = False
+        ffmpeg_section = False
+        for i, linha in enumerate(linhas):
+            linha_strip = linha.strip()
+            if linha_strip.startswith("ffmpeg:"):
+                ffmpeg_section = True
+                continue
+            if ffmpeg_section:
+                if linha_strip.startswith("bin:"):
+                    indent = len(linha) - len(linha.lstrip())
+                    nova_linha = " " * indent + f'bin: "{short_ffmpeg}"\n'
+                    if linhas[i] != nova_linha:
+                        linhas[i] = nova_linha
+                        modificado = True
+                    ffmpeg_section = False
+                elif not linha.startswith(" ") and not linha.startswith("\t") and linha_strip != "":
+                    ffmpeg_section = False
+        
+        if modificado:
+            with open(yaml_path, "w", encoding="utf-8") as f:
+                f.writelines(linhas)
+    except Exception:
+        try:
+            with open(yaml_path, "w", encoding="utf-8") as f:
+                f.write(conteudo_padrao)
+        except Exception:
+            pass
+
+def verificar_e_baixar_dependencias(proj_dir, silent=False):
+    go2rtc_dir = os.path.join(proj_dir, "go2rtc")
+    os.makedirs(go2rtc_dir, exist_ok=True)
+    
+    go2rtc_exe = os.path.join(go2rtc_dir, "go2rtc.exe")
+    ffmpeg_exe = os.path.join(go2rtc_dir, "ffmpeg.exe")
+    
+    needs_go2rtc = not os.path.exists(go2rtc_exe)
+    needs_ffmpeg = not os.path.exists(ffmpeg_exe)
+    
+    if not needs_go2rtc and not needs_ffmpeg:
+        atualizar_go2rtc_yaml(proj_dir)
+        return True
+        
+    go2rtc_url = "https://github.com/AlexxIT/go2rtc/releases/download/v1.9.4/go2rtc_win64.zip"
+    ffmpeg_url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+    
+    if silent:
+        try:
+            if needs_go2rtc:
+                download_and_extract_go2rtc_silencioso(go2rtc_url, go2rtc_exe, go2rtc_dir)
+            if needs_ffmpeg:
+                download_and_extract_ffmpeg_silencioso(ffmpeg_url, ffmpeg_exe, go2rtc_dir)
+            atualizar_go2rtc_yaml(proj_dir)
+            return True
+        except Exception:
+            return False
+    else:
+        success = [False]
+        error_msg = [""]
+        
+        import tkinter as tk
+        from tkinter import ttk
+        
+        splash = tk.Tk()
+        splash.title("Instalador de Dependências")
+        splash.geometry("450x200")
+        splash.configure(bg="#0D0E12")
+        splash.resizable(False, False)
+        
+        # Centraliza a janela
+        sw = splash.winfo_screenwidth()
+        sh = splash.winfo_screenheight()
+        x = (sw - 450) // 2
+        y = (sh - 200) // 2
+        splash.geometry(f"450x200+{x}+{y}")
+        
+        # Estilos escuros para a barra de progresso
+        style = ttk.Style(splash)
+        style.theme_use("clam")
+        style.configure("Installer.Horizontal.TProgressbar", 
+                        troughcolor="#161822", 
+                        background="#3B82F6", 
+                        bordercolor="#0D0E12", 
+                        lightcolor="#3B82F6", 
+                        darkcolor="#3B82F6")
+        
+        lbl_title = tk.Label(splash, text="Configurando NVR Farmácia (Primeiro Uso)", font=("Segoe UI", 12, "bold"), fg="#F3F4F6", bg="#0D0E12")
+        lbl_title.pack(pady=(20, 10))
+        
+        lbl_status = tk.Label(splash, text="Preparando...", font=("Segoe UI", 9), fg="#9CA3AF", bg="#0D0E12")
+        lbl_status.pack(pady=5)
+        
+        prog_var = tk.DoubleVar()
+        pb = ttk.Progressbar(splash, variable=prog_var, maximum=100, style="Installer.Horizontal.TProgressbar", length=360)
+        pb.pack(pady=10)
+        
+        lbl_percent = tk.Label(splash, text="0%", font=("Segoe UI", 9, "bold"), fg="#3B82F6", bg="#0D0E12")
+        lbl_percent.pack()
+        
+        def run_installer_thread():
+            import zipfile
+            import io
+            try:
+                # 1. Download go2rtc
+                if needs_go2rtc:
+                    update_gui("Baixando Ponte RTSP (go2rtc.exe)...", 0)
+                    
+                    req = urllib.request.Request(go2rtc_url, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req, timeout=30) as conn:
+                        total_size = int(conn.info().get('Content-Length', 0))
+                        downloaded = 0
+                        chunk_size = 1024 * 64
+                        temp_zip = os.path.join(go2rtc_dir, "go2rtc.zip.tmp")
+                        
+                        with open(temp_zip, "wb") as f:
+                            while True:
+                                chunk = conn.read(chunk_size)
+                                if not chunk:
+                                    break
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                if total_size > 0:
+                                    pct = int(downloaded * 100 / total_size)
+                                    val_global = int(pct * 0.3)
+                                    update_gui(f"Baixando go2rtc.zip... {pct}% ({downloaded/(1024*1024):.1f}MB)", val_global)
+                                    
+                        update_gui("Extraindo go2rtc.exe...", 28)
+                        with zipfile.ZipFile(temp_zip) as z:
+                            z.extract("go2rtc.exe", go2rtc_dir)
+                            
+                        try:
+                            os.remove(temp_zip)
+                        except Exception:
+                            pass
+                
+                # 2. Download ffmpeg
+                if needs_ffmpeg:
+                    update_gui("Baixando Transcodificador (ffmpeg.exe - ZIP)...", 30)
+                    
+                    req = urllib.request.Request(ffmpeg_url, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req, timeout=45) as conn:
+                        total_size = int(conn.info().get('Content-Length', 0))
+                        downloaded = 0
+                        chunk_size = 1024 * 128
+                        temp_zip = os.path.join(go2rtc_dir, "ffmpeg.zip.tmp")
+                        
+                        with open(temp_zip, "wb") as f:
+                            while True:
+                                chunk = conn.read(chunk_size)
+                                if not chunk:
+                                    break
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                if total_size > 0:
+                                    pct = int(downloaded * 100 / total_size)
+                                    val_global = 30 + int(pct * 0.6)
+                                    update_gui(f"Baixando ffmpeg.zip... {pct}% ({downloaded/(1024*1024):.1f}MB)", val_global)
+                        
+                        update_gui("Extraindo ffmpeg.exe do arquivo ZIP...", 92)
+                        with zipfile.ZipFile(temp_zip) as z:
+                            ffmpeg_path_in_zip = None
+                            for name in z.namelist():
+                                if name.endswith("ffmpeg.exe"):
+                                    ffmpeg_path_in_zip = name
+                                    break
+                            
+                            if not ffmpeg_path_in_zip:
+                                raise Exception("ffmpeg.exe não foi encontrado no arquivo ZIP.")
+                                
+                            with z.open(ffmpeg_path_in_zip) as source_file:
+                                with open(ffmpeg_exe, "wb") as dest_file:
+                                    dest_file.write(source_file.read())
+                                    
+                        try:
+                            os.remove(temp_zip)
+                        except Exception:
+                            pass
+                                    
+                update_gui("Configurando rotas de vídeo e caminhos...", 98)
+                atualizar_go2rtc_yaml(proj_dir)
+                update_gui("Instalação concluída com sucesso!", 100)
+                time.sleep(1.0)
+                success[0] = True
+                splash.after(0, splash.destroy)
+                
+            except Exception as e:
+                error_msg[0] = str(e)
+                for f in [go2rtc_exe, ffmpeg_exe, os.path.join(go2rtc_dir, "go2rtc.zip.tmp"), os.path.join(go2rtc_dir, "ffmpeg.zip.tmp")]:
+                    if os.path.exists(f):
+                        try:
+                            os.remove(f)
+                        except Exception:
+                            pass
+                splash.after(0, splash.destroy)
+                
+        def update_gui(text, value):
+            splash.after(0, lambda: lbl_status.configure(text=text))
+            splash.after(0, lambda: prog_var.set(value))
+            splash.after(0, lambda: lbl_percent.configure(text=f"{int(value)}%"))
+            
+        threading.Thread(target=run_installer_thread, daemon=True).start()
+        splash.mainloop()
+        
+        if not success[0]:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                f"Erro ao baixar/extrair dependências necessárias:\n\n{error_msg[0]}\n\n"
+                "O painel não pode ser iniciado sem estes arquivos.",
+                "Erro de Inicialização",
+                0x10 | 0x0
+            )
+            sys.exit(1)
+            
+        return True
+
+def download_and_extract_go2rtc_silencioso(url, dest_path, go2rtc_dir):
+    import zipfile
+    temp_zip = os.path.join(go2rtc_dir, "go2rtc.zip.tmp")
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    with urllib.request.urlopen(req, timeout=30) as conn:
+        with open(temp_zip, "wb") as f:
+            f.write(conn.read())
+    with zipfile.ZipFile(temp_zip) as z:
+        z.extract("go2rtc.exe", go2rtc_dir)
+    try:
+        os.remove(temp_zip)
+    except Exception:
+        pass
+
+def download_and_extract_ffmpeg_silencioso(url, dest_path, go2rtc_dir):
+    import zipfile
+    temp_zip = os.path.join(go2rtc_dir, "ffmpeg.zip.tmp")
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    with urllib.request.urlopen(req, timeout=45) as conn:
+        with open(temp_zip, "wb") as f:
+            f.write(conn.read())
+            
+    with zipfile.ZipFile(temp_zip) as z:
+        ffmpeg_path_in_zip = None
+        for name in z.namelist():
+            if name.endswith("ffmpeg.exe"):
+                ffmpeg_path_in_zip = name
+                break
+        if ffmpeg_path_in_zip:
+            with z.open(ffmpeg_path_in_zip) as source_file:
+                with open(dest_path, "wb") as dest_file:
+                    dest_file.write(source_file.read())
+                    
+    try:
+        os.remove(temp_zip)
+    except Exception:
+        pass
 
 # Estrutura para obter status de energia e bateria do Windows (queda de energia)
 class SYSTEM_POWER_STATUS(ctypes.Structure):
@@ -49,8 +369,31 @@ if os.path.exists(old_file):
     except Exception:
         pass
 
+def detectar_gdrive_automatico():
+    unidades = [f"{chr(c)}:\\" for c in range(65, 91)]  # Letras de unidade de A:\ a Z:\
+    pastas_candidatas = [
+        "Meu Drive\\CAMERA",
+        "Meu Drive\\CAMERAS",
+        "My Drive\\CAMERA",
+        "My Drive\\CAMERAS",
+        "CAMERA",
+        "CAMERAS"
+    ]
+    for u in unidades:
+        if os.path.exists(u):
+            for p in pastas_candidatas:
+                caminho = os.path.join(u, p)
+                if os.path.exists(caminho):
+                    # Verifica se esta pasta candidata contém a subpasta da câmera 1 para termos certeza
+                    if os.path.exists(os.path.join(caminho, "CAMERA 1 FARMACIA")):
+                        return caminho
+    return None
+
 def carregar_config():
-    padrao = {"gdrive_root": r"G:\Meu Drive\CAMERAS"}
+    gdrive_detectado = detectar_gdrive_automatico()
+    gdrive_padrao = gdrive_detectado if gdrive_detectado else r"G:\Meu Drive\CAMERAS"
+    
+    padrao = {"gdrive_root": gdrive_padrao}
     if not os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "w", encoding="utf-8") as f:
@@ -63,6 +406,11 @@ def carregar_config():
             config = json.load(f)
             if "gdrive_root" not in config:
                 config["gdrive_root"] = padrao["gdrive_root"]
+            # Se o caminho salvo no config.json não existir, mas conseguirmos detectar um caminho válido atual,
+            # atualizamos a configuração para facilitar a portabilidade automática.
+            elif not os.path.exists(config["gdrive_root"]) and gdrive_detectado:
+                config["gdrive_root"] = gdrive_detectado
+                salvar_config(config)
             return config
     except Exception:
         return padrao
@@ -802,6 +1150,13 @@ class CameraManagerApp:
         self.txt_log.tag_configure("tag_warn", foreground="#F59E0B")
         self.txt_log.tag_configure("tag_default", foreground="#34D399")
 
+        # Descarrega logs gerados durante o startup/boot
+        if hasattr(self, "_startup_logs"):
+            logs_to_flush = self._startup_logs
+            del self._startup_logs
+            for msg_item in logs_to_flush:
+                self.add_log(msg_item)
+
         # 3.5. CONTAINERS DAS CÂMERAS AO VIVO (na coluna da direita)
         self.live_cams_container = tk.Frame(right_col, bg=BG_COLOR)
         self.live_cams_container.pack(fill="both", expand=True, padx=10, pady=4)
@@ -814,6 +1169,14 @@ class CameraManagerApp:
 
     # ================= LOG DE EVENTOS =================
     def add_log(self, msg):
+        # Se o console de log (txt_log) ainda não existe ou se estamos rodando ocultos (silent)
+        if not hasattr(self, "txt_log") or self.txt_log is None or self.silent:
+            if not hasattr(self, "_startup_logs"):
+                self._startup_logs = []
+            self._startup_logs.append(msg)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+            return
+
         timestamp = datetime.now().strftime("%H:%M:%S")
         formatted = f"[{timestamp}] {msg}\n"
         
@@ -830,16 +1193,19 @@ class CameraManagerApp:
         else:
             tag = "tag_default"
         
-        self.txt_log.configure(state="normal")
-        self.txt_log.insert(tk.END, formatted, tag)
-        
-        # Auto-cleanup: limita o log a 200 linhas para evitar consumo de memória
-        line_count = int(self.txt_log.index('end-1c').split('.')[0])
-        if line_count > 200:
-            self.txt_log.delete('1.0', f'{line_count - 200}.0')
-        
-        self.txt_log.see(tk.END)
-        self.txt_log.configure(state="disabled")
+        try:
+            self.txt_log.configure(state="normal")
+            self.txt_log.insert(tk.END, formatted, tag)
+            
+            # Auto-cleanup: limita o log a 200 linhas para evitar consumo de memória
+            line_count = int(self.txt_log.index('end-1c').split('.')[0])
+            if line_count > 200:
+                self.txt_log.delete('1.0', f'{line_count - 200}.0')
+            
+            self.txt_log.see(tk.END)
+            self.txt_log.configure(state="disabled")
+        except Exception:
+            pass
 
     def copy_link_to_clipboard(self):
         self.root.clipboard_clear()
@@ -2378,6 +2744,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Gerenciador NVR Câmeras Farmácia")
     parser.add_argument("--silent", action="store_true", help="Inicia o sistema de gravação em segundo plano sem abrir a janela")
     args_cli = parser.parse_args()
+    
+    # Garante que as dependências binárias existam antes de inicializar o painel
+    PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
+    verificar_e_baixar_dependencias(PROJ_DIR, silent=args_cli.silent)
     
     try:
         from ctypes import windll
