@@ -463,17 +463,23 @@ class LiveCameraWidget(tk.Frame):
             text=f" ▶️ CÂMERA: {stream_name.upper()}",
             font=("Segoe UI", 9, "bold"),
             fg=TEXT_COLOR,
-            bg="#1F2937",
-            activebackground="#374151",
+            bg="#161822",
+            activebackground="#1F2232",
             activeforeground=TEXT_COLOR,
             bd=0,
+            highlightbackground="#1F2232",
+            highlightthickness=1,
             cursor="hand2",
-            padx=10,
-            pady=5,
+            padx=12,
+            pady=6,
             anchor="w",
             command=self.toggle
         )
         self.header_btn.pack(fill="x", pady=2)
+        
+        # Hover bindings para o cabeçalho
+        self.header_btn.bind("<Enter>", lambda e: self.header_btn.configure(bg="#1F2232"))
+        self.header_btn.bind("<Leave>", lambda e: self.header_btn.configure(bg="#111827" if self.expanded else "#161822"))
         
         # Frame de conteúdo que será exibido/ocultado
         self.body_frame = tk.Frame(self, bg="#020204")
@@ -517,32 +523,35 @@ class LiveCameraWidget(tk.Frame):
 
     def collapse(self):
         self.expanded = False
-        self.header_btn.configure(text=f" ▶️ CÂMERA: {self.stream_name.upper()}", bg="#1F2937")
+        self.header_btn.configure(text=f" ▶️ CÂMERA: {self.stream_name.upper()}", bg="#161822")
         self.stop_stream()
         self.body_frame.pack_forget()
         self._recalc_camera_sizes()
 
     def _recalc_camera_sizes(self):
-        """Recalcula o tamanho das câmeras com base em quantas estão expandidas"""
+        """Recalcula o tamanho das câmeras com base em quantas estão expandidas e na altura do container"""
         if not hasattr(self.app, 'camera_widgets'):
             return
         expanded_count = sum(1 for w in self.app.camera_widgets.values() if w.expanded)
-        # Obtém a largura disponível da coluna direita
+        
+        # Obtém as dimensões disponíveis da coluna direita
         try:
             container_width = self.master.winfo_width()
-            if container_width < 100:
-                container_width = 650
+            container_height = self.master.winfo_height()
+            if container_width < 100: container_width = 650
+            if container_height < 100: container_height = 800
         except Exception:
             container_width = 650
+            container_height = 800
         
         target_w = container_width - 30  # Margem lateral
-        target_h = int(target_w * 9 / 16)  # Mantém 16:9
         
-        # Se ambas estão abertas, reduz para caber
+        # Se ambas estão abertas, limita a largura para caber verticalmente na tela sem transbordar
         if expanded_count >= 2:
-            target_w = min(target_w, 560)
-            target_h = int(target_w * 9 / 16)  # 560x315
-        
+            max_h_per_cam = (container_height - 120) // 2
+            target_w = min(target_w, int(max_h_per_cam * 16 / 9))
+            target_w = max(target_w, 320)  # Garante largura mínima funcional
+            
         for w in self.app.camera_widgets.values():
             w.target_width = target_w
 
@@ -784,7 +793,10 @@ class CameraManagerApp:
             self.root.title(f"Painel Câmeras Farmácia — NVR v{VERSION}")
             self.root.geometry("1280x830")
             self.root.configure(bg=BG_COLOR)
-            self.root.resizable(False, False)
+            self.root.minsize(1100, 750)
+            
+            # Vincular redimensionamento dinâmico do painel
+            self.root.bind("<Configure>", self.on_window_resize)
             
             self.setup_styles()
             self.create_widgets()
@@ -831,6 +843,23 @@ class CameraManagerApp:
             threading.Thread(target=self.run_start_sequence, daemon=True).start()
         else:
             self.add_log(f"Painel NVR v{VERSION} iniciado. Câmeras: {', '.join(self.streams)}")
+
+    def setup_button_hover(self, button, normal_bg, hover_bg):
+        button.bind("<Enter>", lambda e: button.configure(bg=hover_bg))
+        button.bind("<Leave>", lambda e: button.configure(bg=normal_bg))
+
+    def on_window_resize(self, event):
+        if event.widget != self.root:
+            return
+        now = time.time()
+        if not hasattr(self, "_last_resize_time"):
+            self._last_resize_time = 0
+        if now - self._last_resize_time < 0.15:
+            return
+        self._last_resize_time = now
+        if hasattr(self, "camera_widgets"):
+            for w in self.camera_widgets.values():
+                w._recalc_camera_sizes()
 
     def parse_streams(self):
         yaml_path = os.path.join(PROJ_DIR, "sistema", "go2rtc", "go2rtc.yaml")
@@ -929,21 +958,27 @@ class CameraManagerApp:
         top_cards_frame = tk.Frame(left_col, bg=BG_COLOR, pady=6)
         top_cards_frame.pack(fill="x", padx=12)
         
-        # Card 1: Serviços Globais com borda accent superior
-        card_global_wrapper = tk.Frame(top_cards_frame, bg=ACCENT_COLOR, bd=0, padx=0, pady=0)
+        # Card 1: Serviços Globais com contorno sutil
+        card_global_wrapper = tk.Frame(top_cards_frame, bg=BG_COLOR, bd=0)
         card_global_wrapper.pack(fill="x", expand=True, padx=4, pady=4)
-        # Barra accent superior de 3px
-        tk.Frame(card_global_wrapper, height=3, bg=ACCENT_COLOR).pack(fill="x")
-        self.card_global = tk.Frame(card_global_wrapper, bg=CARD_COLOR, bd=0, relief="flat", padx=15, pady=10)
+        self.card_global = tk.Frame(
+            card_global_wrapper, 
+            bg=CARD_COLOR, 
+            bd=0, 
+            highlightbackground="#1F2232", 
+            highlightthickness=1, 
+            padx=15, 
+            pady=10
+        )
         self.card_global.pack(fill="x")
-        tk.Label(self.card_global, text="⚡ Status dos Serviços", font=("Segoe UI", 10, "bold"), fg=TEXT_COLOR, bg=CARD_COLOR).pack(anchor="w")
+        tk.Label(self.card_global, text="⚡ Status dos Serviços", font=("Segoe UI", 10, "bold"), fg=TEXT_COLOR, bg=CARD_COLOR).pack(anchor="w", pady=(0, 4))
         
         # Linha Ponte RTSP
         row_go2rtc = tk.Frame(self.card_global, bg=CARD_COLOR, pady=1)
         row_go2rtc.pack(anchor="w")
         self.led_go2rtc = StatusLED(row_go2rtc, size=10, bg_color=CARD_COLOR)
         self.led_go2rtc.pack(side="left", padx=(0, 6), pady=4)
-        tk.Label(row_go2rtc, text="Ponte RTSP: ", font=("Segoe UI", 9), fg=TEXT_COLOR, bg=CARD_COLOR).pack(side="left")
+        tk.Label(row_go2rtc, text="Ponte RTSP: ", font=("Segoe UI", 9), fg=TEXT_MUTED, bg=CARD_COLOR).pack(side="left")
         self.lbl_val_go2rtc = tk.Label(row_go2rtc, text="Verificando...", font=("Segoe UI", 9, "bold"), fg=ORANGE_COLOR, bg=CARD_COLOR)
         self.lbl_val_go2rtc.pack(side="left")
         
@@ -952,7 +987,7 @@ class CameraManagerApp:
         row_gdrive.pack(anchor="w")
         self.led_gdrive = StatusLED(row_gdrive, size=10, bg_color=CARD_COLOR)
         self.led_gdrive.pack(side="left", padx=(0, 6), pady=4)
-        tk.Label(row_gdrive, text="Google Drive G: ", font=("Segoe UI", 9), fg=TEXT_COLOR, bg=CARD_COLOR).pack(side="left")
+        tk.Label(row_gdrive, text="Google Drive G: ", font=("Segoe UI", 9), fg=TEXT_MUTED, bg=CARD_COLOR).pack(side="left")
         self.lbl_val_gdrive = tk.Label(row_gdrive, text="Verificando...", font=("Segoe UI", 9, "bold"), fg=ORANGE_COLOR, bg=CARD_COLOR)
         self.lbl_val_gdrive.pack(side="left")
         
@@ -961,7 +996,7 @@ class CameraManagerApp:
         row_backups.pack(anchor="w")
         self.led_backups = StatusLED(row_backups, size=10, bg_color=CARD_COLOR)
         self.led_backups.pack(side="left", padx=(0, 6), pady=4)
-        tk.Label(row_backups, text="Backups Pendentes: ", font=("Segoe UI", 9), fg=TEXT_COLOR, bg=CARD_COLOR).pack(side="left")
+        tk.Label(row_backups, text="Backups Pendentes: ", font=("Segoe UI", 9), fg=TEXT_MUTED, bg=CARD_COLOR).pack(side="left")
         self.lbl_val_backups = tk.Label(row_backups, text="Calculando...", font=("Segoe UI", 9, "bold"), fg=ORANGE_COLOR, bg=CARD_COLOR)
         self.lbl_val_backups.pack(side="left")
 
@@ -969,51 +1004,64 @@ class CameraManagerApp:
         self.cameras_main_frame = tk.Frame(left_col, bg=BG_COLOR)
         self.cameras_main_frame.pack(fill="x", padx=12, pady=4)
         
-        # Layout horizontal (lado a lado) para os cards de câmera
+        # Layout vertical (evita esmagamento lateral de textos longos)
         self.camera_cards = {}
         
         for idx, stream in enumerate(self.streams):
-            # Wrapper com borda accent
-            card_wrapper = tk.Frame(self.cameras_main_frame, bg=ACCENT_COLOR, bd=0)
-            card_wrapper.pack(side="left", fill="both", expand=True, padx=4, pady=4)
-            tk.Frame(card_wrapper, height=3, bg=ACCENT_COLOR).pack(fill="x")
-            card = tk.Frame(card_wrapper, bg=CARD_COLOR, bd=0, relief="flat", padx=10, pady=6)
-            card.pack(fill="both", expand=True)
+            # Wrapper
+            card_wrapper = tk.Frame(self.cameras_main_frame, bg=BG_COLOR, bd=0)
+            card_wrapper.pack(side="top", fill="x", pady=5)
             
-            # Título da Câmera (abreviado para caber)
-            cam_label = f"CAM {idx+1}: {stream.upper()}"
-            tk.Label(card, text=f"📷 {cam_label}", font=("Segoe UI", 9, "bold"), fg=ACCENT_COLOR, bg=CARD_COLOR).pack(anchor="w", pady=(0, 3))
+            # Card principal com contorno e padding aprimorado
+            card = tk.Frame(
+                card_wrapper, 
+                bg=CARD_COLOR, 
+                bd=0, 
+                highlightbackground="#1F2232", 
+                highlightthickness=1, 
+                padx=15, 
+                pady=10
+            )
+            card.pack(fill="x")
             
-            # Sinal da Câmera
-            row_sinal = tk.Frame(card, bg=CARD_COLOR)
-            row_sinal.pack(anchor="w", pady=0)
-            led_sinal = StatusLED(row_sinal, size=8, bg_color=CARD_COLOR)
-            led_sinal.pack(side="left", padx=(0, 4), pady=1)
-            tk.Label(row_sinal, text="Sinal:", font=("Segoe UI", 8), fg=TEXT_COLOR, bg=CARD_COLOR).pack(side="left")
-            lbl_sinal = tk.Label(row_sinal, text="...", font=("Segoe UI", 8, "bold"), fg=ORANGE_COLOR, bg=CARD_COLOR)
+            # Título da Câmera
+            cam_label = f"CÂMERA {idx+1}: {stream.upper()}"
+            tk.Label(card, text=f"📷 {cam_label}", font=("Segoe UI", 10, "bold"), fg=ACCENT_COLOR, bg=CARD_COLOR).pack(anchor="w", pady=(0, 6))
+            
+            # Linha de Status (lado a lado)
+            status_row = tk.Frame(card, bg=CARD_COLOR)
+            status_row.pack(fill="x", pady=(0, 4))
+            
+            # Sinal
+            col_sinal = tk.Frame(status_row, bg=CARD_COLOR)
+            col_sinal.pack(side="left", expand=True, anchor="w")
+            led_sinal = StatusLED(col_sinal, size=8, bg_color=CARD_COLOR)
+            led_sinal.pack(side="left", padx=(0, 4), pady=2)
+            tk.Label(col_sinal, text="Sinal:", font=("Segoe UI", 9), fg=TEXT_MUTED, bg=CARD_COLOR).pack(side="left")
+            lbl_sinal = tk.Label(col_sinal, text="...", font=("Segoe UI", 9, "bold"), fg=ORANGE_COLOR, bg=CARD_COLOR)
             lbl_sinal.pack(side="left", padx=(3, 0))
             
             # Gravação
-            row_grav = tk.Frame(card, bg=CARD_COLOR)
-            row_grav.pack(anchor="w", pady=0)
-            led_grav = StatusLED(row_grav, size=8, bg_color=CARD_COLOR)
-            led_grav.pack(side="left", padx=(0, 4), pady=1)
-            tk.Label(row_grav, text="Grav:", font=("Segoe UI", 8), fg=TEXT_COLOR, bg=CARD_COLOR).pack(side="left")
-            lbl_grav = tk.Label(row_grav, text="...", font=("Segoe UI", 8, "bold"), fg=ORANGE_COLOR, bg=CARD_COLOR)
+            col_grav = tk.Frame(status_row, bg=CARD_COLOR)
+            col_grav.pack(side="left", expand=True, anchor="w")
+            led_grav = StatusLED(col_grav, size=8, bg_color=CARD_COLOR)
+            led_grav.pack(side="left", padx=(0, 4), pady=2)
+            tk.Label(col_grav, text="Grav:", font=("Segoe UI", 9), fg=TEXT_MUTED, bg=CARD_COLOR).pack(side="left")
+            lbl_grav = tk.Label(col_grav, text="...", font=("Segoe UI", 9, "bold"), fg=ORANGE_COLOR, bg=CARD_COLOR)
             lbl_grav.pack(side="left", padx=(3, 0))
 
             # Web Stream
-            row_web = tk.Frame(card, bg=CARD_COLOR)
-            row_web.pack(anchor="w", pady=0)
-            led_web = StatusLED(row_web, size=8, bg_color=CARD_COLOR)
-            led_web.pack(side="left", padx=(0, 4), pady=1)
-            tk.Label(row_web, text="Stream:", font=("Segoe UI", 8), fg=TEXT_COLOR, bg=CARD_COLOR).pack(side="left")
-            lbl_web = tk.Label(row_web, text="...", font=("Segoe UI", 8, "bold"), fg=ORANGE_COLOR, bg=CARD_COLOR)
+            col_web = tk.Frame(status_row, bg=CARD_COLOR)
+            col_web.pack(side="left", expand=True, anchor="w")
+            led_web = StatusLED(col_web, size=8, bg_color=CARD_COLOR)
+            led_web.pack(side="left", padx=(0, 4), pady=2)
+            tk.Label(col_web, text="Stream:", font=("Segoe UI", 9), fg=TEXT_MUTED, bg=CARD_COLOR).pack(side="left")
+            lbl_web = tk.Label(col_web, text="...", font=("Segoe UI", 9, "bold"), fg=ORANGE_COLOR, bg=CARD_COLOR)
             lbl_web.pack(side="left", padx=(3, 0))
             
             # Última gravação/Sync
-            lbl_sync = tk.Label(card, text="Buscando...", font=("Segoe UI", 7), fg=TEXT_MUTED, bg=CARD_COLOR, justify="left", wraplength=170)
-            lbl_sync.pack(anchor="w", pady=(2, 0))
+            lbl_sync = tk.Label(card, text="Buscando...", font=("Segoe UI", 8), fg=TEXT_MUTED, bg=CARD_COLOR, justify="left", wraplength=360)
+            lbl_sync.pack(fill="x", pady=(4, 0))
             
             # Salva referências para atualização
             self.camera_cards[stream] = {
@@ -1067,6 +1115,7 @@ class CameraManagerApp:
             command=self.click_abrir_pasta
         )
         self.btn_open_folder.pack(fill="x", padx=4, pady=2)
+        self.setup_button_hover(self.btn_open_folder, "#1F2937", "#374151")
 
         # Inicialização automática
         startup_frame = tk.Frame(left_col, bg=BG_COLOR, pady=2)
@@ -1087,6 +1136,7 @@ class CameraManagerApp:
             command=self.click_configurar_inicializacao
         )
         self.btn_setup_startup.pack(fill="x", padx=4, pady=2)
+        self.setup_button_hover(self.btn_setup_startup, "#1F2937", "#374151")
 
         # Controle de suspensão de energia
         sleep_frame = tk.Frame(left_col, bg=BG_COLOR, pady=2)
@@ -1134,14 +1184,31 @@ class CameraManagerApp:
             command=self.click_salvar_caminho
         )
         self.btn_save_path.pack(side="left", padx=2)
+        self.setup_button_hover(self.btn_save_path, "#3B82F6", "#2563EB")
 
         # 5. LOG DE EVENTOS (CONSOLE PREMIUM)
         log_title_frame = tk.Frame(left_col, bg=BG_COLOR)
         log_title_frame.pack(fill="x", padx=15, pady=(4,0))
         tk.Label(log_title_frame, text="📝 Log de Eventos", font=("Segoe UI", 9, "bold"), fg=TEXT_COLOR, bg=BG_COLOR).pack(anchor="w")
         
-        self.txt_log = tk.Text(left_col, height=6, bg="#030712", fg="#34D399", font=("Consolas", 9), bd=0, padx=10, pady=5, wrap="word")
-        self.txt_log.pack(fill="both", expand=True, padx=12, pady=(2, 6))
+        # Log frame wrapper para contorno elegante
+        log_wrapper = tk.Frame(left_col, bg=BG_COLOR)
+        log_wrapper.pack(fill="both", expand=True, padx=12, pady=(2, 6))
+        
+        self.txt_log = tk.Text(
+            log_wrapper, 
+            height=6, 
+            bg="#030712", 
+            fg="#34D399", 
+            font=("Consolas", 9), 
+            bd=0, 
+            highlightbackground="#1F2232", 
+            highlightthickness=1, 
+            padx=10, 
+            pady=5, 
+            wrap="word"
+        )
+        self.txt_log.pack(fill="both", expand=True)
         self.txt_log.configure(state="disabled")
         # Configura tags de cores para diferentes tipos de mensagens
         self.txt_log.tag_configure("tag_erro", foreground="#EF4444")
