@@ -1229,6 +1229,7 @@ class CameraManagerApp:
             return self._cached_streams_data  # Retorna cache antigo em caso de erro
 
     def monitor_loop(self):
+        global GDRIVE_ROOT
         while self.running_monitor:
             # 0. Verifica quedas de energia / status da bateria do PC/Nobreak
             self.check_power_status()
@@ -1236,8 +1237,19 @@ class CameraManagerApp:
             # 1. Verifica se go2rtc está ativo
             go2rtc_ok = self.check_process_go2rtc()
             
-            # 2. Verifica se o Google Drive está conectado
+            # 2. Verifica se o Google Drive está conectado (ou se foi conectado agora)
             gdrive_ok = os.path.exists(GDRIVE_ROOT)
+            if not gdrive_ok:
+                gdrive_detectado = detectar_gdrive_automatico()
+                if gdrive_detectado:
+                    GDRIVE_ROOT = gdrive_detectado
+                    CONFIG["gdrive_root"] = GDRIVE_ROOT
+                    salvar_config(CONFIG)
+                    gdrive_ok = True
+                    if not self.silent:
+                        self.root.after(0, lambda: self.add_log(f"Google Drive detectado dinamicamente em: {GDRIVE_ROOT}"))
+                        self.root.after(0, lambda: self.entry_path.delete(0, tk.END))
+                        self.root.after(0, lambda: self.entry_path.insert(0, GDRIVE_ROOT))
             
             # 3. Coleta visualizadores ao vivo
             live_viewers = self.get_live_viewers(go2rtc_ok)
@@ -1820,9 +1832,7 @@ class CameraManagerApp:
                 pass
                 
         try:
-            gdrive_root = os.path.dirname(gdrive_dir)
-            lock_name = f".active_recorder_{stream_name}.json"
-            net_lock_path = os.path.join(gdrive_root, lock_name)
+            net_lock_path = os.path.join(gdrive_dir, ".active_recorder.json")
             if os.path.exists(net_lock_path):
                 with open(net_lock_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
@@ -1834,9 +1844,7 @@ class CameraManagerApp:
         escrever_log_cam("=== TAREFA DE GRAVACAO INTERNA ENCERRADA ===")
 
     def verificar_duplicidade_rede_cam(self, gdrive_dir, stream_name):
-        gdrive_root = os.path.dirname(gdrive_dir)
-        lock_name = f".active_recorder_{stream_name}.json"
-        lock_path = os.path.join(gdrive_root, lock_name)
+        lock_path = os.path.join(gdrive_dir, ".active_recorder.json")
         
         if not os.path.exists(lock_path):
             return None
@@ -1859,12 +1867,13 @@ class CameraManagerApp:
         return None
 
     def atualizar_heartbeat_cam(self, gdrive_dir, stream_name):
-        gdrive_root = os.path.dirname(gdrive_dir)
-        if not os.path.exists(gdrive_root):
-            return
-            
-        lock_name = f".active_recorder_{stream_name}.json"
-        lock_path = os.path.join(gdrive_root, lock_name)
+        if not os.path.exists(gdrive_dir):
+            try:
+                os.makedirs(gdrive_dir, exist_ok=True)
+            except Exception:
+                return
+                
+        lock_path = os.path.join(gdrive_dir, ".active_recorder.json")
         
         data = {
             "timestamp": time.time(),
@@ -2391,7 +2400,74 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
                 pass
         sys.exit(0)
 
+    def limpar_e_fundir_pastas_legadas(self):
+        # 1. Pastas antigas a limpar e fundir nas pastas corretas
+        mapa_fusao = [
+            ("CAMERA 3 FARMACIA_MJPEG", "CAMERA 1 FARMACIA"),
+            ("CAMERA 4 FARMACIA2_MJPEG", "CAMERA 2 FARMACIA")
+        ]
+        
+        if os.path.exists(GDRIVE_ROOT):
+            for pasta_origem_nome, pasta_destino_nome in mapa_fusao:
+                origem_dir = os.path.join(GDRIVE_ROOT, pasta_origem_nome)
+                destino_dir = os.path.join(GDRIVE_ROOT, pasta_destino_nome)
+                
+                if os.path.exists(origem_dir):
+                    if not self.silent:
+                        self.add_log(f"Organizando pasta legada: {pasta_origem_nome}...")
+                    
+                    try:
+                        # Varre todos os subdiretórios e arquivos da pasta legada recursivamente
+                        for root_dir, dirs, files in os.walk(origem_dir, topdown=False):
+                            for f in files:
+                                filepath_origem = os.path.join(root_dir, f)
+                                
+                                # Preserva a estrutura interna de datas (ex: YYYY-MM-DD/arquivo.mp4)
+                                rel_path = os.path.relpath(filepath_origem, origem_dir)
+                                filepath_destino = os.path.join(destino_dir, rel_path)
+                                
+                                os.makedirs(os.path.dirname(filepath_destino), exist_ok=True)
+                                
+                                try:
+                                    shutil.move(filepath_origem, filepath_destino)
+                                except Exception:
+                                    try:
+                                        os.remove(filepath_origem)
+                                    except Exception:
+                                        pass
+                            
+                            # Apaga as subpastas vazias
+                            for d in dirs:
+                                try:
+                                    os.rmdir(os.path.join(root_dir, d))
+                                except Exception:
+                                    pass
+                                    
+                        # Remove a pasta legada raiz vazia
+                        try:
+                            os.rmdir(origem_dir)
+                            if not self.silent:
+                                self.add_log(f"Pasta legada {pasta_origem_nome} limpa e excluída com sucesso!")
+                        except Exception:
+                            pass
+                            
+                    except Exception as e:
+                        if not self.silent:
+                            self.add_log(f"Erro ao organizar pasta {pasta_origem_nome}: {str(e)}")
+                            
+            # 2. Deleta arquivos de lock soltos na raiz do Drive
+            try:
+                for f in os.listdir(GDRIVE_ROOT):
+                    if f.startswith(".active_recorder_") and f.endswith(".json"):
+                        try:
+                            os.remove(os.path.join(GDRIVE_ROOT, f))
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
     def auto_provision_system(self):
+        self.limpar_e_fundir_pastas_legadas()
         self.recuperar_videos_orfaos()
         threading.Thread(target=self.verificar_e_aplicar_firewall, daemon=True).start()
 
