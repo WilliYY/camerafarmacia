@@ -2615,22 +2615,33 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
                 for filename in files:
                     temp_file = os.path.join(stream_temp_dir, filename)
                     if os.path.exists(temp_file):
-                        if os.path.getsize(temp_file) > 0:
+                        # Força o Windows a atualizar o tamanho do arquivo no NTFS
+                        try:
+                            with open(temp_file, "r+b") as f:
+                                pass
+                        except Exception:
+                            pass
+                            
+                        try:
+                            tamanho = os.path.getsize(temp_file)
+                        except Exception:
+                            tamanho = 0
+                            
+                        if tamanho > 0:
                             nome_novo = filename.replace("temp_camera_", "recuperado_camera_")
                             dest_file = os.path.join(dest_dir, nome_novo)
                             try:
                                 shutil.move(temp_file, dest_file)
-                                if not self.silent:
-                                    self.add_log(f"Arquivo orfao recuperado da queda de energia: {nome_novo}")
-                            except Exception:
-                                pass
+                                self.add_log(f"Arquivo orfao recuperado com sucesso: {nome_novo}")
+                            except Exception as e:
+                                self.add_log(f"Erro ao mover arquivo orfao {filename}: {str(e)}")
                         else:
                             try:
                                 os.remove(temp_file)
                             except Exception:
                                 pass
-        except Exception:
-            pass
+        except Exception as e:
+            self.add_log(f"Erro geral no recuperador de orfaos: {str(e)}")
 
     def verificar_e_aplicar_firewall(self):
         marker_file = os.path.join(LOGS_DIR, ".firewall_configured")
