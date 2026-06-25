@@ -2143,7 +2143,6 @@ class CameraManagerApp:
             if not self.silent:
                 self.root.after(0, lambda: self.add_log("Inicialização concluída em segundo plano."))
                 self.root.after(0, lambda: self.set_button_state("RECORDING"))
-                self.speak("Gravando")
         except Exception as e:
             if not self.silent:
                 self.root.after(0, lambda: self.add_log(f"ERRO ao iniciar gravação: {str(e)}"))
@@ -2161,7 +2160,6 @@ class CameraManagerApp:
         if not self.silent:
             self.root.after(0, lambda: self.add_log("Gravação finalizada com sucesso."))
             self.root.after(0, lambda: self.set_button_state("STOPPED"))
-            self.speak("Gravação parada")
 
     def run_stop_sequence(self):
         # 1. Sinaliza parada para as threads locais
