@@ -47,8 +47,8 @@ def get_short_path(long_path):
     return long_path
 
 def atualizar_go2rtc_yaml(proj_dir):
-    yaml_path = os.path.join(proj_dir, "go2rtc", "go2rtc.yaml")
-    ffmpeg_exe = os.path.join(proj_dir, "go2rtc", "ffmpeg.exe")
+    yaml_path = os.path.join(proj_dir, "sistema", "go2rtc", "go2rtc.yaml")
+    ffmpeg_exe = os.path.join(proj_dir, "sistema", "go2rtc", "ffmpeg.exe")
     short_ffmpeg = get_short_path(ffmpeg_exe).replace("\\", "\\\\")
     
     conteudo_padrao = f'''api:
@@ -110,7 +110,7 @@ streams:
             pass
 
 def verificar_e_baixar_dependencias(proj_dir, silent=False):
-    go2rtc_dir = os.path.join(proj_dir, "go2rtc")
+    go2rtc_dir = os.path.join(proj_dir, "sistema", "go2rtc")
     os.makedirs(go2rtc_dir, exist_ok=True)
     
     go2rtc_exe = os.path.join(go2rtc_dir, "go2rtc.exe")
@@ -350,16 +350,16 @@ VERSION = "4.9"
 
 # Configurações do Projeto
 PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
-GO2RTC_EXE = os.path.join(PROJ_DIR, "go2rtc", "go2rtc.exe")
-LOGS_DIR = os.path.join(PROJ_DIR, "logs")
+GO2RTC_EXE = os.path.join(PROJ_DIR, "sistema", "go2rtc", "go2rtc.exe")
+LOGS_DIR = os.path.join(PROJ_DIR, "sistema", "logs")
 
 # Garante a existência das pastas do projeto
 os.makedirs(LOGS_DIR, exist_ok=True)
-os.makedirs(os.path.join(PROJ_DIR, "backup_gravacoes"), exist_ok=True)
-os.makedirs(os.path.join(PROJ_DIR, "gravando_temp"), exist_ok=True)
+os.makedirs(os.path.join(PROJ_DIR, "sistema", "backup_gravacoes"), exist_ok=True)
+os.makedirs(os.path.join(PROJ_DIR, "sistema", "gravando_temp"), exist_ok=True)
 
 # Arquivo de configuração local
-CONFIG_PATH = os.path.join(PROJ_DIR, "config.json")
+CONFIG_PATH = os.path.join(PROJ_DIR, "sistema", "config.json")
 
 # Limpa o arquivo temporário de update da sessão anterior se existir
 old_file = os.path.join(PROJ_DIR, "gerenciador.pyw.old")
@@ -833,7 +833,7 @@ class CameraManagerApp:
             self.add_log(f"Painel NVR v{VERSION} iniciado. Câmeras: {', '.join(self.streams)}")
 
     def parse_streams(self):
-        yaml_path = os.path.join(PROJ_DIR, "go2rtc", "go2rtc.yaml")
+        yaml_path = os.path.join(PROJ_DIR, "sistema", "go2rtc", "go2rtc.yaml")
         streams = []
         if not os.path.exists(yaml_path):
             return ["farmacia", "farmacia2"]
@@ -1292,7 +1292,7 @@ class CameraManagerApp:
         if (now - self._cached_backup_time) < 30.0:
             return self._cached_backup_stats
         
-        backup_dir = os.path.join(PROJ_DIR, "backup_gravacoes")
+        backup_dir = os.path.join(PROJ_DIR, "sistema", "backup_gravacoes")
         if not os.path.exists(backup_dir):
             self._cached_backup_stats = (0, 0)
             self._cached_backup_time = now
@@ -1511,7 +1511,7 @@ class CameraManagerApp:
     def check_last_recording(self, gdrive_ok, gdrive_path, stream_name):
         read_path = gdrive_path
         if not gdrive_ok or not os.path.exists(gdrive_path):
-            read_path = os.path.join(PROJ_DIR, "backup_gravacoes", stream_name)
+            read_path = os.path.join(PROJ_DIR, "sistema", "backup_gravacoes", stream_name)
             
         if not os.path.exists(read_path):
             return "Nenhuma gravação encontrada."
@@ -1676,7 +1676,7 @@ class CameraManagerApp:
             if not os.path.exists(GDRIVE_ROOT):
                 continue
                 
-            backup_dir = os.path.join(PROJ_DIR, "backup_gravacoes")
+            backup_dir = os.path.join(PROJ_DIR, "sistema", "backup_gravacoes")
             if not os.path.exists(backup_dir):
                 continue
                 
@@ -1784,7 +1784,7 @@ class CameraManagerApp:
             os.remove(teste_path)
             pasta_final = gdrive_dir
         except Exception as e:
-            pasta_fallback = os.path.join(PROJ_DIR, "backup_gravacoes", stream_name)
+            pasta_fallback = os.path.join(PROJ_DIR, "sistema", "backup_gravacoes", stream_name)
             os.makedirs(pasta_fallback, exist_ok=True)
             pasta_final = pasta_fallback
             escrever_log_cam(f"AVISO: Pasta do Drive indisponivel ({str(e)}). Usando backup local: {pasta_fallback}")
@@ -1902,7 +1902,7 @@ class CameraManagerApp:
         nome_arquivo = os.path.join(pasta_dia_final, f"camera_{data_dia}_{hora_inicio}_ate_{hora_fim}.mp4")
         
         # Gravação local temporária para evitar bloqueio e erros de sincronização no Google Drive
-        temp_dir = os.path.join(PROJ_DIR, "gravando_temp", stream_name)
+        temp_dir = os.path.join(PROJ_DIR, "sistema", "gravando_temp", stream_name)
         os.makedirs(temp_dir, exist_ok=True)
         nome_temp = os.path.join(temp_dir, f"temp_camera_{data_dia}_{hora_inicio}_ate_{hora_fim}.mp4")
         
@@ -1971,7 +1971,7 @@ class CameraManagerApp:
                 except Exception as e_move:
                     escrever_log_cam(f"Erro ao mover bloco para {pasta_dia_final} ({str(e_move)}). Tentando salvar no backup local.")
                     try:
-                        backup_dia_dir = os.path.join(PROJ_DIR, "backup_gravacoes", stream_name, data_dia)
+                        backup_dia_dir = os.path.join(PROJ_DIR, "sistema", "backup_gravacoes", stream_name, data_dia)
                         os.makedirs(backup_dia_dir, exist_ok=True)
                         backup_arquivo = os.path.join(backup_dia_dir, f"camera_{data_dia}_{hora_inicio}_ate_{hora_fim}.mp4")
                         shutil.move(nome_temp, backup_arquivo)
@@ -2269,7 +2269,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         threading.Thread(target=self.escanear_videos_corrompidos_thread, args=(show_popup,), daemon=True).start()
 
     def escanear_videos_corrompidos_thread(self, show_popup=True):
-        ffmpeg_bin = os.path.join(PROJ_DIR, "go2rtc", "ffmpeg.exe")
+        ffmpeg_bin = os.path.join(PROJ_DIR, "sistema", "go2rtc", "ffmpeg.exe")
         if not os.path.exists(ffmpeg_bin):
             if not self.silent:
                 self.add_log("ERRO: ffmpeg.exe não encontrado para escanear.")
@@ -2277,7 +2277,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             
         dirs_to_scan = []
         for idx, stream in enumerate(self.streams):
-            dirs_to_scan.append((stream, os.path.join(PROJ_DIR, "backup_gravacoes", stream)))
+            dirs_to_scan.append((stream, os.path.join(PROJ_DIR, "sistema", "backup_gravacoes", stream)))
             if os.path.exists(GDRIVE_ROOT):
                 dirs_to_scan.append((stream, self.get_gdrive_dir(stream, idx)))
                  
@@ -2396,7 +2396,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         threading.Thread(target=self.verificar_e_aplicar_firewall, daemon=True).start()
 
     def recuperar_videos_orfaos(self):
-        temp_root = os.path.join(PROJ_DIR, "gravando_temp")
+        temp_root = os.path.join(PROJ_DIR, "sistema", "gravando_temp")
         if not os.path.exists(temp_root):
             return
         try:
@@ -2408,7 +2408,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
                 if not files:
                     continue
                 
-                dest_dir = os.path.join(PROJ_DIR, "backup_gravacoes", stream)
+                dest_dir = os.path.join(PROJ_DIR, "sistema", "backup_gravacoes", stream)
                 os.makedirs(dest_dir, exist_ok=True)
                 
                 for filename in files:
@@ -2524,7 +2524,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         self.add_log("Iniciando atualizacao automatica...")
         
         gerenciador_temp = os.path.join(PROJ_DIR, "gerenciador.pyw.tmp")
-        visualizador_temp = os.path.join(PROJ_DIR, "visualizador.html.tmp")
+        visualizador_temp = os.path.join(PROJ_DIR, "sistema", "visualizador.html.tmp")
         
         try:
             req_g = urllib.request.Request(url_gerenciador, headers={'User-Agent': 'Mozilla/5.0'})
@@ -2562,7 +2562,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             shutil.move(gerenciador_temp, dest_gerenciador)
             
             # Para o visualizador.html não precisa de rename pois ele não está travado em execução
-            dest_visualizador = os.path.join(PROJ_DIR, "visualizador.html")
+            dest_visualizador = os.path.join(PROJ_DIR, "sistema", "visualizador.html")
             if os.path.exists(dest_visualizador):
                 try:
                     os.remove(dest_visualizador)
@@ -2605,7 +2605,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         files_to_check = {
             "Pasta do Projeto": PROJ_DIR,
             "Executável go2rtc": GO2RTC_EXE,
-            "Configuração go2rtc.yaml": os.path.join(PROJ_DIR, "go2rtc", "go2rtc.yaml"),
+            "Configuração go2rtc.yaml": os.path.join(PROJ_DIR, "sistema", "go2rtc", "go2rtc.yaml"),
             "Script Gerenciador (NVR)": os.path.join(PROJ_DIR, "gerenciador.pyw")
         }
         for name, path in files_to_check.items():
@@ -2685,7 +2685,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         log.append("\n--- [6] AMBIENTE DO SISTEMA ---")
         log.append(f" - Versão do Python: {sys.version}")
 
-        diag_file = os.path.join(PROJ_DIR, "diagnostico.txt")
+        diag_file = os.path.join(PROJ_DIR, "sistema", "diagnostico.txt")
         try:
             with open(diag_file, "w", encoding="utf-8") as f:
                 f.write("\n".join(log))
@@ -2708,7 +2708,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         files_to_check = {
             "Pasta do Projeto": PROJ_DIR,
             "Executável go2rtc": GO2RTC_EXE,
-            "Configuração go2rtc.yaml": os.path.join(PROJ_DIR, "go2rtc", "go2rtc.yaml"),
+            "Configuração go2rtc.yaml": os.path.join(PROJ_DIR, "sistema", "go2rtc", "go2rtc.yaml"),
         }
         for name, path in files_to_check.items():
             exists = os.path.exists(path)
@@ -2729,7 +2729,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         log.append(f" - Python: {sys.version}")
         log.append(f" - IP Local: {self.local_ip}")
         
-        diag_file = os.path.join(PROJ_DIR, "diagnostico.txt")
+        diag_file = os.path.join(PROJ_DIR, "sistema", "diagnostico.txt")
         try:
             with open(diag_file, "w", encoding="utf-8") as f:
                 f.write("\n".join(log))

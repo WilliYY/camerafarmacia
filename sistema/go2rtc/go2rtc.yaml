@@ -3,7 +3,7 @@ api:
   static_dir: ".."
 
 ffmpeg:
-  bin: "C:\\Users\\Thiesen\\Desktop\\CAMERA~1\\go2rtc\\ffmpeg.exe"
+  bin: "C:\\Users\\Thiesen\\Desktop\\CAMERA~1\\sistema\\go2rtc\\ffmpeg.exe"
 
 streams:
   # Câmeras originais (H.265 bruto - Usadas para as gravações em 0% CPU)

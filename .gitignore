@@ -1,11 +1,13 @@
 # Arquivos temporários e locais
-diagnostico.txt
+sistema/diagnostico.txt
 *.tmp
 *.log
 *.lock
-gravando_temp/
-go2rtc/ffmpeg.exe
-config.json
+sistema/gravando_temp/
+sistema/go2rtc/ffmpeg.exe
+sistema/config.json
+sistema/logs/
+sistema/backup_gravacoes/
 .firewall_configured
 
 # Cache do Python
