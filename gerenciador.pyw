@@ -1597,6 +1597,23 @@ class CameraManagerApp:
                     
         self.root.after(800, self.animate_pulse)
 
+    def speak(self, text):
+        if self.silent:
+            return
+        def run_speak():
+            try:
+                # Sintetizador de voz SAPI do Windows nativo rodando em segundo plano
+                cmd = f"(New-Object -ComObject SAPI.SpVoice).Speak('{text}')"
+                subprocess.run(
+                    ["powershell", "-Command", cmd],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+            except Exception:
+                pass
+        threading.Thread(target=run_speak, daemon=True).start()
+
     def click_iniciar(self):
         if not self.silent:
             self.add_log("Iniciando gravação do sistema...")
@@ -1638,6 +1655,7 @@ class CameraManagerApp:
             if not self.silent:
                 self.root.after(0, lambda: self.add_log("Inicialização concluída em segundo plano."))
                 self.root.after(0, lambda: self.set_button_state("RECORDING"))
+                self.speak("Gravando")
         except Exception as e:
             if not self.silent:
                 self.root.after(0, lambda: self.add_log(f"ERRO ao iniciar gravação: {str(e)}"))
@@ -1655,6 +1673,7 @@ class CameraManagerApp:
         if not self.silent:
             self.root.after(0, lambda: self.add_log("Gravação finalizada com sucesso."))
             self.root.after(0, lambda: self.set_button_state("STOPPED"))
+            self.speak("Gravação parada")
 
     def run_stop_sequence(self):
         # 1. Sinaliza parada para as threads locais
