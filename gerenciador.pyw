@@ -615,6 +615,8 @@ class LiveCameraWidget(tk.Frame):
         mjpeg_url = f"http://127.0.0.1:1984/api/stream.mjpeg?src={self.stream_name}_mjpeg"
         time.sleep(0.3)
         
+        last_frame_received_time = 0
+        
         while self.running:
             if not self.app.check_process_go2rtc():
                 self.show_error_message("Ponte RTSP offline")
@@ -644,12 +646,15 @@ class LiveCameraWidget(tk.Frame):
                         
                         if self.running:
                             self.update_image(image)
+                            last_frame_received_time = time.time()
                     except Exception:
                         pass  # Frame corrompido, pula para o próximo
                         
             except Exception as e:
                 if self.running:
-                    self.show_error_message(f"Reconectando...\n({type(e).__name__})")
+                    # Mostra tela de reconexão apenas se ficar mais de 10 segundos sem vídeo
+                    if time.time() - last_frame_received_time > 10:
+                        self.show_error_message(f"Reconectando...\n({type(e).__name__})")
                     time.sleep(1.0)
 
     def show_error_message(self, msg):
@@ -788,34 +793,33 @@ class CameraManagerApp:
         self.prevent_sleep_var = tk.BooleanVar(value=True)
         self.apply_prevent_sleep(True)
         
-        # 1. Configura título e layout se não estiver em modo silencioso
-        if not self.silent:
-            self.root.title(f"Painel Câmeras Farmácia — NVR v{VERSION}")
-            self.root.geometry("1280x830")
-            self.root.configure(bg=BG_COLOR)
-            self.root.minsize(1100, 750)
-            
-            # Vincular redimensionamento dinâmico do painel
-            self.root.bind("<Configure>", self.on_window_resize)
-            
-            self.setup_styles()
-            self.create_widgets()
-            
-            # Inicializa a máquina de estados do botão e animação
-            self.button_state = "STOPPED"
-            self.animate_pulse()
-            
-            # Agenda escaneamento automático a cada 3 horas (3 * 3600 * 1000 ms)
-            self.root.after(10800000, self.trigger_periodic_scan)
-            
-            # Agenda diagnóstico automático a cada 6 horas (6 * 3600 * 1000 ms)
-            self.root.after(21600000, self.trigger_periodic_diagnostics)
-            
-            # Intercepta o fechamento no X do Tkinter para desligar de forma segura
-            self.root.protocol("WM_DELETE_WINDOW", self.on_close_window)
-            
-            # Thread de verificação de atualizações no GitHub
-            threading.Thread(target=self.check_for_updates_thread, daemon=True).start()
+        # 1. Configura título e layout
+        self.root.title(f"Painel Câmeras Farmácia — NVR v{VERSION}")
+        self.root.geometry("1280x830")
+        self.root.configure(bg=BG_COLOR)
+        self.root.minsize(1100, 750)
+        
+        # Vincular redimensionamento dinâmico do painel
+        self.root.bind("<Configure>", self.on_window_resize)
+        
+        self.setup_styles()
+        self.create_widgets()
+        
+        # Inicializa a máquina de estados do botão e animação
+        self.button_state = "STOPPED"
+        self.animate_pulse()
+        
+        # Agenda escaneamento automático a cada 3 horas (3 * 3600 * 1000 ms)
+        self.root.after(10800000, self.trigger_periodic_scan)
+        
+        # Agenda diagnóstico automático a cada 6 horas (6 * 3600 * 1000 ms)
+        self.root.after(21600000, self.trigger_periodic_diagnostics)
+        
+        # Intercepta o fechamento no X do Tkinter para desligar de forma segura
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close_window)
+        
+        # Thread de verificação de atualizações no GitHub
+        threading.Thread(target=self.check_for_updates_thread, daemon=True).start()
             
         # Sinais do sistema para encerramento limpo (SIGINT, SIGTERM)
         import signal
@@ -843,6 +847,41 @@ class CameraManagerApp:
             threading.Thread(target=self.run_start_sequence, daemon=True).start()
         else:
             self.add_log(f"Painel NVR v{VERSION} iniciado. Câmeras: {', '.join(self.streams)}")
+
+        # 5. Inicia o servidor de escuta de instância única
+        self.iniciar_servidor_instancia()
+
+    def iniciar_servidor_instancia(self):
+        def server_loop():
+            global _instance_socket
+            if _instance_socket is None:
+                return
+            while True:
+                try:
+                    conn, addr = _instance_socket.accept()
+                    data = conn.recv(1024).decode('utf-8').strip()
+                    if data == "SHOW":
+                        self.root.after(0, self.restaurar_janela_oculta)
+                    conn.close()
+                except Exception:
+                    break
+        threading.Thread(target=server_loop, daemon=True).start()
+
+    def restaurar_janela_oculta(self):
+        self.silent = False
+        self.root.deiconify()
+        self.root.state("zoomed")
+        self.root.lift()
+        self.root.focus_force()
+        
+        # Descarrega logs gerados durante o modo silencioso
+        if hasattr(self, "_startup_logs"):
+            logs_to_flush = self._startup_logs
+            self._startup_logs = []
+            for msg_item in logs_to_flush:
+                self.add_log(msg_item)
+                
+        self.add_log("Janela restaurada a pedido do usuário.")
 
     def setup_button_hover(self, button, normal_bg, hover_bg):
         button.bind("<Enter>", lambda e: button.configure(bg=hover_bg))
@@ -1977,7 +2016,7 @@ class CameraManagerApp:
         
         nome_arquivo = os.path.join(pasta_dia_final, f"camera_{data_dia}_{hora_inicio}_ate_{hora_fim}.mp4")
         
-        # Gravação local temporária para evitar bloqueio e erros de sincronização no Google Drive
+        # Gravação local temporária
         temp_dir = os.path.join(PROJ_DIR, "sistema", "gravando_temp", stream_name)
         os.makedirs(temp_dir, exist_ok=True)
         nome_temp = os.path.join(temp_dir, f"temp_camera_{data_dia}_{hora_inicio}_ate_{hora_fim}.mp4")
@@ -1990,62 +2029,83 @@ class CameraManagerApp:
         last_heartbeat_time = time.time()
         
         status_ret = "reconectar"
+        
+        # Abre o arquivo no modo append se ele já existir (reconexão dentro do mesmo bloco)
+        mode = "ab" if os.path.exists(nome_temp) else "wb"
+        
         try:
-            req = urllib.request.Request(url)
-            response = urllib.request.urlopen(req, timeout=8)
-            self.active_connections[stream_name] = response
-            try:
-                with open(nome_temp, "wb") as out_file:
-                    while True:
-                        if not self.recording_active.get(stream_name, False):
-                            escrever_log_cam("Sinal de parada detectado.")
-                            status_ret = "parar"
-                            break
-                            
-                        # Batimento cardíaco e detecção de duplicidade
-                        agora_ts = time.time()
-                        if agora_ts - last_heartbeat_time >= 30:
-                            conflito = self.verificar_duplicidade_rede_cam(gdrive_dir, stream_name)
-                            if conflito:
-                                escrever_log_cam(f"[ERRO_DUPLICADO] O computador {conflito['hostname']} ({conflito['ip']}) ja esta gravando.")
-                                status_ret = "duplicado"
+            with open(nome_temp, mode) as out_file:
+                while datetime.now() < fim_bloco:
+                    if not self.recording_active.get(stream_name, False):
+                        status_ret = "parar"
+                        break
+                        
+                    # Verifica duplicidade na rede
+                    conflito = self.verificar_duplicidade_rede_cam(gdrive_dir, stream_name)
+                    if conflito:
+                        escrever_log_cam(f"[ERRO_DUPLICADO] O computador {conflito['hostname']} ({conflito['ip']}) ja esta gravando.")
+                        status_ret = "duplicado"
+                        break
+                    
+                    self.atualizar_heartbeat_cam(gdrive_dir, stream_name)
+                    last_heartbeat_time = time.time()
+                    
+                    try:
+                        req = urllib.request.Request(url)
+                        response = urllib.request.urlopen(req, timeout=10)
+                        self.active_connections[stream_name] = response
+                        
+                        last_read_time = time.time()
+                        
+                        while datetime.now() < fim_bloco:
+                            if not self.recording_active.get(stream_name, False):
+                                status_ret = "parar"
                                 break
-                            self.atualizar_heartbeat_cam(gdrive_dir, stream_name)
-                            last_heartbeat_time = agora_ts
-                            
-                        # Rotação de blocos
-                        if datetime.now() >= fim_bloco:
-                            escrever_log_cam("Bloco anterior finalizado localmente.")
-                            status_ret = "rotacionar"
-                            break
-                            
-                        # Leitura do fluxo de vídeo
-                        try:
-                            chunk = response.read(64 * 1024)
-                            if not chunk:
-                                escrever_log_cam("Fim da stream detectado.")
+                                
+                            # Atualiza batimento cardíaco a cada 30 segundos
+                            agora_ts = time.time()
+                            if agora_ts - last_heartbeat_time >= 30:
+                                self.atualizar_heartbeat_cam(gdrive_dir, stream_name)
+                                last_heartbeat_time = agora_ts
+                                
+                            # Leitura do fluxo de vídeo
+                            try:
+                                chunk = response.read(64 * 1024)
+                                if not chunk:
+                                    break
+                                out_file.write(chunk)
+                                out_file.flush()
+                                last_read_time = time.time()
+                            except (socket.timeout, TimeoutError):
+                                if time.time() - last_read_time > 15:
+                                    break
+                                continue
+                            except Exception:
                                 break
-                            out_file.write(chunk)
-                        except socket.timeout:
-                            continue
-            finally:
-                response.close()
+                                
+                        response.close()
+                    except Exception:
+                        # Em caso de erro de conexão, aguarda 2 segundos antes do retry
+                        time.sleep(2.0)
+                        continue
+                    finally:
+                        self.active_connections.pop(stream_name, None)
+                        
+                if datetime.now() >= fim_bloco:
+                    status_ret = "rotacionar"
         except Exception as e:
-            escrever_log_cam(f"Erro na conexao com a stream: {str(e)}")
+            escrever_log_cam(f"Erro no gravador local: {str(e)}")
             status_ret = "erro"
-        finally:
-            self.active_connections.pop(stream_name, None)
             
-        # Após fechar o arquivo temporário, movemos ele para a pasta definitiva (G: Drive ou backup local se offline)
-        if os.path.exists(nome_temp):
+        # Move o arquivo temporário se concluído
+        if os.path.exists(nome_temp) and status_ret in ("rotacionar", "parar"):
             if os.path.getsize(nome_temp) > 0:
                 try:
-                    # Garante que a subpasta do dia exista no Drive/Rede
                     os.makedirs(pasta_dia_final, exist_ok=True)
                     shutil.move(nome_temp, nome_arquivo)
                     escrever_log_cam(f"Bloco movido com sucesso para a pasta definitiva: {os.path.join(data_dia, os.path.basename(nome_arquivo))}")
                 except Exception as e_move:
-                    escrever_log_cam(f"Erro ao mover bloco para {pasta_dia_final} ({str(e_move)}). Tentando salvar no backup local.")
+                    escrever_log_cam(f"Erro ao mover bloco para {pasta_dia_final} ({str(e_move)}). Salvando no backup local.")
                     try:
                         backup_dia_dir = os.path.join(PROJ_DIR, "sistema", "backup_gravacoes", stream_name, data_dia)
                         os.makedirs(backup_dia_dir, exist_ok=True)
@@ -2880,12 +2940,46 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             if not self.silent:
                 self.root.after(0, lambda: self.add_log(f"Erro ao salvar diagnóstico automático: {str(e)}"))
 
+_instance_socket = None
+
+def garantir_instancia_unica(silent=False):
+    global _instance_socket
+    try:
+        _instance_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        _instance_socket.bind(('127.0.0.1', 29999))
+        _instance_socket.listen(1)
+        return True
+    except socket.error:
+        return False
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Gerenciador NVR Câmeras Farmácia")
     parser.add_argument("--silent", action="store_true", help="Inicia o sistema de gravação em segundo plano sem abrir a janela")
     args_cli = parser.parse_args()
     
+    if not garantir_instancia_unica(args_cli.silent):
+        if not args_cli.silent:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(2.0)
+                s.connect(('127.0.0.1', 29999))
+                s.sendall(b"SHOW")
+                s.close()
+            except Exception:
+                try:
+                    import ctypes
+                    ctypes.windll.user32.MessageBoxW(
+                        0,
+                        "O Painel de Câmeras já está em execução neste computador.\n\n"
+                        "Por favor, verifique a bandeja do sistema ou as janelas abertas.",
+                        "Painel de Câmeras - Já em Execução",
+                        0x40 | 0x0
+                    )
+                except Exception:
+                    pass
+        sys.exit(0)
+        
     # Garante que as dependências binárias existam antes de inicializar o painel
     PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
     verificar_e_baixar_dependencias(PROJ_DIR, silent=args_cli.silent)
