@@ -2946,6 +2946,7 @@ def garantir_instancia_unica(silent=False):
     global _instance_socket
     try:
         _instance_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        _instance_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         _instance_socket.bind(('127.0.0.1', 29999))
         _instance_socket.listen(1)
         return True
