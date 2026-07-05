@@ -208,6 +208,8 @@ def verificar_e_baixar_dependencias(proj_dir, silent=False):
                                     
                         update_gui("Extraindo go2rtc.exe...", 28)
                         with zipfile.ZipFile(temp_zip) as z:
+                            if z.testzip() is not None:
+                                raise Exception("Arquivo go2rtc.zip corrompido ou incompleto.")
                             z.extract("go2rtc.exe", go2rtc_dir)
                             
                         try:
@@ -240,6 +242,8 @@ def verificar_e_baixar_dependencias(proj_dir, silent=False):
                         
                         update_gui("Extraindo ffmpeg.exe do arquivo ZIP...", 92)
                         with zipfile.ZipFile(temp_zip) as z:
+                            if z.testzip() is not None:
+                                raise Exception("Arquivo ffmpeg.zip corrompido ou incompleto.")
                             ffmpeg_path_in_zip = None
                             for name in z.namelist():
                                 if name.endswith("ffmpeg.exe"):
@@ -304,6 +308,8 @@ def download_and_extract_go2rtc_silencioso(url, dest_path, go2rtc_dir):
         with open(temp_zip, "wb") as f:
             f.write(conn.read())
     with zipfile.ZipFile(temp_zip) as z:
+        if z.testzip() is not None:
+            raise Exception("Arquivo go2rtc.zip corrompido.")
         z.extract("go2rtc.exe", go2rtc_dir)
     try:
         os.remove(temp_zip)
@@ -319,6 +325,8 @@ def download_and_extract_ffmpeg_silencioso(url, dest_path, go2rtc_dir):
             f.write(conn.read())
             
     with zipfile.ZipFile(temp_zip) as z:
+        if z.testzip() is not None:
+            raise Exception("Arquivo ffmpeg.zip corrompido.")
         ffmpeg_path_in_zip = None
         for name in z.namelist():
             if name.endswith("ffmpeg.exe"):
@@ -420,31 +428,60 @@ def carregar_config():
         hd_padrao = hd_detectado if hd_detectado else r"D:\farmacia camera"
         
         padrao = {"gdrive_root": hd_padrao, "bloco_minutos": 30}
+        backup_path = CONFIG_PATH + ".bak"
+        
+        # 1. Se o arquivo principal não existir, tenta restaurar do backup
         if not os.path.exists(CONFIG_PATH):
-            try:
-                with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                    json.dump(padrao, f, indent=4)
-            except Exception:
-                pass
-            return padrao
+            if os.path.exists(backup_path):
+                try:
+                    import shutil
+                    shutil.copy2(backup_path, CONFIG_PATH)
+                except Exception:
+                    pass
+            else:
+                try:
+                    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                        json.dump(padrao, f, indent=4)
+                    import shutil
+                    shutil.copy2(CONFIG_PATH, backup_path)
+                except Exception:
+                    pass
+                return padrao
+                
+        # 2. Tenta carregar do arquivo principal
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 config = json.load(f)
-                updated = False
-                if "gdrive_root" not in config:
-                    config["gdrive_root"] = padrao["gdrive_root"]
-                    updated = True
-                elif not os.path.exists(config["gdrive_root"]) and hd_detectado:
-                    config["gdrive_root"] = hd_detectado
-                    updated = True
+        except Exception:
+            # Em caso de corrupção, tenta ler o backup shadow
+            try:
+                if os.path.exists(backup_path):
+                    with open(backup_path, "r", encoding="utf-8") as f:
+                        config = json.load(f)
+                    import shutil
+                    shutil.copy2(backup_path, CONFIG_PATH)
+                else:
+                    config = padrao.copy()
+            except Exception:
+                config = padrao.copy()
                 
-                if "bloco_minutos" not in config:
-                    config["bloco_minutos"] = 30
-                    updated = True
-                    
-                if updated:
-                    salvar_config_locked(config)
-                return config
+        # 3. Valida os campos carregados
+        try:
+            updated = False
+            if "gdrive_root" not in config:
+                config["gdrive_root"] = padrao["gdrive_root"]
+                updated = True
+            elif not os.path.exists(config["gdrive_root"]) and hd_detectado:
+                config["gdrive_root"] = hd_detectado
+                updated = True
+            
+            if "bloco_minutos" not in config:
+                config["bloco_minutos"] = 30
+                updated = True
+                
+            if updated:
+                salvar_config_locked(config)
+            return config
         except Exception:
             return padrao
 
@@ -452,6 +489,11 @@ def salvar_config_locked(config):
     try:
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=4)
+        try:
+            import shutil
+            shutil.copy2(CONFIG_PATH, CONFIG_PATH + ".bak")
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -907,6 +949,7 @@ class CameraManagerApp:
         self.recording_active = {}
         self.recording_threads = {}
         self.active_connections = {}
+        self.reconnect_failures = {}
         self.status_lock = threading.Lock()
         self.alerted_duplicates = {} # Evita exibir alerta popup repetidamente
         
@@ -965,6 +1008,7 @@ class CameraManagerApp:
         self.auto_provision_system()
         self.limpar_arquivos_temporarios_orfaos()
         self.verificar_saude_discos_smart()
+        self.limpar_processos_ffmpeg_zumbis()
 
         # 2. Inicia a thread de monitoramento em tempo real
         self.running_monitor = True
@@ -1069,6 +1113,19 @@ class CameraManagerApp:
             except Exception:
                 pass
         threading.Thread(target=check, daemon=True).start()
+
+    def limpar_processos_ffmpeg_zumbis(self, sync=False):
+        """Busca e finaliza processos ffmpeg.exe órfãos rodando sob a pasta do projeto no Windows"""
+        def clean():
+            try:
+                cmd = ["powershell", "-Command", "Get-Process ffmpeg -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*sistema\\\\go2rtc*' } | Stop-Process -Force"]
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+        if sync:
+            clean()
+        else:
+            threading.Thread(target=clean, daemon=True).start()
 
     def setup_button_hover(self, button, normal_bg, hover_bg):
         button.bind("<Enter>", lambda e: button.configure(bg=hover_bg))
@@ -2614,15 +2671,22 @@ class CameraManagerApp:
                     break
                     
                 if status == "erro" or status == "reconectar":
-                    escrever_log_cam("Aguardando 10 segundos antes de tentar reconectar...")
-                    for _ in range(20):
+                    self.reconnect_failures[stream_name] = self.reconnect_failures.get(stream_name, 0) + 1
+                    failures = self.reconnect_failures[stream_name]
+                    delay = min(10 * (2 ** (failures - 1)), 300)
+                    escrever_log_cam(f"Tentativa de reconexao fracassou. Aguardando {delay} segundos antes de tentar novamente (Falhas consecutivas: {failures})...")
+                    
+                    steps = int(delay * 2)
+                    for _ in range(steps):
                         if not self.recording_active.get(stream_name, False):
                             break
                         time.sleep(0.5)
-                elif status == "rotacionar":
-                    time.sleep(1)
                 else:
-                    time.sleep(1)
+                    self.reconnect_failures[stream_name] = 0
+                    if status == "rotacionar":
+                        time.sleep(1)
+                    else:
+                        time.sleep(1)
             except Exception as e_thread:
                 escrever_log_cam(f"[FALHA_GRAVADOR] Erro inesperado na thread principal: {str(e_thread)}")
                 time.sleep(2.0)
@@ -2663,6 +2727,13 @@ class CameraManagerApp:
             current_time = time.time()
             my_hostname = socket.gethostname()
             
+            # Validação dupla: por JSON timestamp e por tempo de modificação do arquivo físico (previne desassociação de relógios locais)
+            file_mtime = os.path.getmtime(lock_path)
+            age_by_mtime = current_time - file_mtime
+            
+            if age_by_mtime > 120:
+                return None  # Trava expirada pelo sistema de arquivos
+                
             if (current_time - last_heartbeat < 90) and (hostname != my_hostname):
                 return {"hostname": hostname, "ip": ip}
         except Exception:
@@ -3282,6 +3353,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
                 
         try:
             self.run_stop_sequence()
+            self.limpar_processos_ffmpeg_zumbis(sync=True)
         except Exception:
             pass
             
