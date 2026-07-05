@@ -1124,29 +1124,14 @@ class CameraManagerApp:
             darkcolor="#1F2232",
             arrowsize=0
         )
-        style.map(
-            "Vertical.TScrollbar",
-            background=[("active", "#374151")]
-        )
         self.root.option_add("*TCombobox*Listbox.selectBackground", "#2563EB")
         self.root.option_add("*TCombobox*Listbox.selectForeground", TEXT_COLOR)
         self.root.option_add("*TCombobox*Listbox.font", ("Segoe UI", 9))
 
     def create_widgets(self):
-        # Container principal dividido em duas colunas (Esquerda e Direita)
-        split_container = tk.Frame(self.root, bg=BG_COLOR)
-        split_container.pack(fill="both", expand=True, padx=10, pady=5)
-        
-        left_col = tk.Frame(split_container, bg=BG_COLOR, width=430)
-        left_col.pack(side="left", fill="both", expand=False)
-        left_col.pack_propagate(False)
-        
-        right_col = tk.Frame(split_container, bg=BG_COLOR)
-        right_col.pack(side="right", fill="both", expand=True)
-
-        # 1. HEADER / CABEÇALHO (na coluna da esquerda)
-        header_frame = tk.Frame(left_col, bg=BG_COLOR, pady=8)
-        header_frame.pack(fill="x", padx=12)
+        # 1. HEADER / CABEÇALHO UNIFICADO NO TOPO DA JANELA
+        header_frame = tk.Frame(self.root, bg=BG_COLOR, pady=6)
+        header_frame.pack(fill="x", padx=15, pady=(5, 0))
         
         title_label = tk.Label(
             header_frame, 
@@ -1167,8 +1152,71 @@ class CameraManagerApp:
         subtitle_label.pack(side="left", padx=10, pady=8)
         
         # Divisor horizontal neon premium (glow azul sutil)
-        glow_line = tk.Frame(left_col, bg="#3B82F6", height=2)
-        glow_line.pack(fill="x", padx=12, pady=(2, 10))
+        glow_line = tk.Frame(self.root, bg="#3B82F6", height=2)
+        glow_line.pack(fill="x", padx=15, pady=(2, 6))
+
+        # 1.5. CABEÇALHO DE STATUS DO TOPO (TOP STATUS HEADER)
+        self.top_status_bar = tk.Frame(self.root, bg=BG_COLOR)
+        self.top_status_bar.pack(fill="x", padx=15, pady=(0, 6))
+        
+        # Pílula 1: Status de Gravação
+        self.hdr_pill_grav = tk.Label(
+            self.top_status_bar, 
+            text="  NVR STATUS: VERIFICANDO  ", 
+            font=("Segoe UI", 8, "bold"), 
+            fg=ORANGE_COLOR, 
+            bg="#78350F",
+            relief="flat",
+            bd=0
+        )
+        self.hdr_pill_grav.pack(side="left", padx=(0, 6))
+        
+        # Pílula 2: Câmeras Online
+        self.hdr_pill_cams = tk.Label(
+            self.top_status_bar, 
+            text="  CÂMERAS: 0/2 ONLINE  ", 
+            font=("Segoe UI", 8, "bold"), 
+            fg=ORANGE_COLOR, 
+            bg="#78350F",
+            relief="flat",
+            bd=0
+        )
+        self.hdr_pill_cams.pack(side="left", padx=6)
+        
+        # Pílula 3: Espaço no Disco
+        self.hdr_pill_disk = tk.Label(
+            self.top_status_bar, 
+            text="  DISCO: VERIFICANDO  ", 
+            font=("Segoe UI", 8, "bold"), 
+            fg=ORANGE_COLOR, 
+            bg="#78350F",
+            relief="flat",
+            bd=0
+        )
+        self.hdr_pill_disk.pack(side="left", padx=6)
+        
+        # Pílula 4: Energia AC/Bateria
+        self.hdr_pill_power = tk.Label(
+            self.top_status_bar, 
+            text="  ENERGIA: AC LINE (OK)  ", 
+            font=("Segoe UI", 8, "bold"), 
+            fg=GREEN_COLOR, 
+            bg="#064E3B",
+            relief="flat",
+            bd=0
+        )
+        self.hdr_pill_power.pack(side="left", padx=6)
+
+        # Container principal dividido em duas colunas (Esquerda e Direita)
+        split_container = tk.Frame(self.root, bg=BG_COLOR)
+        split_container.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        left_col = tk.Frame(split_container, bg=BG_COLOR, width=430)
+        left_col.pack(side="left", fill="both", expand=False)
+        left_col.pack_propagate(False)
+        
+        right_col = tk.Frame(split_container, bg=BG_COLOR)
+        right_col.pack(side="right", fill="both", expand=True)
 
         # 2. CARDS GLOBAIS (SERVIÇOS E REDE)
         top_cards_frame = tk.Frame(left_col, bg=BG_COLOR, pady=6)
@@ -1515,14 +1563,28 @@ class CameraManagerApp:
         )
         self.lbl_tip_retention.pack(fill="x", pady=(8, 0))
 
-        # 5. LOG DE EVENTOS (CONSOLE PREMIUM)
-        log_title_frame = tk.Frame(left_col, bg=BG_COLOR)
-        log_title_frame.pack(fill="x", padx=15, pady=(4,0))
-        tk.Label(log_title_frame, text="📝 Log de Eventos", font=("Segoe UI", 9, "bold"), fg=TEXT_COLOR, bg=BG_COLOR).pack(anchor="w")
+        # 3.5. CONTAINERS DAS CÂMERAS AO VIVO (na coluna da direita)
+        self.live_cams_container = tk.Frame(right_col, bg=BG_COLOR)
+        self.live_cams_container.pack(fill="both", expand=True, padx=10, pady=4)
+        
+        self.camera_widgets = {}
+        for stream in self.streams:
+            cam_widget = LiveCameraWidget(self.live_cams_container, stream, self)
+            cam_widget.pack(side="top", fill="both", expand=True, pady=4)
+            self.camera_widgets[stream] = cam_widget
+
+        # Divisor horizontal sutil entre Câmeras e Logs
+        cams_logs_sep = tk.Frame(right_col, bg="#1F2232", height=1)
+        cams_logs_sep.pack(fill="x", padx=15, pady=(8, 4))
+
+        # 5. LOG DE EVENTOS (CONSOLE PREMIUM REALOCADO NA COLUNA DIREITA)
+        log_title_frame = tk.Frame(right_col, bg=BG_COLOR)
+        log_title_frame.pack(fill="x", padx=15, pady=(4, 0))
+        tk.Label(log_title_frame, text="📝 Log de Eventos do Sistema", font=("Segoe UI", 9, "bold"), fg=TEXT_COLOR, bg=BG_COLOR).pack(anchor="w")
         
         # Log frame wrapper para contorno elegante
-        log_wrapper = tk.Frame(left_col, bg=BG_COLOR)
-        log_wrapper.pack(fill="both", expand=True, padx=12, pady=(2, 6))
+        log_wrapper = tk.Frame(right_col, bg=BG_COLOR)
+        log_wrapper.pack(fill="x", expand=False, padx=12, pady=(2, 6))
         
         # Barra de rolagem estilizada escura
         scrollbar = ttk.Scrollbar(log_wrapper, orient="vertical")
@@ -1530,7 +1592,7 @@ class CameraManagerApp:
         
         self.txt_log = tk.Text(
             log_wrapper, 
-            height=10, 
+            height=12, 
             bg="#0E111C", 
             fg="#A7F3D0", 
             font=("Consolas", 9), 
@@ -1558,16 +1620,6 @@ class CameraManagerApp:
             del self._startup_logs
             for msg_item in logs_to_flush:
                 self.add_log(msg_item)
-
-        # 3.5. CONTAINERS DAS CÂMERAS AO VIVO (na coluna da direita)
-        self.live_cams_container = tk.Frame(right_col, bg=BG_COLOR)
-        self.live_cams_container.pack(fill="both", expand=True, padx=10, pady=4)
-        
-        self.camera_widgets = {}
-        for stream in self.streams:
-            cam_widget = LiveCameraWidget(self.live_cams_container, stream, self)
-            cam_widget.pack(side="top", fill="both", expand=True, pady=4)
-            self.camera_widgets[stream] = cam_widget
 
     # ================= LOG DE EVENTOS =================
     def _append_to_log_widget(self, msg, tag):
@@ -2196,8 +2248,43 @@ class CameraManagerApp:
             if self.silent:
                 return
                 
-            # Sincroniza o estado do botão com a realidade se não estiver em transição
             any_recording = any(state["grav_ok"] for state in cam_states.values())
+
+            # 0.5. Atualiza o cabeçalho dinâmico do topo (Top Status Header)
+            # Pílula 1: Gravação
+            if any_recording:
+                self.configure_badge_label(self.hdr_pill_grav, "  NVR STATUS: GRAVANDO  ", GREEN_COLOR)
+            else:
+                self.configure_badge_label(self.hdr_pill_grav, "  NVR STATUS: PARADO  ", RED_COLOR)
+                
+            # Pílula 2: Câmeras Online
+            online_count = sum(1 for state in cam_states.values() if "Sinal OK" in state.get("signal", ""))
+            total_cams = len(self.streams)
+            if online_count == total_cams:
+                self.configure_badge_label(self.hdr_pill_cams, f"  CÂMERAS: {online_count}/{total_cams} ONLINE  ", GREEN_COLOR)
+            elif online_count > 0:
+                self.configure_badge_label(self.hdr_pill_cams, f"  CÂMERAS: {online_count}/{total_cams} ONLINE  ", ORANGE_COLOR)
+            else:
+                self.configure_badge_label(self.hdr_pill_cams, f"  CÂMERAS: {online_count}/{total_cams} ONLINE  ", RED_COLOR)
+                
+            # Pílula 3: Espaço no Disco
+            if gdrive_ok:
+                try:
+                    total, used, free = shutil.disk_usage(GDRIVE_ROOT)
+                    free_gb = free / (1024 ** 3)
+                    self.configure_badge_label(self.hdr_pill_disk, f"  DISCO: {free_gb:.1f} GB LIVRES  ", GREEN_COLOR)
+                except Exception:
+                    self.configure_badge_label(self.hdr_pill_disk, "  DISCO: CONECTADO  ", GREEN_COLOR)
+            else:
+                self.configure_badge_label(self.hdr_pill_disk, "  DISCO: DESCONECTADO  ", RED_COLOR)
+                
+            # Pílula 4: Energia AC/Bateria
+            if getattr(self, "on_battery", False):
+                self.configure_badge_label(self.hdr_pill_power, "  ENERGIA: BATERIA/NOBREAK (ALERTA)  ", ORANGE_COLOR)
+            else:
+                self.configure_badge_label(self.hdr_pill_power, "  ENERGIA: REDE ELÉTRICA (OK)  ", GREEN_COLOR)
+
+            # Sincroniza o estado do botão com a realidade se não estiver em transição
             if hasattr(self, "button_state") and self.button_state not in ("STARTING", "STOPPING"):
                 if any_recording:
                     if self.button_state != "RECORDING":
