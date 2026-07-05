@@ -376,6 +376,7 @@ def detectar_gdrive_automatico():
     # Evita caixas de diálogo do Windows se uma unidade estiver vazia (ex: CD-ROM)
     old_mode = kernel32.SetErrorMode(1)
     try:
+        # 1. Tenta buscar pelo Volume Label "FARMACIA"
         for letter in string.ascii_uppercase:
             drive_path = f"{letter}:\\"
             drive_type = kernel32.GetDriveTypeW(ctypes.c_wchar_p(drive_path))
@@ -390,6 +391,16 @@ def detectar_gdrive_automatico():
             )
             if rc and volumeNameBuffer.value.upper() == "FARMACIA":
                 return os.path.join(drive_path, "farmacia camera")
+
+        # 2. Tenta buscar pela existência física da pasta "\farmacia camera" em qualquer drive removível/fixo
+        for letter in string.ascii_uppercase:
+            drive_path = f"{letter}:\\"
+            drive_type = kernel32.GetDriveTypeW(ctypes.c_wchar_p(drive_path))
+            # 2 = DRIVE_REMOVABLE, 3 = DRIVE_FIXED
+            if drive_type in (2, 3):
+                target_folder = os.path.join(drive_path, "farmacia camera")
+                if os.path.exists(target_folder):
+                    return target_folder
     except Exception:
         pass
     finally:
@@ -953,6 +964,7 @@ class CameraManagerApp:
         # Auto-provisionamento de rede e recuperação de órfãos
         self.auto_provision_system()
         self.limpar_arquivos_temporarios_orfaos()
+        self.verificar_saude_discos_smart()
 
         # 2. Inicia a thread de monitoramento em tempo real
         self.running_monitor = True
@@ -1028,6 +1040,35 @@ class CameraManagerApp:
                 self.add_log(f"🧹 [STARTUP] Limpeza concluída: removidos {count} arquivo(s) temporário(s) órfão(s) ({size / (1024*1024):.2f} MB liberados).")
         except Exception:
             pass
+
+    def verificar_saude_discos_smart(self):
+        """Verifica a integridade física dos discos via WMI no PowerShell e reporta no console se houver falhas"""
+        def check():
+            try:
+                cmd = ["powershell", "-Command", "Get-WmiObject -Class Win32_DiskDrive | Select-Object Model, Status | ConvertTo-Json"]
+                output = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL)
+                if not output.strip():
+                    return
+                drives = json.loads(output)
+                if isinstance(drives, dict):
+                    drives = [drives]
+                
+                healthy = True
+                for drive in drives:
+                    model = drive.get("Model", "Desconhecido")
+                    status = drive.get("Status", "Desconhecido")
+                    if status != "OK":
+                        healthy = False
+                        if not self.silent:
+                            self.root.after(0, lambda m=model, s=status: self.add_log(
+                                f"🚨 [ALERTA HARDWARE] O disco '{m}' reportou status de falha S.M.A.R.T.: '{s}'! Risco de perda de gravações!",
+                                "tag_erro"
+                            ))
+                if healthy and not self.silent:
+                    self.root.after(0, lambda: self.add_log("🩺 [DIAGNÓSTICO S.M.A.R.T.] Todos os discos físicos conectados estão saudáveis (Status: OK)."))
+            except Exception:
+                pass
+        threading.Thread(target=check, daemon=True).start()
 
     def setup_button_hover(self, button, normal_bg, hover_bg):
         button.bind("<Enter>", lambda e: button.configure(bg=hover_bg))
@@ -3201,6 +3242,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         if not self.silent:
             self.add_log("🩺 Diagnóstico automático agendado em execução...")
         threading.Thread(target=self.run_diagnostics_sequence_auto, daemon=True).start()
+        self.verificar_saude_discos_smart()
         self.root.after(21600000, self.trigger_periodic_diagnostics)
 
     def extrair_data_do_arquivo(self, nome_arquivo):
