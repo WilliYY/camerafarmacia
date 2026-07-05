@@ -952,6 +952,7 @@ class CameraManagerApp:
 
         # Auto-provisionamento de rede e recuperação de órfãos
         self.auto_provision_system()
+        self.limpar_arquivos_temporarios_orfaos()
 
         # 2. Inicia a thread de monitoramento em tempo real
         self.running_monitor = True
@@ -1003,6 +1004,30 @@ class CameraManagerApp:
                 self.add_log(msg_item)
                 
         self.add_log("Janela restaurada a pedido do usuário.")
+
+    def limpar_arquivos_temporarios_orfaos(self):
+        """Limpa arquivos temporários inacabados (.ts ou .tmp) de execuções anteriores na pasta gravando_temp"""
+        temp_dir = os.path.join(PROJ_DIR, "sistema", "gravando_temp")
+        if not os.path.exists(temp_dir):
+            return
+            
+        try:
+            count = 0
+            size = 0
+            for root_dir, _, files in os.walk(temp_dir):
+                for f in files:
+                    if f.endswith((".ts", ".tmp")):
+                        file_path = os.path.join(root_dir, f)
+                        try:
+                            size += os.path.getsize(file_path)
+                            os.remove(file_path)
+                            count += 1
+                        except Exception:
+                            pass
+            if count > 0 and not self.silent:
+                self.add_log(f"🧹 [STARTUP] Limpeza concluída: removidos {count} arquivo(s) temporário(s) órfão(s) ({size / (1024*1024):.2f} MB liberados).")
+        except Exception:
+            pass
 
     def setup_button_hover(self, button, normal_bg, hover_bg):
         button.bind("<Enter>", lambda e: button.configure(bg=hover_bg))
@@ -2489,6 +2514,26 @@ class CameraManagerApp:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             formatted = f"[{timestamp}] [{stream_name.upper()}] {msg}\n"
             try:
+                # Rotaciona o arquivo de log se passar de 2MB
+                if os.path.exists(log_path) and os.path.getsize(log_path) > 2 * 1024 * 1024:
+                    try:
+                        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+                            lines = f.readlines()
+                        if len(lines) > 500:
+                            with open(log_path, "w", encoding="utf-8") as f:
+                                f.writelines(lines[-500:])
+                        else:
+                            with open(log_path, "w", encoding="utf-8") as f:
+                                f.truncate(0)
+                    except Exception:
+                        try:
+                            with open(log_path, "w", encoding="utf-8") as f:
+                                f.write(f"[{timestamp}] [ROTACAO] Log reiniciado devido a limite de tamanho.\n")
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            try:
                 with open(log_path, "a", encoding="utf-8") as f:
                     f.write(formatted)
             except Exception:
@@ -2670,7 +2715,7 @@ class CameraManagerApp:
                     
                     try:
                         req = urllib.request.Request(url)
-                        response = urllib.request.urlopen(req, timeout=5)
+                        response = urllib.request.urlopen(req, timeout=8)
                         self.active_connections[stream_name] = response
                         
                         last_read_time = time.time()
