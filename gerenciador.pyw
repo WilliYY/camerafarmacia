@@ -780,6 +780,42 @@ class LiveCameraWidget(tk.Frame):
         for w in self.app.camera_widgets.values():
             w.target_width = target_w
 
+    def is_corrupt_frame(self, pil_image):
+        """Detecta se o frame decodificado possui blocos grandes de corrupção do decoder (verde, magenta ou cinza do ffmpeg)"""
+        try:
+            w, h = pil_image.size
+            if w < 10 or h < 10:
+                return False
+            # Amostra 5 pontos no rodapé da imagem (concentração de erros de decodificação H.264/MJPEG)
+            sample_points = [
+                (int(w * 0.2), int(h * 0.9)),
+                (int(w * 0.4), int(h * 0.9)),
+                (int(w * 0.6), int(h * 0.9)),
+                (int(w * 0.8), int(h * 0.9)),
+                (int(w * 0.5), int(h * 0.95))
+            ]
+            
+            # Garante formato RGB para leitura de canais de cor
+            img_rgb = pil_image.convert("RGB")
+            
+            corrupt_count = 0
+            for x, y in sample_points:
+                r, g, b = img_rgb.getpixel((x, y))
+                # 1. Magenta (Alto R, Baixo G, Alto B)
+                if r > 200 and g < 60 and b > 200:
+                    corrupt_count += 1
+                # 2. Verde Puro (Baixo R, Alto G, Baixo B)
+                elif r < 60 and g > 200 and b < 60:
+                    corrupt_count += 1
+                # 3. Cinza Puro de Dropped Frame (120-136 nos 3 canais)
+                elif 120 <= r <= 136 and 120 <= g <= 136 and 120 <= b <= 136:
+                    corrupt_count += 1
+            
+            # Se a maioria dos pontos no rodapé contiverem as cores padrão de decodificação falha, descarta o frame
+            return corrupt_count >= 4
+        except Exception:
+            return False
+
     def start_stream(self):
         self.running = True
         self.thread = threading.Thread(target=self.stream_loop, daemon=True)
@@ -869,6 +905,10 @@ class LiveCameraWidget(tk.Frame):
                         th = int(tw * 9 / 16)
                         image = image.resize((tw, th), Image.Resampling.BILINEAR)
                         
+                        # Descarta frames com corrupção visual severa (ex: magenta/verde/cinza)
+                        if self.is_corrupt_frame(image):
+                            continue
+                            
                         if self.running:
                             self.update_image(image)
                             last_frame_received_time = time.time()
@@ -987,6 +1027,11 @@ class LiveCameraWidget(tk.Frame):
                                     new_h = int(w / img_aspect)
                                 
                                 image = image.resize((new_w, new_h), Image.Resampling.BILINEAR)
+                                
+                                # Descarta frames com corrupção visual severa
+                                if self.is_corrupt_frame(image):
+                                    continue
+
                                 photo = ImageTk.PhotoImage(image)
                                 fs_lbl.photo = photo
                                 if fs_running[0]:
