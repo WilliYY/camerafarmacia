@@ -647,10 +647,62 @@ class LiveCameraWidget(tk.Frame):
         self.video_lbl.pack(pady=4)
         self.video_lbl.bind("<Double-Button-1>", lambda e: self.open_fullscreen())
         
-        # Frame de controles inferiores da câmera
-        self.controls_frame = tk.Frame(self.body_frame, bg="#020204")
-        self.controls_frame.pack(fill="x")
+        # Frame de controles inferiores da câmera (Barra de Ações Estilizada)
+        self.controls_frame = tk.Frame(self.body_frame, bg="#111827", bd=1, relief="flat")
+        self.controls_frame.pack(fill="x", padx=4, pady=(2, 4))
         
+        # Botão Pasta de Gravações
+        self.btn_folder = tk.Button(
+            self.controls_frame,
+            text=" 📂 Pasta Gravada",
+            font=("Segoe UI", 8, "bold"),
+            fg=TEXT_COLOR,
+            bg="#111827",
+            activebackground="#1F2937",
+            activeforeground=TEXT_COLOR,
+            bd=0,
+            cursor="hand2",
+            padx=10,
+            pady=4,
+            command=self.open_recordings_folder
+        )
+        self.btn_folder.pack(side="left", padx=4, pady=2)
+        
+        # Botão Link Web
+        self.btn_link = tk.Button(
+            self.controls_frame,
+            text=" 🔗 Link Web",
+            font=("Segoe UI", 8, "bold"),
+            fg=TEXT_COLOR,
+            bg="#111827",
+            activebackground="#1F2937",
+            activeforeground=TEXT_COLOR,
+            bd=0,
+            cursor="hand2",
+            padx=10,
+            pady=4,
+            command=self.copy_camera_link
+        )
+        self.btn_link.pack(side="left", padx=4, pady=2)
+
+        # Botão Recarregar Transmissão
+        self.btn_reconnect = tk.Button(
+            self.controls_frame,
+            text=" 🔄 Recarregar",
+            font=("Segoe UI", 8, "bold"),
+            fg=TEXT_COLOR,
+            bg="#111827",
+            activebackground="#1F2937",
+            activeforeground=TEXT_COLOR,
+            bd=0,
+            cursor="hand2",
+            padx=10,
+            pady=4,
+            command=self.force_reconnect
+        )
+        self.btn_reconnect.pack(side="left", padx=4, pady=2)
+
+        # Botão Tela Cheia
         self.btn_fullscreen = tk.Button(
             self.controls_frame,
             text=" 📺 Tela Cheia",
@@ -661,11 +713,17 @@ class LiveCameraWidget(tk.Frame):
             activeforeground=TEXT_COLOR,
             bd=0,
             cursor="hand2",
-            padx=8,
-            pady=3,
+            padx=10,
+            pady=4,
             command=self.open_fullscreen
         )
         self.btn_fullscreen.pack(side="right", padx=10, pady=2)
+
+        # Hover styling effects
+        self.app.setup_button_hover(self.btn_folder, "#111827", "#1F2937")
+        self.app.setup_button_hover(self.btn_link, "#111827", "#1F2937")
+        self.app.setup_button_hover(self.btn_reconnect, "#111827", "#1F2937")
+        self.app.setup_button_hover(self.btn_fullscreen, "#111827", "#1F2937")
 
     def toggle(self):
         if self.expanded:
@@ -956,6 +1014,30 @@ class LiveCameraWidget(tk.Frame):
             fs_win.destroy()
             
         fs_win.protocol("WM_DELETE_WINDOW", on_close)
+
+    def open_recordings_folder(self):
+        try:
+            folder_path = os.path.join(GDRIVE_ROOT, self.stream_name)
+            os.makedirs(folder_path, exist_ok=True)
+            os.startfile(folder_path)
+            self.app.add_log(f"Abrindo pasta de gravações da {self.stream_name}: {folder_path}")
+        except Exception as e:
+            self.app.add_log(f"Erro ao abrir pasta: {str(e)}", "tag_erro")
+
+    def copy_camera_link(self):
+        try:
+            url = f"http://{self.app.local_ip}:1984/api/stream.mjpeg?src={self.stream_name}_mjpeg"
+            self.app.root.clipboard_clear()
+            self.app.root.clipboard_append(url)
+            self.app.add_log(f"Link de visualização da {self.stream_name} copiado para a área de transferência!")
+            messagebox.showinfo("Copiado", f"Link copiado:\n{url}")
+        except Exception as e:
+            self.app.add_log(f"Erro ao copiar link: {str(e)}", "tag_erro")
+
+    def force_reconnect(self):
+        self.app.add_log(f"Forçando reinicialização da transmissão de visualização: {self.stream_name}...")
+        self.stop_stream()
+        self.start_stream()
 
 class CameraManagerApp:
     def __init__(self, root, silent=False):
