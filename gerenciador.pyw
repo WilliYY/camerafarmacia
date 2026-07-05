@@ -51,7 +51,25 @@ def atualizar_go2rtc_yaml(proj_dir):
     ffmpeg_exe = os.path.join(proj_dir, "sistema", "go2rtc", "ffmpeg.exe")
     short_ffmpeg = get_short_path(ffmpeg_exe).replace("\\", "\\\\")
     
-    conteudo_padrao = f'''api:
+    global CONFIG
+    streams_dict = CONFIG.get("streams") if (globals().get("CONFIG") and CONFIG.get("streams")) else {
+        "farmacia": "tuya://protect-us.ismartlife.me?device_id=eb227d7fd83d2a794c4gvc&email=willian13258%40gmail.com&password=biscoito123",
+        "farmacia2": "tuya://protect-us.ismartlife.me?device_id=ebb17fa4c624a5e72ec6gk&email=willian13258%40gmail.com&password=biscoito123"
+    }
+    
+    streams_lines = []
+    live_lines = []
+    mjpeg_lines = []
+    for name, url in streams_dict.items():
+        streams_lines.append(f'  {name}: "{url}"')
+        live_lines.append(f'  {name}_live: "ffmpeg:{name}#video=h264#hardware"')
+        mjpeg_lines.append(f'  {name}_mjpeg: "ffmpeg:{name}#video=mjpeg#hardware"')
+        
+    streams_block = "\n".join(streams_lines)
+    live_block = "\n".join(live_lines)
+    mjpeg_block = "\n".join(mjpeg_lines)
+    
+    conteudo = f'''api:
   listen: ":1984"
   static_dir: ".."
 
@@ -60,54 +78,20 @@ ffmpeg:
 
 streams:
   # Câmeras originais (H.265 bruto - Usadas para as gravações em 0% CPU)
-  farmacia: "tuya://protect-us.ismartlife.me?device_id=eb227d7fd83d2a794c4gvc&email=willian13258%40gmail.com&password=biscoito123"
-  farmacia2: "tuya://protect-us.ismartlife.me?device_id=ebb17fa4c624a5e72ec6gk&email=willian13258%40gmail.com&password=biscoito123"
+{streams_block}
 
-  # Câmeras para Visualização Web (Transcodificadas sob demanda para H.264)
-  farmacia_live: "ffmpeg:farmacia#video=h264"
-  farmacia2_live: "ffmpeg:farmacia2#video=h264"
+  # Câmeras para Visualização Web (Transcodificadas sob demanda para H.264 com Aceleração de Hardware)
+{live_block}
 
-  # Câmeras para Stream MJPEG (Transcodificadas sob demanda para MJPEG)
-  farmacia_mjpeg: "ffmpeg:farmacia#video=mjpeg"
-  farmacia2_mjpeg: "ffmpeg:farmacia2#video=mjpeg"
+  # Câmeras para Stream MJPEG (Transcodificadas sob demanda para MJPEG com Aceleração de Hardware)
+{mjpeg_block}
 '''
-    if not os.path.exists(yaml_path):
+    try:
         os.makedirs(os.path.dirname(yaml_path), exist_ok=True)
         with open(yaml_path, "w", encoding="utf-8") as f:
-            f.write(conteudo_padrao)
-        return
-        
-    try:
-        with open(yaml_path, "r", encoding="utf-8") as f:
-            linhas = f.readlines()
-            
-        modificado = False
-        ffmpeg_section = False
-        for i, linha in enumerate(linhas):
-            linha_strip = linha.strip()
-            if linha_strip.startswith("ffmpeg:"):
-                ffmpeg_section = True
-                continue
-            if ffmpeg_section:
-                if linha_strip.startswith("bin:"):
-                    indent = len(linha) - len(linha.lstrip())
-                    nova_linha = " " * indent + f'bin: "{short_ffmpeg}"\n'
-                    if linhas[i] != nova_linha:
-                        linhas[i] = nova_linha
-                        modificado = True
-                    ffmpeg_section = False
-                elif not linha.startswith(" ") and not linha.startswith("\t") and linha_strip != "":
-                    ffmpeg_section = False
-        
-        if modificado:
-            with open(yaml_path, "w", encoding="utf-8") as f:
-                f.writelines(linhas)
+            f.write(conteudo)
     except Exception:
-        try:
-            with open(yaml_path, "w", encoding="utf-8") as f:
-                f.write(conteudo_padrao)
-        except Exception:
-            pass
+        pass
 
 def verificar_e_baixar_dependencias(proj_dir, silent=False):
     go2rtc_dir = os.path.join(proj_dir, "sistema", "go2rtc")
@@ -427,7 +411,14 @@ def carregar_config():
         hd_detectado = detectar_gdrive_automatico()
         hd_padrao = hd_detectado if hd_detectado else r"D:\farmacia camera"
         
-        padrao = {"gdrive_root": hd_padrao, "bloco_minutos": 30}
+        padrao = {
+            "gdrive_root": hd_padrao, 
+            "bloco_minutos": 30,
+            "streams": {
+                "farmacia": "tuya://protect-us.ismartlife.me?device_id=eb227d7fd83d2a794c4gvc&email=willian13258%40gmail.com&password=biscoito123",
+                "farmacia2": "tuya://protect-us.ismartlife.me?device_id=ebb17fa4c624a5e72ec6gk&email=willian13258%40gmail.com&password=biscoito123"
+            }
+        }
         backup_path = CONFIG_PATH + ".bak"
         
         # 1. Se o arquivo principal não existir, tenta restaurar do backup
@@ -465,7 +456,20 @@ def carregar_config():
             except Exception:
                 config = padrao.copy()
                 
-        # 3. Valida os campos carregados
+        # 3. Se o SSD estiver disponível, tenta ler e mesclar a configuração compartilhada
+        if hd_detectado:
+            try:
+                shared_path = os.path.join(hd_detectado, "config_compartilhado.json")
+                if os.path.exists(shared_path):
+                    with open(shared_path, "r", encoding="utf-8") as sf:
+                        shared_config = json.load(sf)
+                    # Mescla do SSD para a config local
+                    for k, v in shared_config.items():
+                        config[k] = v
+            except Exception:
+                pass
+
+        # 4. Valida os campos carregados
         try:
             updated = False
             if "gdrive_root" not in config:
@@ -477,6 +481,10 @@ def carregar_config():
             
             if "bloco_minutos" not in config:
                 config["bloco_minutos"] = 30
+                updated = True
+                
+            if "streams" not in config:
+                config["streams"] = padrao["streams"]
                 updated = True
                 
             if updated:
@@ -494,6 +502,23 @@ def salvar_config_locked(config):
             shutil.copy2(CONFIG_PATH, CONFIG_PATH + ".bak")
         except Exception:
             pass
+        
+        # Salva também no SSD se estiver disponível
+        gdrive_root = config.get("gdrive_root")
+        if gdrive_root and os.path.exists(gdrive_root):
+            try:
+                shared_path = os.path.join(gdrive_root, "config_compartilhado.json")
+                shared_data = {
+                    "bloco_minutos": config.get("bloco_minutos", 30),
+                    "streams": config.get("streams", {
+                        "farmacia": "tuya://protect-us.ismartlife.me?device_id=eb227d7fd83d2a794c4gvc&email=willian13258%40gmail.com&password=biscoito123",
+                        "farmacia2": "tuya://protect-us.ismartlife.me?device_id=ebb17fa4c624a5e72ec6gk&email=willian13258%40gmail.com&password=biscoito123"
+                    })
+                }
+                with open(shared_path, "w", encoding="utf-8") as sf:
+                    json.dump(shared_data, sf, indent=4)
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -1817,6 +1842,19 @@ class CameraManagerApp:
         else:
             tag = "tag_default"
             
+        # Salva o log no SSD se estiver disponível (centralizado por Hostname)
+        if globals().get("GDRIVE_ROOT") and os.path.exists(GDRIVE_ROOT):
+            try:
+                logs_dir = os.path.join(GDRIVE_ROOT, "logs_nvr")
+                os.makedirs(logs_dir, exist_ok=True)
+                my_host = socket.gethostname()
+                log_file_path = os.path.join(logs_dir, f"log_{my_host}.txt")
+                tstamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                with open(log_file_path, "a", encoding="utf-8") as f_ssd:
+                    f_ssd.write(f"[{tstamp}] {msg}\n")
+            except Exception:
+                pass
+
         self._append_to_log_widget(msg, tag)
 
     def copy_link_to_clipboard(self):
