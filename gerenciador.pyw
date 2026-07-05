@@ -370,60 +370,127 @@ if os.path.exists(old_file):
         pass
 
 def detectar_gdrive_automatico():
-    unidades = [f"{chr(c)}:\\" for c in range(65, 91)]  # Letras de unidade de A:\ a Z:\
-    pastas_candidatas = [
-        "Meu Drive\\CAMERA",
-        "Meu Drive\\CAMERAS",
-        "My Drive\\CAMERA",
-        "My Drive\\CAMERAS",
-        "CAMERA",
-        "CAMERAS"
-    ]
-    for u in unidades:
-        if os.path.exists(u):
-            for p in pastas_candidatas:
-                caminho = os.path.join(u, p)
-                if os.path.exists(caminho):
-                    # Verifica se esta pasta candidata contém a subpasta da câmera 1 para termos certeza
-                    if os.path.exists(os.path.join(caminho, "CAMERA 1 FARMACIA")):
-                        return caminho
-    return None
+    import ctypes
+    import string
+    kernel32 = ctypes.windll.kernel32
+    # Evita caixas de diálogo do Windows se uma unidade estiver vazia (ex: CD-ROM)
+    old_mode = kernel32.SetErrorMode(1)
+    try:
+        for letter in string.ascii_uppercase:
+            drive_path = f"{letter}:\\"
+            drive_type = kernel32.GetDriveTypeW(ctypes.c_wchar_p(drive_path))
+            if drive_type <= 1:
+                continue
+            volumeNameBuffer = ctypes.create_unicode_buffer(1024)
+            rc = kernel32.GetVolumeInformationW(
+                ctypes.c_wchar_p(drive_path),
+                volumeNameBuffer,
+                ctypes.sizeof(volumeNameBuffer),
+                None, None, None, None, 0
+            )
+            if rc and volumeNameBuffer.value.upper() == "FARMACIA":
+                return os.path.join(drive_path, "farmacia camera")
+    except Exception:
+        pass
+    finally:
+        kernel32.SetErrorMode(old_mode)
+    
+    # Fallback padrão
+    if os.path.exists("D:\\"):
+        return r"D:\farmacia camera"
+    return r"D:\farmacia camera"
+
+CONFIG_LOCK = threading.Lock()
 
 def carregar_config():
-    gdrive_detectado = detectar_gdrive_automatico()
-    gdrive_padrao = gdrive_detectado if gdrive_detectado else r"G:\Meu Drive\CAMERAS"
-    
-    padrao = {"gdrive_root": gdrive_padrao}
-    if not os.path.exists(CONFIG_PATH):
+    global CONFIG_LOCK
+    with CONFIG_LOCK:
+        hd_detectado = detectar_gdrive_automatico()
+        hd_padrao = hd_detectado if hd_detectado else r"D:\farmacia camera"
+        
+        padrao = {"gdrive_root": hd_padrao, "bloco_minutos": 30}
+        if not os.path.exists(CONFIG_PATH):
+            try:
+                with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                    json.dump(padrao, f, indent=4)
+            except Exception:
+                pass
+            return padrao
         try:
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump(padrao, f, indent=4)
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                config = json.load(f)
+                updated = False
+                if "gdrive_root" not in config:
+                    config["gdrive_root"] = padrao["gdrive_root"]
+                    updated = True
+                elif not os.path.exists(config["gdrive_root"]) and hd_detectado:
+                    config["gdrive_root"] = hd_detectado
+                    updated = True
+                
+                if "bloco_minutos" not in config:
+                    config["bloco_minutos"] = 30
+                    updated = True
+                    
+                if updated:
+                    salvar_config_locked(config)
+                return config
         except Exception:
-            pass
-        return padrao
-    try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            config = json.load(f)
-            if "gdrive_root" not in config:
-                config["gdrive_root"] = padrao["gdrive_root"]
-            # Se o caminho salvo no config.json não existir, mas conseguirmos detectar um caminho válido atual,
-            # atualizamos a configuração para facilitar a portabilidade automática.
-            elif not os.path.exists(config["gdrive_root"]) and gdrive_detectado:
-                config["gdrive_root"] = gdrive_detectado
-                salvar_config(config)
-            return config
-    except Exception:
-        return padrao
+            return padrao
 
-def salvar_config(config):
+def salvar_config_locked(config):
     try:
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=4)
     except Exception:
         pass
 
+def salvar_config(config):
+    global CONFIG_LOCK
+    with CONFIG_LOCK:
+        salvar_config_locked(config)
+
 CONFIG = carregar_config()
-GDRIVE_ROOT = CONFIG.get("gdrive_root", r"G:\Meu Drive\CAMERAS")
+GDRIVE_ROOT = CONFIG.get("gdrive_root", r"D:\farmacia camera")
+
+def garantir_limite_backup_local(backup_dir, max_size_bytes=1024*1024*1024):
+    try:
+        if not os.path.exists(backup_dir):
+            return
+        
+        arquivos = []
+        tamanho_total = 0
+        for root_dir, _, files in os.walk(backup_dir):
+            for f in files:
+                if f.endswith((".mp4", ".ts")):
+                    filepath = os.path.join(root_dir, f)
+                    try:
+                        sz = os.path.getsize(filepath)
+                        mtime = os.path.getmtime(filepath)
+                        arquivos.append((filepath, sz, mtime))
+                        tamanho_total += sz
+                    except Exception:
+                        pass
+        
+        if tamanho_total <= max_size_bytes:
+            return
+            
+        # Ordena por mtime crescente (mais antigos primeiro)
+        arquivos.sort(key=lambda x: x[2])
+        
+        for filepath, sz, _ in arquivos:
+            if tamanho_total <= max_size_bytes:
+                break
+            try:
+                os.remove(filepath)
+                tamanho_total -= sz
+                # Tenta apagar a pasta pai se ficou vazia
+                parent_dir = os.path.dirname(filepath)
+                if not os.listdir(parent_dir):
+                    os.rmdir(parent_dir)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 # Cores do Tema Escuro Premium
 BG_COLOR = "#0D0E12"       # Fundo principal cinza escuro azulado
@@ -434,6 +501,17 @@ TEXT_MUTED = "#9CA3AF"     # Texto secundário cinza
 GREEN_COLOR = "#10B981"    # Verde esmeralda (Ativo)
 RED_COLOR = "#EF4444"      # Vermelho coral (Inativo)
 ORANGE_COLOR = "#F59E0B"   # Laranja âmbar (Atenção)
+
+BADGE_BG_MAP = {
+    GREEN_COLOR: "#064E3B",   # Verde -> Escuro
+    RED_COLOR: "#7F1D1D",     # Vermelho -> Escuro
+    ORANGE_COLOR: "#78350F",  # Laranja -> Escuro
+    "#EF4444": "#7F1D1D",
+    "#10B981": "#064E3B",
+    "#F59E0B": "#78350F",
+    "#60A5FA": "#1E3A8A",
+    "#3B82F6": "#1E3A8A"
+}
 
 class StatusLED(tk.Canvas):
     """Um pequeno indicador LED circular desenhado via Canvas"""
@@ -456,6 +534,8 @@ class LiveCameraWidget(tk.Frame):
         self.running = False
         self.photo = None
         self.target_width = 620  # Tamanho padrão, será ajustado dinamicamente
+        self.current_error_msg = ""
+        self.is_online = False
         
         # Botão de cabeçalho para expandir/recolher
         self.header_btn = tk.Button(
@@ -484,9 +564,10 @@ class LiveCameraWidget(tk.Frame):
         # Frame de conteúdo que será exibido/ocultado
         self.body_frame = tk.Frame(self, bg="#020204")
         
-        # Label para renderização da imagem
-        self.video_lbl = tk.Label(self.body_frame, bg="#020204")
+        # Label para renderização da imagem (com cursor de clique e atalho de tela cheia)
+        self.video_lbl = tk.Label(self.body_frame, bg="#020204", cursor="hand2")
         self.video_lbl.pack(pady=4)
+        self.video_lbl.bind("<Double-Button-1>", lambda e: self.open_fullscreen())
         
         # Frame de controles inferiores da câmera
         self.controls_frame = tk.Frame(self.body_frame, bg="#020204")
@@ -514,16 +595,24 @@ class LiveCameraWidget(tk.Frame):
         else:
             self.expand()
 
+    def update_header_text(self):
+        status_badge = "  [🟢 ONLINE]" if self.is_online else "  [🔴 RECONECTANDO]"
+        if self.expanded:
+            self.header_btn.configure(text=f" ▼️ RECOLHER: {self.stream_name.upper()}{status_badge}", bg="#111827")
+        else:
+            self.header_btn.configure(text=f" ▶️ CÂMERA: {self.stream_name.upper()}{status_badge}", bg="#161822")
+
     def expand(self):
         self.expanded = True
-        self.header_btn.configure(text=f" ▼️ RECOLHER: {self.stream_name.upper()}", bg="#111827")
+        self.update_header_text()
         self.body_frame.pack(fill="both", expand=True)
         self.start_stream()
         self._recalc_camera_sizes()
 
     def collapse(self):
         self.expanded = False
-        self.header_btn.configure(text=f" ▶️ CÂMERA: {self.stream_name.upper()}", bg="#161822")
+        self.is_online = False
+        self.update_header_text()
         self.stop_stream()
         self.body_frame.pack_forget()
         self._recalc_camera_sizes()
@@ -649,23 +738,49 @@ class LiveCameraWidget(tk.Frame):
                             last_frame_received_time = time.time()
                     except Exception:
                         pass  # Frame corrompido, pula para o próximo
+                
+                # Se a conexão com o gerador encerrar normalmente, espera 1 segundo antes de tentar novamente
+                if self.running:
+                    time.sleep(1.0)
                         
             except Exception as e:
                 if self.running:
                     # Mostra tela de reconexão apenas se ficar mais de 10 segundos sem vídeo
                     if time.time() - last_frame_received_time > 10:
-                        self.show_error_message(f"Reconectando...\n({type(e).__name__})")
+                        self.show_error_message("Reconectando...")
                     time.sleep(1.0)
 
     def show_error_message(self, msg):
         if not self.running:
             return
+        if getattr(self, "current_error_msg", "") == msg:
+            return
+        self.current_error_msg = msg
+        self.is_online = False
         self.app.root.after(0, lambda: self.video_lbl.configure(image="", text=msg, fg=ORANGE_COLOR, font=("Segoe UI", 9, "bold"), compound="center"))
+        self.app.root.after(0, self.update_header_text)
 
     def update_image(self, pil_image):
-        photo = ImageTk.PhotoImage(pil_image)
-        self.photo = photo
-        self.app.root.after(0, lambda: self.video_lbl.configure(image=photo, text="", compound="none"))
+        self.current_error_msg = ""
+        self.is_online = True
+        def apply_image():
+            if not self.running:
+                return
+            try:
+                old_photo = getattr(self, "photo", None)
+                photo = ImageTk.PhotoImage(pil_image)
+                self.photo = photo
+                self.video_lbl.configure(image=photo, text="", compound="none")
+                self.video_lbl.image = photo
+                self.update_header_text()
+                if old_photo:
+                    try:
+                        self.app.root.call("image", "delete", old_photo)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        self.app.root.after(0, apply_image)
 
     def open_fullscreen(self):
         fs_win = tk.Toplevel(self.app.root)
@@ -769,12 +884,17 @@ class CameraManagerApp:
         self.root = root
         self.silent = silent
         
+        # Registra gancho de encerramento seguro via atexit
+        import atexit
+        atexit.register(self.graceful_shutdown)
+        
         # Variáveis de Controle de Threads
         self.running_monitor = True
         self.running_sync = True
         
         # Variáveis de Gravação em Memória (NVR Integrado)
         self.recording_active = {}
+        self.recording_threads = {}
         self.active_connections = {}
         self.status_lock = threading.Lock()
         self.alerted_duplicates = {} # Evita exibir alerta popup repetidamente
@@ -793,11 +913,11 @@ class CameraManagerApp:
         self.prevent_sleep_var = tk.BooleanVar(value=True)
         self.apply_prevent_sleep(True)
         
-        # 1. Configura título e layout
+        # 1. Configura título e layout (aumentado para maior visibilidade)
         self.root.title(f"Painel Câmeras Farmácia — NVR v{VERSION}")
-        self.root.geometry("1280x830")
+        self.root.geometry("1400x920")
         self.root.configure(bg=BG_COLOR)
-        self.root.minsize(1100, 750)
+        self.root.minsize(1280, 850)
         
         # Vincular redimensionamento dinâmico do painel
         self.root.bind("<Configure>", self.on_window_resize)
@@ -820,6 +940,7 @@ class CameraManagerApp:
         
         # Thread de verificação de atualizações no GitHub
         threading.Thread(target=self.check_for_updates_thread, daemon=True).start()
+        self.root.after(3600000, self.trigger_periodic_update)
             
         # Sinais do sistema para encerramento limpo (SIGINT, SIGTERM)
         import signal
@@ -887,6 +1008,21 @@ class CameraManagerApp:
         button.bind("<Enter>", lambda e: button.configure(bg=hover_bg))
         button.bind("<Leave>", lambda e: button.configure(bg=normal_bg))
 
+    def setup_card_hover_glow(self, card, glow_color):
+        card.bind("<Enter>", lambda e: card.configure(highlightbackground=glow_color))
+        card.bind("<Leave>", lambda e: card.configure(highlightbackground="#1F2232"))
+
+    def configure_badge_label(self, label, text, fg_color):
+        bg_color = BADGE_BG_MAP.get(fg_color, "#1F2937")
+        label.configure(
+            text=f"  {text.strip()}  ",
+            fg=fg_color,
+            bg=bg_color,
+            font=("Segoe UI", 8, "bold"),
+            relief="flat",
+            bd=0
+        )
+
     def on_window_resize(self, event):
         if event.widget != self.root:
             return
@@ -932,11 +1068,11 @@ class CameraManagerApp:
 
     def get_gdrive_dir(self, stream_name, index):
         if index == 0:
-            return os.path.join(GDRIVE_ROOT, "CAMERA 1 FARMACIA")
+            return os.path.join(GDRIVE_ROOT, "camera 1")
         elif index == 1:
-            return os.path.join(GDRIVE_ROOT, "CAMERA 2 FARMACIA")
+            return os.path.join(GDRIVE_ROOT, "camera 2")
         else:
-            return os.path.join(GDRIVE_ROOT, f"CAMERA {index+1} {stream_name.upper()}")
+            return os.path.join(GDRIVE_ROOT, f"camera {index+1}")
 
     def get_local_ip(self):
         try:
@@ -953,6 +1089,48 @@ class CameraManagerApp:
         style.theme_use("clam")
         style.configure(".", background=BG_COLOR, foreground=TEXT_COLOR)
         style.configure("TLabel", background=BG_COLOR, foreground=TEXT_COLOR, font=("Segoe UI", 10))
+        
+        # Estilo escuro para o Combobox do TTK
+        style.configure(
+            "TCombobox",
+            fieldbackground="#161822",
+            background="#1F2937",
+            foreground=TEXT_COLOR,
+            arrowcolor=TEXT_COLOR,
+            bordercolor="#1F2232",
+            lightcolor="#1F2232",
+            darkcolor="#1F2232"
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", "#161822")],
+            foreground=[("readonly", TEXT_COLOR)],
+            selectbackground=[("readonly", "#2563EB")],
+            selectforeground=[("readonly", TEXT_COLOR)]
+        )
+        
+        # Configura as cores do menu dropdown suspenso
+        self.root.option_add("*TCombobox*Listbox.background", "#161822")
+        self.root.option_add("*TCombobox*Listbox.foreground", TEXT_COLOR)
+        
+        # Estilo para Scrollbar do TTK
+        style.configure(
+            "Vertical.TScrollbar",
+            gripcount=0,
+            background="#1F2937",
+            troughcolor="#0E111C",
+            bordercolor="#1F2232",
+            lightcolor="#1F2232",
+            darkcolor="#1F2232",
+            arrowsize=0
+        )
+        style.map(
+            "Vertical.TScrollbar",
+            background=[("active", "#374151")]
+        )
+        self.root.option_add("*TCombobox*Listbox.selectBackground", "#2563EB")
+        self.root.option_add("*TCombobox*Listbox.selectForeground", TEXT_COLOR)
+        self.root.option_add("*TCombobox*Listbox.font", ("Segoe UI", 9))
 
     def create_widgets(self):
         # Container principal dividido em duas colunas (Esquerda e Direita)
@@ -988,10 +1166,9 @@ class CameraManagerApp:
         )
         subtitle_label.pack(side="left", padx=10, pady=8)
         
-        # Divisor horizontal elegante com accent
-        sep_canvas = tk.Canvas(left_col, height=2, bg=BG_COLOR, highlightthickness=0)
-        sep_canvas.pack(fill="x", padx=12)
-        sep_canvas.create_line(0, 1, 2000, 1, fill=ACCENT_COLOR, width=2)
+        # Divisor horizontal neon premium (glow azul sutil)
+        glow_line = tk.Frame(left_col, bg="#3B82F6", height=2)
+        glow_line.pack(fill="x", padx=12, pady=(2, 10))
 
         # 2. CARDS GLOBAIS (SERVIÇOS E REDE)
         top_cards_frame = tk.Frame(left_col, bg=BG_COLOR, pady=6)
@@ -1000,6 +1177,11 @@ class CameraManagerApp:
         # Card 1: Serviços Globais com contorno sutil
         card_global_wrapper = tk.Frame(top_cards_frame, bg=BG_COLOR, bd=0)
         card_global_wrapper.pack(fill="x", expand=True, padx=4, pady=4)
+        
+        # Stripe lateral (azul elétrico para serviços)
+        accent_global = tk.Frame(card_global_wrapper, bg="#3B82F6", width=4)
+        accent_global.pack(side="left", fill="y")
+        
         self.card_global = tk.Frame(
             card_global_wrapper, 
             bg=CARD_COLOR, 
@@ -1009,7 +1191,22 @@ class CameraManagerApp:
             padx=15, 
             pady=10
         )
-        self.card_global.pack(fill="x")
+        self.card_global.pack(side="left", fill="x", expand=True)
+        self.setup_card_hover_glow(self.card_global, "#3B82F6")
+        
+        # Rótulo de Alerta se o HD for desconectado (inicialmente oculto)
+        self.lbl_alerta_hd = tk.Label(
+            left_col,
+            text="⚠️ ALERTA: HD EXTERNO DESCONECTADO!\nGravando temporariamente no PC local.",
+            font=("Segoe UI", 9, "bold"),
+            fg=RED_COLOR,
+            bg="#2D1111",
+            bd=1,
+            relief="solid",
+            padx=10,
+            pady=6
+        )
+        
         tk.Label(self.card_global, text="⚡ Status dos Serviços", font=("Segoe UI", 10, "bold"), fg=TEXT_COLOR, bg=CARD_COLOR).pack(anchor="w", pady=(0, 4))
         
         # Linha Ponte RTSP
@@ -1021,12 +1218,12 @@ class CameraManagerApp:
         self.lbl_val_go2rtc = tk.Label(row_go2rtc, text="Verificando...", font=("Segoe UI", 9, "bold"), fg=ORANGE_COLOR, bg=CARD_COLOR)
         self.lbl_val_go2rtc.pack(side="left")
         
-        # Linha Google Drive
+        # Linha HD FARMACIA
         row_gdrive = tk.Frame(self.card_global, bg=CARD_COLOR, pady=1)
         row_gdrive.pack(anchor="w")
         self.led_gdrive = StatusLED(row_gdrive, size=10, bg_color=CARD_COLOR)
         self.led_gdrive.pack(side="left", padx=(0, 6), pady=4)
-        tk.Label(row_gdrive, text="Google Drive G: ", font=("Segoe UI", 9), fg=TEXT_MUTED, bg=CARD_COLOR).pack(side="left")
+        tk.Label(row_gdrive, text="HD FARMACIA: ", font=("Segoe UI", 9), fg=TEXT_MUTED, bg=CARD_COLOR).pack(side="left")
         self.lbl_val_gdrive = tk.Label(row_gdrive, text="Verificando...", font=("Segoe UI", 9, "bold"), fg=ORANGE_COLOR, bg=CARD_COLOR)
         self.lbl_val_gdrive.pack(side="left")
         
@@ -1051,6 +1248,10 @@ class CameraManagerApp:
             card_wrapper = tk.Frame(self.cameras_main_frame, bg=BG_COLOR, bd=0)
             card_wrapper.pack(side="top", fill="x", pady=5)
             
+            # Stripe lateral (verde esmeralda para câmeras)
+            accent_bar = tk.Frame(card_wrapper, bg="#10B981", width=4)
+            accent_bar.pack(side="left", fill="y")
+            
             # Card principal com contorno e padding aprimorado
             card = tk.Frame(
                 card_wrapper, 
@@ -1061,46 +1262,61 @@ class CameraManagerApp:
                 padx=15, 
                 pady=10
             )
-            card.pack(fill="x")
+            card.pack(side="left", fill="x", expand=True)
+            self.setup_card_hover_glow(card, "#10B981")
             
             # Título da Câmera
             cam_label = f"CÂMERA {idx+1}: {stream.upper()}"
             tk.Label(card, text=f"📷 {cam_label}", font=("Segoe UI", 10, "bold"), fg=ACCENT_COLOR, bg=CARD_COLOR).pack(anchor="w", pady=(0, 6))
             
-            # Linha de Status (lado a lado)
-            status_row = tk.Frame(card, bg=CARD_COLOR)
-            status_row.pack(fill="x", pady=(0, 4))
+            # Novo Grid de Status (Pílulas/Badges)
+            grid_frame = tk.Frame(card, bg=CARD_COLOR, pady=6)
+            grid_frame.pack(fill="x", pady=(2, 6))
+            grid_frame.columnconfigure((0, 1, 2), weight=1)
             
-            # Sinal
-            col_sinal = tk.Frame(status_row, bg=CARD_COLOR)
-            col_sinal.pack(side="left", expand=True, anchor="w")
-            led_sinal = StatusLED(col_sinal, size=8, bg_color=CARD_COLOR)
-            led_sinal.pack(side="left", padx=(0, 4), pady=2)
-            tk.Label(col_sinal, text="Sinal:", font=("Segoe UI", 9), fg=TEXT_MUTED, bg=CARD_COLOR).pack(side="left")
-            lbl_sinal = tk.Label(col_sinal, text="...", font=("Segoe UI", 9, "bold"), fg=ORANGE_COLOR, bg=CARD_COLOR)
-            lbl_sinal.pack(side="left", padx=(3, 0))
+            # Coluna 0: Sinal
+            col_sinal = tk.Frame(grid_frame, bg=CARD_COLOR)
+            col_sinal.grid(row=0, column=0, sticky="nsew")
+            tk.Label(col_sinal, text="SINAL", font=("Segoe UI", 7, "bold"), fg=TEXT_MUTED, bg=CARD_COLOR).pack(anchor="center", pady=(0, 4))
             
-            # Gravação
-            col_grav = tk.Frame(status_row, bg=CARD_COLOR)
-            col_grav.pack(side="left", expand=True, anchor="w")
-            led_grav = StatusLED(col_grav, size=8, bg_color=CARD_COLOR)
-            led_grav.pack(side="left", padx=(0, 4), pady=2)
-            tk.Label(col_grav, text="Grav:", font=("Segoe UI", 9), fg=TEXT_MUTED, bg=CARD_COLOR).pack(side="left")
-            lbl_grav = tk.Label(col_grav, text="...", font=("Segoe UI", 9, "bold"), fg=ORANGE_COLOR, bg=CARD_COLOR)
-            lbl_grav.pack(side="left", padx=(3, 0))
-
-            # Web Stream
-            col_web = tk.Frame(status_row, bg=CARD_COLOR)
-            col_web.pack(side="left", expand=True, anchor="w")
-            led_web = StatusLED(col_web, size=8, bg_color=CARD_COLOR)
-            led_web.pack(side="left", padx=(0, 4), pady=2)
-            tk.Label(col_web, text="Stream:", font=("Segoe UI", 9), fg=TEXT_MUTED, bg=CARD_COLOR).pack(side="left")
-            lbl_web = tk.Label(col_web, text="...", font=("Segoe UI", 9, "bold"), fg=ORANGE_COLOR, bg=CARD_COLOR)
-            lbl_web.pack(side="left", padx=(3, 0))
+            sinal_badge_frame = tk.Frame(col_sinal, bg=CARD_COLOR)
+            sinal_badge_frame.pack(anchor="center")
+            led_sinal = StatusLED(sinal_badge_frame, size=6, bg_color=CARD_COLOR)
+            led_sinal.pack(side="left", padx=(0, 4))
+            lbl_sinal = tk.Label(sinal_badge_frame, text="VERIFICANDO", font=("Segoe UI", 8, "bold"), fg=ORANGE_COLOR, bg="#78350F", padx=6, pady=2)
+            lbl_sinal.pack(side="left")
             
-            # Última gravação/Sync
-            lbl_sync = tk.Label(card, text="Buscando...", font=("Segoe UI", 8), fg=TEXT_MUTED, bg=CARD_COLOR, justify="left", wraplength=360)
-            lbl_sync.pack(fill="x", pady=(4, 0))
+            # Coluna 1: Gravação
+            col_grav = tk.Frame(grid_frame, bg=CARD_COLOR)
+            col_grav.grid(row=0, column=1, sticky="nsew")
+            tk.Label(col_grav, text="GRAVAÇÃO", font=("Segoe UI", 7, "bold"), fg=TEXT_MUTED, bg=CARD_COLOR).pack(anchor="center", pady=(0, 4))
+            
+            grav_badge_frame = tk.Frame(col_grav, bg=CARD_COLOR)
+            grav_badge_frame.pack(anchor="center")
+            led_grav = StatusLED(grav_badge_frame, size=6, bg_color=CARD_COLOR)
+            led_grav.pack(side="left", padx=(0, 4))
+            lbl_grav = tk.Label(grav_badge_frame, text="VERIFICANDO", font=("Segoe UI", 8, "bold"), fg=ORANGE_COLOR, bg="#78350F", padx=6, pady=2)
+            lbl_grav.pack(side="left")
+            
+            # Coluna 2: Transmissão
+            col_web = tk.Frame(grid_frame, bg=CARD_COLOR)
+            col_web.grid(row=0, column=2, sticky="nsew")
+            tk.Label(col_web, text="TRANSMISSÃO", font=("Segoe UI", 7, "bold"), fg=TEXT_MUTED, bg=CARD_COLOR).pack(anchor="center", pady=(0, 4))
+            
+            web_badge_frame = tk.Frame(col_web, bg=CARD_COLOR)
+            web_badge_frame.pack(anchor="center")
+            led_web = StatusLED(web_badge_frame, size=6, bg_color=CARD_COLOR)
+            led_web.pack(side="left", padx=(0, 4))
+            lbl_web = tk.Label(web_badge_frame, text="VERIFICANDO", font=("Segoe UI", 8, "bold"), fg=ORANGE_COLOR, bg="#78350F", padx=6, pady=2)
+            lbl_web.pack(side="left")
+            
+            # Linha divisória sutil
+            divider = tk.Frame(card, bg="#1F2232", height=1)
+            divider.pack(fill="x", pady=6)
+            
+            # Última gravação/Sync (com fonte monospace menor e visual limpo)
+            lbl_sync = tk.Label(card, text="Buscando...", font=("Consolas", 8), fg=TEXT_MUTED, bg=CARD_COLOR, justify="left", wraplength=380)
+            lbl_sync.pack(fill="x", pady=(2, 0), anchor="w")
             
             # Salva referências para atualização
             self.camera_cards[stream] = {
@@ -1183,47 +1399,121 @@ class CameraManagerApp:
         
         self.chk_prevent_sleep = tk.Checkbutton(
             sleep_frame,
-            text=" 🖥️ Impedir Suspensão/Desligamento do PC",
+            text=" 🖥️ Impedir Suspensão do PC: ATIVO " if self.prevent_sleep_var.get() else " 🖥️ Impedir Suspensão do PC: INATIVO ",
             variable=self.prevent_sleep_var,
             font=("Segoe UI", 9, "bold"),
             fg=TEXT_COLOR,
-            bg=BG_COLOR,
-            activebackground=BG_COLOR,
+            bg="#1F2937",
+            activebackground="#374151",
             activeforeground=TEXT_COLOR,
-            selectcolor="#111827",
+            selectcolor="#064E3B",
+            indicatoron=False,
+            relief="flat",
             bd=0,
+            padx=12,
+            pady=6,
             cursor="hand2",
             command=self.toggle_prevent_sleep
         )
-        self.chk_prevent_sleep.pack(anchor="w", padx=4, pady=2)
-
-        # 4.5. CONFIGURAÇÕES DE CAMINHO E INTEGRIDADE
-        config_frame = tk.Frame(left_col, bg=BG_COLOR, pady=2)
-        config_frame.pack(fill="x", padx=12, pady=2)
+        self.chk_prevent_sleep.pack(fill="x", padx=4, pady=4)
+        # Wrapper de configurações
+        settings_wrapper = tk.Frame(left_col, bg=BG_COLOR, bd=0)
+        settings_wrapper.pack(fill="x", padx=12, pady=4)
         
-        path_label = tk.Label(config_frame, text="Pasta Drive/Rede:", font=("Segoe UI", 9, "bold"), fg=TEXT_MUTED, bg=BG_COLOR)
-        path_label.pack(side="left", padx=2)
+        # Stripe lateral (laranja/amber para configurações)
+        accent_settings = tk.Frame(settings_wrapper, bg="#F59E0B", width=4)
+        accent_settings.pack(side="left", fill="y")
         
-        self.entry_path = tk.Entry(config_frame, bg="#161822", fg=TEXT_COLOR, font=("Segoe UI", 9), bd=1, relief="solid", width=20, insertbackground=TEXT_COLOR)
+        self.card_settings = tk.Frame(
+            settings_wrapper, 
+            bg=CARD_COLOR, 
+            bd=0, 
+            highlightbackground="#1F2232", 
+            highlightthickness=1, 
+            padx=15, 
+            pady=10
+        )
+        self.card_settings.pack(side="left", fill="x", expand=True)
+        self.setup_card_hover_glow(self.card_settings, "#F59E0B")
+        tk.Label(self.card_settings, text="⚙️ Configurações do NVR", font=("Segoe UI", 10, "bold"), fg=TEXT_COLOR, bg=CARD_COLOR).pack(anchor="w", pady=(0, 6))
+        
+        # Linha Pasta do HD
+        row_path = tk.Frame(self.card_settings, bg=CARD_COLOR, pady=2)
+        row_path.pack(fill="x", anchor="w")
+        tk.Label(row_path, text="Pasta do HD:  ", font=("Segoe UI", 9, "bold"), fg=TEXT_MUTED, bg=CARD_COLOR).pack(side="left")
+        
+        self.entry_path = tk.Entry(
+            row_path, 
+            bg="#161822", 
+            fg=TEXT_COLOR, 
+            font=("Segoe UI", 9), 
+            bd=0, 
+            highlightthickness=1, 
+            highlightbackground="#374151", 
+            highlightcolor="#3B82F6", 
+            relief="flat",
+            width=22, 
+            insertbackground=TEXT_COLOR
+        )
         self.entry_path.insert(0, GDRIVE_ROOT)
-        self.entry_path.pack(side="left", padx=2)
+        self.entry_path.pack(side="left", padx=5, pady=2)
         
         self.btn_save_path = tk.Button(
-            config_frame,
+            row_path,
             text="Salvar",
             font=("Segoe UI", 8, "bold"),
             fg=TEXT_COLOR,
-            bg="#3B82F6",
-            activebackground="#2563EB",
+            bg="#2563EB",
+            activebackground="#1D4ED8",
             activeforeground=TEXT_COLOR,
             bd=0,
+            relief="flat",
             cursor="hand2",
-            padx=8,
-            pady=2,
+            padx=10,
+            pady=3,
             command=self.click_salvar_caminho
         )
         self.btn_save_path.pack(side="left", padx=2)
-        self.setup_button_hover(self.btn_save_path, "#3B82F6", "#2563EB")
+        self.setup_button_hover(self.btn_save_path, "#2563EB", "#1D4ED8")
+        
+        # Linha Bloco de Vídeo
+        row_block = tk.Frame(self.card_settings, bg=CARD_COLOR, pady=2)
+        row_block.pack(fill="x", anchor="w", pady=(6, 0))
+        tk.Label(row_block, text="Bloco de Vídeo:", font=("Segoe UI", 9, "bold"), fg=TEXT_MUTED, bg=CARD_COLOR).pack(side="left")
+        
+        self.combo_block = ttk.Combobox(row_block, values=["10 min", "15 min", "30 min"], state="readonly", width=8)
+        intervalo_atual = CONFIG.get("bloco_minutos", 30)
+        self.combo_block.set(f"{intervalo_atual} min")
+        self.combo_block.pack(side="left", padx=5)
+        
+        self.btn_save_interval = tk.Button(
+            row_block,
+            text="Salvar",
+            font=("Segoe UI", 8, "bold"),
+            fg=TEXT_COLOR,
+            bg="#2563EB",
+            activebackground="#1D4ED8",
+            activeforeground=TEXT_COLOR,
+            bd=0,
+            relief="flat",
+            cursor="hand2",
+            padx=10,
+            pady=3,
+            command=self.click_salvar_intervalo
+        )
+        self.btn_save_interval.pack(side="left", padx=2)
+        self.setup_button_hover(self.btn_save_interval, "#2563EB", "#1D4ED8")
+        
+        # Dica visual com ícone de informação
+        self.lbl_tip_retention = tk.Label(
+            self.card_settings, 
+            text="💡 Dica: Gravações antigas (>90 dias) são limpas automaticamente.", 
+            font=("Segoe UI", 8, "italic"), 
+            fg="#9CA3AF", 
+            bg=CARD_COLOR,
+            anchor="w"
+        )
+        self.lbl_tip_retention.pack(fill="x", pady=(8, 0))
 
         # 5. LOG DE EVENTOS (CONSOLE PREMIUM)
         log_title_frame = tk.Frame(left_col, bg=BG_COLOR)
@@ -1234,27 +1524,33 @@ class CameraManagerApp:
         log_wrapper = tk.Frame(left_col, bg=BG_COLOR)
         log_wrapper.pack(fill="both", expand=True, padx=12, pady=(2, 6))
         
+        # Barra de rolagem estilizada escura
+        scrollbar = ttk.Scrollbar(log_wrapper, orient="vertical")
+        scrollbar.pack(side="right", fill="y")
+        
         self.txt_log = tk.Text(
             log_wrapper, 
-            height=6, 
-            bg="#030712", 
-            fg="#34D399", 
+            height=10, 
+            bg="#0E111C", 
+            fg="#A7F3D0", 
             font=("Consolas", 9), 
             bd=0, 
             highlightbackground="#1F2232", 
             highlightthickness=1, 
             padx=10, 
-            pady=5, 
-            wrap="word"
+            pady=8, 
+            wrap="word",
+            yscrollcommand=scrollbar.set
         )
-        self.txt_log.pack(fill="both", expand=True)
+        self.txt_log.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=self.txt_log.yview)
         self.txt_log.configure(state="disabled")
-        # Configura tags de cores para diferentes tipos de mensagens
-        self.txt_log.tag_configure("tag_erro", foreground="#EF4444")
-        self.txt_log.tag_configure("tag_ok", foreground="#10B981")
-        self.txt_log.tag_configure("tag_info", foreground="#60A5FA")
-        self.txt_log.tag_configure("tag_warn", foreground="#F59E0B")
-        self.txt_log.tag_configure("tag_default", foreground="#34D399")
+        # Configura tags de cores para diferentes tipos de mensagens (Estilo Console Moderno)
+        self.txt_log.tag_configure("tag_erro", foreground="#FFA1A1", background="#2D080A")
+        self.txt_log.tag_configure("tag_ok", foreground="#A7F3D0", background="#062A17")
+        self.txt_log.tag_configure("tag_info", foreground="#93C5FD", background="#0A1C30")
+        self.txt_log.tag_configure("tag_warn", foreground="#FCD34D", background="#2A1B02")
+        self.txt_log.tag_configure("tag_default", foreground="#D1FAE5", background="#0E111C")
 
         # Descarrega logs gerados durante o startup/boot
         if hasattr(self, "_startup_logs"):
@@ -1274,18 +1570,65 @@ class CameraManagerApp:
             self.camera_widgets[stream] = cam_widget
 
     # ================= LOG DE EVENTOS =================
+    def _append_to_log_widget(self, msg, tag):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        formatted = f"[{timestamp}] {msg}\n"
+        try:
+            self.txt_log.configure(state="normal")
+            self.txt_log.insert(tk.END, formatted, tag)
+            
+            # Auto-cleanup: limita o log a 200 linhas
+            line_count = int(self.txt_log.index('end-1c').split('.')[0])
+            if line_count > 200:
+                self.txt_log.delete('1.0', f'{line_count - 200}.0')
+                
+            self.txt_log.see(tk.END)
+            self.txt_log.configure(state="disabled")
+        except Exception:
+            pass
+
     def add_log(self, msg):
         # Se o console de log (txt_log) ainda não existe ou se estamos rodando ocultos (silent)
         if not hasattr(self, "txt_log") or self.txt_log is None or self.silent:
             if not hasattr(self, "_startup_logs"):
                 self._startup_logs = []
             self._startup_logs.append(msg)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+            try:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+            except Exception:
+                try:
+                    encoding = sys.stdout.encoding or 'utf-8'
+                    safe_msg = msg.encode(encoding, errors='replace').decode(encoding)
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {safe_msg}")
+                except Exception:
+                    pass
             return
 
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        formatted = f"[{timestamp}] {msg}\n"
+        # Rastreia mensagens repetidas para evitar flood
+        if not hasattr(self, "_last_logged_msgs"):
+            self._last_logged_msgs = {}
+            self._suppressed_counts = {}
+            
+        import re
+        msg_key = re.sub(r'\d{4}-\d{2}-\d{2}[_\s\-]\d{2}[-:]\d{2}([-:]\d{2})?', '[DATE]', msg)
+        msg_key = re.sub(r'0x[0-9a-fA-F]+', '[HEX]', msg_key)
         
+        now = time.time()
+        if msg_key in self._last_logged_msgs:
+            last_time = self._last_logged_msgs[msg_key]
+            if now - last_time < 120:  # Silencia se repetir dentro de 2 minutos
+                self._suppressed_counts[msg_key] = self._suppressed_counts.get(msg_key, 0) + 1
+                return
+            else:
+                supp_count = self._suppressed_counts.get(msg_key, 0)
+                if supp_count > 0:
+                    supp_msg = f"[DEDUPLICAÇÃO] A mensagem anterior se repetiu {supp_count} vezes nos últimos 2 minutos."
+                    self._suppressed_counts[msg_key] = 0
+                    self._append_to_log_widget(supp_msg, "tag_info")
+                    
+        self._last_logged_msgs[msg_key] = now
+        self._suppressed_counts[msg_key] = 0
+
         # Determina a tag de cor baseada no conteúdo
         msg_lower = msg.lower()
         if "erro" in msg_lower or "falha" in msg_lower or "crítico" in msg_lower or "excluído" in msg_lower:
@@ -1298,20 +1641,8 @@ class CameraManagerApp:
             tag = "tag_warn"
         else:
             tag = "tag_default"
-        
-        try:
-            self.txt_log.configure(state="normal")
-            self.txt_log.insert(tk.END, formatted, tag)
             
-            # Auto-cleanup: limita o log a 200 linhas para evitar consumo de memória
-            line_count = int(self.txt_log.index('end-1c').split('.')[0])
-            if line_count > 200:
-                self.txt_log.delete('1.0', f'{line_count - 200}.0')
-            
-            self.txt_log.see(tk.END)
-            self.txt_log.configure(state="disabled")
-        except Exception:
-            pass
+        self._append_to_log_widget(msg, tag)
 
     def copy_link_to_clipboard(self):
         self.root.clipboard_clear()
@@ -1340,10 +1671,14 @@ class CameraManagerApp:
             # 0. Verifica quedas de energia / status da bateria do PC/Nobreak
             self.check_power_status()
             
-            # 1. Verifica se go2rtc está ativo
+            # 1. Verifica se go2rtc está ativo (e reinicia se estiver inativo)
             go2rtc_ok = self.check_process_go2rtc()
+            if not go2rtc_ok and self.running_monitor:
+                self.iniciar_go2rtc()
+                time.sleep(2.0)
+                go2rtc_ok = self.check_process_go2rtc()
             
-            # 2. Verifica se o Google Drive está conectado (ou se foi conectado agora)
+            # 2. Verifica se o HD Externo está conectado (ou se foi conectado agora)
             gdrive_ok = os.path.exists(GDRIVE_ROOT)
             if not gdrive_ok:
                 gdrive_detectado = detectar_gdrive_automatico()
@@ -1351,11 +1686,37 @@ class CameraManagerApp:
                     GDRIVE_ROOT = gdrive_detectado
                     CONFIG["gdrive_root"] = GDRIVE_ROOT
                     salvar_config(CONFIG)
-                    gdrive_ok = True
-                    if not self.silent:
-                        self.root.after(0, lambda: self.add_log(f"Google Drive detectado dinamicamente em: {GDRIVE_ROOT}"))
+                    try:
+                        os.makedirs(GDRIVE_ROOT, exist_ok=True)
+                    except Exception:
+                        pass
+                    gdrive_ok = os.path.exists(GDRIVE_ROOT)
+                    if gdrive_ok and not self.silent:
+                        self.root.after(0, lambda: self.add_log(f"HD FARMACIA detectado dinamicamente em: {GDRIVE_ROOT}"))
                         self.root.after(0, lambda: self.entry_path.delete(0, tk.END))
                         self.root.after(0, lambda: self.entry_path.insert(0, GDRIVE_ROOT))
+            
+            # Chamada da limpeza emergencial preventiva se o HD estiver montado
+            if gdrive_ok:
+                try:
+                    self.executar_limpeza_emergencial()
+                except Exception:
+                    pass
+            
+            # Watchdog de Threads: reinicia a thread de gravação se deveria estar ativa mas morreu
+            for idx, stream in enumerate(self.streams):
+                if self.recording_active.get(stream, False):
+                    t = self.recording_threads.get(stream)
+                    if t is None or not t.is_alive():
+                        if not self.silent:
+                            self.add_log(f"⚠️ [THREAD WATCHDOG] Detectada queda da thread da camera {stream.upper()}! Reiniciando...")
+                        new_t = threading.Thread(
+                            target=self.record_stream_thread, 
+                            args=(stream, idx), 
+                            daemon=True
+                        )
+                        self.recording_threads[stream] = new_t
+                        new_t.start()
             
             # 3. Coleta visualizadores ao vivo
             live_viewers = self.get_live_viewers(go2rtc_ok)
@@ -1420,7 +1781,7 @@ class CameraManagerApp:
         try:
             for root_dir, _, files in os.walk(backup_dir):
                 for f in files:
-                    if f.endswith(".mp4"):
+                    if f.endswith((".mp4", ".ts")):
                         total_files += 1
                         total_size += os.path.getsize(os.path.join(root_dir, f))
         except Exception:
@@ -1429,11 +1790,81 @@ class CameraManagerApp:
         self._cached_backup_time = now
         return total_files, total_size
 
+    def executar_limpeza_emergencial(self):
+        """Libera espaço no HD externo deletando pastas mais antigas se o espaço livre for inferior a 15GB"""
+        if not os.path.exists(GDRIVE_ROOT):
+            return
+            
+        try:
+            total, used, free = shutil.disk_usage(GDRIVE_ROOT)
+            free_gb = free / (1024 ** 3)
+            
+            if free_gb >= 15.0:
+                return  # Espaço confortável
+                
+            if not self.silent:
+                self.add_log(f"🚨 [ESPAÇO CRÍTICO] Apenas {free_gb:.2f} GB livres no HD! Iniciando limpeza emergencial...")
+                
+            # Varre subpastas das câmeras no HD externo para achar pastas de datas (formato YYYY-MM-DD)
+            pastas_data = set()
+            for stream in self.streams:
+                for idx in range(len(self.streams)):
+                    gdrive_dest = self.get_gdrive_dir(stream, idx)
+                    if os.path.exists(gdrive_dest):
+                        for item in os.listdir(gdrive_dest):
+                            item_path = os.path.join(gdrive_dest, item)
+                            if os.path.isdir(item_path):
+                                import re
+                                if re.match(r'^\d{4}-\d{2}-\d{2}$', item):
+                                    pastas_data.add(item)
+                                    
+            if not pastas_data:
+                if not self.silent:
+                    self.add_log("⚠️ Nenhuma pasta de data encontrada para limpeza.")
+                return
+                
+            datas_ordenadas = sorted(list(pastas_data))
+            hoje_str = datetime.now().strftime("%Y-%m-%d")
+            datas_deletaveis = [d for d in datas_ordenadas if d != hoje_str]
+            
+            if not datas_deletaveis:
+                if not self.silent:
+                    self.add_log("⚠️ Apenas gravações do dia de hoje estão disponíveis. Abortando exclusão por segurança.")
+                return
+                
+            for data_deletar in datas_deletaveis:
+                if not self.silent:
+                    self.add_log(f"🧹 Deletando gravações antigas do dia {data_deletar} para liberar espaço...")
+                    
+                for stream in self.streams:
+                    for idx in range(len(self.streams)):
+                        gdrive_dest = self.get_gdrive_dir(stream, idx)
+                        pasta_dia = os.path.join(gdrive_dest, data_deletar)
+                        if os.path.exists(pasta_dia):
+                            try:
+                                shutil.rmtree(pasta_dia)
+                            except Exception as e:
+                                if not self.silent:
+                                    self.add_log(f"Erro ao deletar {pasta_dia}: {str(e)}")
+                                    
+                # Reavalia
+                total, used, free = shutil.disk_usage(GDRIVE_ROOT)
+                free_gb = free / (1024 ** 3)
+                if free_gb >= 30.0:
+                    if not self.silent:
+                        self.add_log(f"✅ Limpeza emergencial concluída! Espaço livre recuperado: {free_gb:.2f} GB.")
+                    break
+        except Exception as err:
+            if not self.silent:
+                self.add_log(f"Erro na limpeza emergencial: {str(err)}")
+
     def toggle_prevent_sleep(self):
         if self.prevent_sleep_var.get():
             self.apply_prevent_sleep(True)
+            self.chk_prevent_sleep.configure(text=" 🖥️ Impedir Suspensão do PC: ATIVO ")
         else:
             self.apply_prevent_sleep(False)
+            self.chk_prevent_sleep.configure(text=" 🖥️ Impedir Suspensão do PC: INATIVO ")
 
     def apply_prevent_sleep(self, enable):
         try:
@@ -1506,9 +1937,57 @@ class CameraManagerApp:
     def check_process_go2rtc(self):
         try:
             output = subprocess.check_output('tasklist /FI "IMAGENAME eq go2rtc.exe"', shell=True, text=True)
-            return "go2rtc.exe" in output
+            process_exists = "go2rtc.exe" in output
         except Exception:
+            process_exists = False
+            
+        if not process_exists:
+            self.go2rtc_api_fails = 0
             return False
+            
+        # Watchdog de resposta HTTP da API do go2rtc (detecção de travamento zumbi)
+        if not hasattr(self, "go2rtc_api_fails"):
+            self.go2rtc_api_fails = 0
+            
+        try:
+            req = urllib.request.Request("http://127.0.0.1:1984/api/streams")
+            with urllib.request.urlopen(req, timeout=2) as response:
+                if response.status == 200:
+                    self.go2rtc_api_fails = 0
+                    return True
+        except Exception:
+            self.go2rtc_api_fails += 1
+            if self.go2rtc_api_fails >= 3:
+                if not self.silent:
+                    self.add_log("⚠️ Ponte RTSP (go2rtc.exe) travada/sem resposta! Forçando reinício...")
+                try:
+                    subprocess.run("taskkill /F /IM go2rtc.exe", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+                self.go2rtc_api_fails = 0
+                return False
+                
+        return True
+
+    def iniciar_go2rtc(self):
+        try:
+            if not self.check_process_go2rtc():
+                if not self.silent:
+                    self.add_log("Ligando Ponte RTSP (go2rtc.exe)...")
+                go2rtc_dir = os.path.dirname(GO2RTC_EXE)
+                env = os.environ.copy()
+                env["PATH"] = go2rtc_dir + os.pathsep + env.get("PATH", "")
+                subprocess.Popen(
+                    [GO2RTC_EXE],
+                    cwd=go2rtc_dir,
+                    env=env,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                return True
+        except Exception as e:
+            if not self.silent:
+                self.add_log(f"Erro ao iniciar go2rtc.exe: {str(e)}")
+        return False
 
     def is_pid_running_and_python(self, pid):
         if not pid:
@@ -1539,7 +2018,9 @@ class CameraManagerApp:
 
     def check_process_recorder(self, lock_filename, stream_name):
         if self.recording_active.get(stream_name, False):
-            return True
+            t = self.recording_threads.get(stream_name)
+            if t is not None and t.is_alive():
+                return True
             
         lock_path = os.path.join(LOGS_DIR, lock_filename)
         if not os.path.exists(lock_path):
@@ -1638,7 +2119,7 @@ class CameraManagerApp:
             mp4_files = []
             for root_dir, _, files in os.walk(read_path):
                 for f in files:
-                    if f.endswith(".mp4"):
+                    if f.endswith((".mp4", ".ts")):
                         mp4_files.append(os.path.join(root_dir, f))
                         
             if not mp4_files:
@@ -1657,10 +2138,10 @@ class CameraManagerApp:
                 tempo = f"há {int(delta.total_seconds() // 3600)}h e {int((delta.total_seconds() % 3600) // 60)}min"
                 
             filename = os.path.basename(last_file)
-            origem = "Drive" if read_path == gdrive_path else "PC Local"
+            origem = "HD" if read_path == gdrive_path else "PC Local"
             return f"{filename}\n({origem} | Sincronizado: {tempo} às {mtime_dt.strftime('%H:%M:%S')})"
         except Exception:
-            return "Erro ao ler pasta do Drive"
+            return "Erro ao ler pasta do HD"
 
     def check_log_for_duplicate_error(self, log_file_path):
         if not os.path.exists(log_file_path):
@@ -1727,27 +2208,38 @@ class CameraManagerApp:
                 
             # 1. go2rtc status
             if go2rtc_ok:
-                self.lbl_val_go2rtc.configure(text="ATIVO", fg=GREEN_COLOR)
+                self.configure_badge_label(self.lbl_val_go2rtc, "ATIVO", GREEN_COLOR)
                 self.led_go2rtc.set_status(GREEN_COLOR, "#065F46")
             else:
-                self.lbl_val_go2rtc.configure(text="INATIVO", fg=RED_COLOR)
+                self.configure_badge_label(self.lbl_val_go2rtc, "INATIVO", RED_COLOR)
                 self.led_go2rtc.set_status(RED_COLOR, "#991B1B")
                 
-            # 2. gdrive status
+            # 2. HD status
             if gdrive_ok:
-                self.lbl_val_gdrive.configure(text="CONECTADO", fg=GREEN_COLOR)
+                try:
+                    total, used, free = shutil.disk_usage(GDRIVE_ROOT)
+                    free_gb = free / (1024 ** 3)
+                    self.configure_badge_label(self.lbl_val_gdrive, f"CONECTADO ({free_gb:.1f} GB livres)", GREEN_COLOR)
+                except Exception:
+                    self.configure_badge_label(self.lbl_val_gdrive, "CONECTADO", GREEN_COLOR)
                 self.led_gdrive.set_status(GREEN_COLOR, "#065F46")
+                
+                if hasattr(self, "lbl_alerta_hd") and self.lbl_alerta_hd.winfo_ismapped():
+                    self.lbl_alerta_hd.pack_forget()
             else:
-                self.lbl_val_gdrive.configure(text="DESCONECTADO", fg=RED_COLOR)
+                self.configure_badge_label(self.lbl_val_gdrive, "DESCONECTADO", RED_COLOR)
                 self.led_gdrive.set_status(RED_COLOR, "#991B1B")
+                
+                if hasattr(self, "lbl_alerta_hd") and not self.lbl_alerta_hd.winfo_ismapped():
+                    self.lbl_alerta_hd.pack(fill="x", padx=12, pady=4, before=self.cameras_main_frame)
                 
             # 2.5. Backups pendentes status
             if backup_count == 0:
-                self.lbl_val_backups.configure(text="NENHUM", fg=GREEN_COLOR)
+                self.configure_badge_label(self.lbl_val_backups, "NENHUM", GREEN_COLOR)
                 self.led_backups.set_status(GREEN_COLOR, "#065F46")
             else:
                 size_mb = backup_size / (1024 * 1024)
-                self.lbl_val_backups.configure(text=f"{backup_count} vídeo(s) ({size_mb:.1f} MB)", fg=ORANGE_COLOR)
+                self.configure_badge_label(self.lbl_val_backups, f"{backup_count} vídeo(s) ({size_mb:.1f} MB)", ORANGE_COLOR)
                 self.led_backups.set_status(ORANGE_COLOR, "#78350F")
                 
             # 3. (Removido: lbl_viewers e lbl_val_web_monitor não existem mais na UI)
@@ -1759,34 +2251,60 @@ class CameraManagerApp:
                     
                     # Sinal
                     if "Sinal OK" in state["signal"]:
-                        card["lbl_sinal"].configure(text="SINAL OK", fg=GREEN_COLOR)
+                        self.configure_badge_label(card["lbl_sinal"], "SINAL OK", GREEN_COLOR)
                         card["led_sinal"].set_status(GREEN_COLOR, "#065F46")
                     elif "Conectando" in state["signal"]:
-                        card["lbl_sinal"].configure(text="CONECTANDO...", fg=ORANGE_COLOR)
+                        self.configure_badge_label(card["lbl_sinal"], "CONECTANDO...", ORANGE_COLOR)
                         card["led_sinal"].set_status(ORANGE_COLOR, "#78350F")
                     else:
-                        card["lbl_sinal"].configure(text="SEM SINAL", fg=RED_COLOR)
+                        self.configure_badge_label(card["lbl_sinal"], "SEM SINAL", RED_COLOR)
                         card["led_sinal"].set_status(RED_COLOR, "#991B1B")
                         
                     # Gravação
                     if state["grav_ok"]:
-                        card["lbl_grav"].configure(text="GRAVANDO", fg=GREEN_COLOR)
+                        self.configure_badge_label(card["lbl_grav"], "GRAVANDO", GREEN_COLOR)
                         card["led_grav"].set_status(GREEN_COLOR, "#065F46")
                     elif state["duplicate_error"]:
-                        card["lbl_grav"].configure(text="DUPLICADO (AVISO)", fg=ORANGE_COLOR)
+                        self.configure_badge_label(card["lbl_grav"], "DUPLICADO (AVISO)", ORANGE_COLOR)
                         card["led_grav"].set_status(ORANGE_COLOR, "#78350F")
                     else:
-                        card["lbl_grav"].configure(text="PARADO", fg=RED_COLOR)
+                        self.configure_badge_label(card["lbl_grav"], "PARADO", RED_COLOR)
                         card["led_grav"].set_status(RED_COLOR, "#991B1B")
                         
                     # Web Stream
                     if "led_web" in card and "lbl_web" in card:
-                        card["lbl_web"].configure(text=state["web_status"], fg=state["web_color"])
+                        self.configure_badge_label(card["lbl_web"], state["web_status"], state["web_color"])
                         card["led_web"].set_status(state["web_color"], state["web_border"])
                         
                     card["lbl_sync"].configure(text=state["sync"])
 
     # ================= SINCRONIZADOR DE BACKUP EM SEGUNDO PLANO =================
+    def safe_rate_limited_copy(self, src, dst):
+        """Copia o arquivo em chunks de 1MB limitando a taxa a ~10MB/s com sleep para evitar saturar o I/O do SSD"""
+        try:
+            with open(src, "rb") as f_src:
+                with open(dst, "wb") as f_dst:
+                    while True:
+                        chunk = f_src.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        f_dst.write(chunk)
+                        f_dst.flush()
+                        try:
+                            os.fsync(f_dst.fileno())
+                        except Exception:
+                            pass
+                        time.sleep(0.1)
+            shutil.copystat(src, dst)
+            return True
+        except Exception as e:
+            try:
+                if os.path.exists(dst):
+                    os.remove(dst)
+            except Exception:
+                pass
+            raise e
+
     def background_sync_loop(self):
         while self.running_sync:
             time.sleep(30)
@@ -1808,7 +2326,7 @@ class CameraManagerApp:
                     
                     # Varre a pasta de backup recursivamente para achar vídeos organizados em subpastas de data
                     for root_dir, _, files in os.walk(stream_backup_dir):
-                        mp4_files = [f for f in files if f.endswith(".mp4")]
+                        mp4_files = [f for f in files if f.endswith((".mp4", ".ts"))]
                         if not mp4_files:
                             continue
                             
@@ -1840,17 +2358,17 @@ class CameraManagerApp:
                                 continue
                                 
                             if not self.silent:
-                                self.root.after(0, lambda fn=filename, s=stream: self.add_log(f"Subindo backup de {s.upper()}: {fn}..."))
+                                self.root.after(0, lambda fn=filename, s=stream: self.add_log(f"Copiando backup de {s.upper()} para o HD: {fn}..."))
                             
                             try:
-                                shutil.copy2(local_filepath, dest_filepath)
+                                self.safe_rate_limited_copy(local_filepath, dest_filepath)
                                 if os.path.getsize(local_filepath) == os.path.getsize(dest_filepath):
                                     os.remove(local_filepath)
                                     if not self.silent:
-                                        self.root.after(0, lambda fn=filename, s=stream: self.add_log(f"Sincronizado e apagado local: {fn}"))
+                                        self.root.after(0, lambda fn=filename, s=stream: self.add_log(f"Backup sincronizado no HD e apagado local: {fn}"))
                             except Exception as e:
                                 if not self.silent:
-                                    self.root.after(0, lambda fn=filename, err=str(e): self.add_log(f"Erro ao subir {fn}: {err}"))
+                                    self.root.after(0, lambda fn=filename, err=str(e): self.add_log(f"Erro ao enviar {fn} para o HD: {err}"))
                                     
                 # Walk backup_dir bottom-up and remove empty directories
                 for root_dir, dirs, files in os.walk(backup_dir, topdown=False):
@@ -1909,26 +2427,32 @@ class CameraManagerApp:
 
         # Loop principal da gravação
         while self.recording_active.get(stream_name, False):
-            # Verifica duplicidade na rede
-            conflito = self.verificar_duplicidade_rede_cam(gdrive_dir, stream_name)
-            if conflito:
-                escrever_log_cam(f"[ERRO_DUPLICADO] O computador {conflito['hostname']} ({conflito['ip']}) ja esta gravando esta camera.")
-                break
+            try:
+                # Verifica duplicidade na rede
+                conflito = self.verificar_duplicidade_rede_cam(gdrive_dir, stream_name)
+                if conflito:
+                    escrever_log_cam(f"[ERRO_DUPLICADO] O computador {conflito['hostname']} ({conflito['ip']}) ja esta gravando esta camera.")
+                    break
+                    
+                # Executa gravação do bloco
+                status = self.gravar_bloco_cam(stream_name, pasta_final, gdrive_dir, escrever_log_cam)
                 
-            # Executa gravação do bloco
-            status = self.gravar_bloco_cam(stream_name, pasta_final, gdrive_dir, escrever_log_cam)
-            
-            if status == "parar" or status == "duplicado":
-                break
-                
-            if status == "erro" or status == "reconectar":
-                escrever_log_cam("Aguardando 10 segundos antes de tentar reconectar...")
-                for _ in range(20):
-                    if not self.recording_active.get(stream_name, False):
-                        break
-                    time.sleep(0.5)
-            elif status == "rotacionar":
-                time.sleep(1)
+                if status == "parar" or status == "duplicado":
+                    break
+                    
+                if status == "erro" or status == "reconectar":
+                    escrever_log_cam("Aguardando 10 segundos antes de tentar reconectar...")
+                    for _ in range(20):
+                        if not self.recording_active.get(stream_name, False):
+                            break
+                        time.sleep(0.5)
+                elif status == "rotacionar":
+                    time.sleep(1)
+                else:
+                    time.sleep(1)
+            except Exception as e_thread:
+                escrever_log_cam(f"[FALHA_GRAVADOR] Erro inesperado na thread principal: {str(e_thread)}")
+                time.sleep(2.0)
                 
         # Finalização e Limpeza
         if os.path.exists(lock_path):
@@ -1994,12 +2518,19 @@ class CameraManagerApp:
             pass
 
     def obter_faixa_horario(self, dt):
-        if dt.minute < 30:
-            inicio = dt.replace(minute=0, second=0, microsecond=0)
-            fim = dt.replace(minute=30, second=0, microsecond=0)
-        else:
-            inicio = dt.replace(minute=30, second=0, microsecond=0)
+        global CONFIG
+        intervalo = CONFIG.get("bloco_minutos", 30)
+        if intervalo not in (10, 15, 30):
+            intervalo = 30
+            
+        minuto_inicio = (dt.minute // intervalo) * intervalo
+        inicio = dt.replace(minute=minuto_inicio, second=0, microsecond=0)
+        
+        minuto_fim = minuto_inicio + intervalo
+        if minuto_fim >= 60:
             fim = (dt + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+        else:
+            fim = dt.replace(minute=minuto_fim, second=0, microsecond=0)
         return inicio, fim
 
     def gravar_bloco_cam(self, stream_name, pasta_final, gdrive_dir, escrever_log_cam):
@@ -2014,16 +2545,16 @@ class CameraManagerApp:
         pasta_dia_final = os.path.join(pasta_final, data_dia)
         os.makedirs(pasta_dia_final, exist_ok=True)
         
-        nome_arquivo = os.path.join(pasta_dia_final, f"camera_{data_dia}_{hora_inicio}_ate_{hora_fim}.mp4")
+        nome_arquivo = os.path.join(pasta_dia_final, f"camera_{data_dia}_{hora_inicio}_ate_{hora_fim}.ts")
         
         # Gravação local temporária
         temp_dir = os.path.join(PROJ_DIR, "sistema", "gravando_temp", stream_name)
         os.makedirs(temp_dir, exist_ok=True)
-        nome_temp = os.path.join(temp_dir, f"temp_camera_{data_dia}_{hora_inicio}_ate_{hora_fim}.mp4")
+        nome_temp = os.path.join(temp_dir, f"temp_camera_{data_dia}_{hora_inicio}_ate_{hora_fim}.ts")
         
         escrever_log_cam(f"Iniciando gravacao temporaria do bloco: {os.path.basename(nome_arquivo)}")
         
-        url = f"http://127.0.0.1:1984/api/stream.mp4?src={stream_name}"
+        url = f"http://127.0.0.1:1984/api/stream.ts?src={stream_name}"
         
         self.atualizar_heartbeat_cam(gdrive_dir, stream_name)
         last_heartbeat_time = time.time()
@@ -2034,7 +2565,7 @@ class CameraManagerApp:
         mode = "ab" if os.path.exists(nome_temp) else "wb"
         
         try:
-            with open(nome_temp, mode) as out_file:
+            with open(nome_temp, mode, buffering=1024 * 1024) as out_file:
                 while datetime.now() < fim_bloco:
                     if not self.recording_active.get(stream_name, False):
                         status_ret = "parar"
@@ -2052,7 +2583,7 @@ class CameraManagerApp:
                     
                     try:
                         req = urllib.request.Request(url)
-                        response = urllib.request.urlopen(req, timeout=10)
+                        response = urllib.request.urlopen(req, timeout=5)
                         self.active_connections[stream_name] = response
                         
                         last_read_time = time.time()
@@ -2074,7 +2605,6 @@ class CameraManagerApp:
                                 if not chunk:
                                     break
                                 out_file.write(chunk)
-                                out_file.flush()
                                 last_read_time = time.time()
                             except (socket.timeout, TimeoutError):
                                 if time.time() - last_read_time > 15:
@@ -2093,6 +2623,12 @@ class CameraManagerApp:
                         
                 if datetime.now() >= fim_bloco:
                     status_ret = "rotacionar"
+                
+                try:
+                    out_file.flush()
+                    os.fsync(out_file.fileno())
+                except Exception:
+                    pass
         except Exception as e:
             escrever_log_cam(f"Erro no gravador local: {str(e)}")
             status_ret = "erro"
@@ -2109,9 +2645,11 @@ class CameraManagerApp:
                     try:
                         backup_dia_dir = os.path.join(PROJ_DIR, "sistema", "backup_gravacoes", stream_name, data_dia)
                         os.makedirs(backup_dia_dir, exist_ok=True)
-                        backup_arquivo = os.path.join(backup_dia_dir, f"camera_{data_dia}_{hora_inicio}_ate_{hora_fim}.mp4")
+                        backup_arquivo = os.path.join(backup_dia_dir, f"camera_{data_dia}_{hora_inicio}_ate_{hora_fim}.ts")
                         shutil.move(nome_temp, backup_arquivo)
                         escrever_log_cam(f"Bloco salvo no backup local de contingencia: {os.path.join(data_dia, os.path.basename(backup_arquivo))}")
+                        # Garante que o backup local não exceda 1 GB
+                        garantir_limite_backup_local(os.path.join(PROJ_DIR, "sistema", "backup_gravacoes"))
                     except Exception as e_backup:
                         escrever_log_cam(f"ERRO CRITICO: Nao foi possivel salvar no backup local ({str(e_backup)})")
             else:
@@ -2242,18 +2780,7 @@ class CameraManagerApp:
         
         try:
             # 1. Liga a ponte RTSP go2rtc.exe se não estiver rodando
-            if not self.check_process_go2rtc():
-                if not self.silent:
-                    self.add_log("Ligando Ponte RTSP (go2rtc.exe)...")
-                go2rtc_dir = os.path.dirname(GO2RTC_EXE)
-                env = os.environ.copy()
-                env["PATH"] = go2rtc_dir + os.pathsep + env.get("PATH", "")
-                subprocess.Popen(
-                    [GO2RTC_EXE],
-                    cwd=go2rtc_dir,
-                    env=env,
-                    creationflags=subprocess.CREATE_NO_WINDOW
-                )
+            if self.iniciar_go2rtc():
                 time.sleep(2.5)
                 
             # 2. Liga gravadores dinamicamente em threads separadas (NVR integrado)
@@ -2261,11 +2788,13 @@ class CameraManagerApp:
                 if not self.silent:
                     self.add_log(f"Iniciando thread de gravacao da camera {stream.upper()}...")
                 self.recording_active[stream] = True
-                threading.Thread(
+                t = threading.Thread(
                     target=self.record_stream_thread, 
                     args=(stream, idx), 
                     daemon=True
-                ).start()
+                )
+                self.recording_threads[stream] = t
+                t.start()
                 
             if not self.silent:
                 self.root.after(0, lambda: self.add_log("Inicialização concluída em segundo plano."))
@@ -2346,13 +2875,19 @@ class CameraManagerApp:
         subprocess.run('taskkill /F /IM go2rtc.exe', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def click_abrir_pasta(self):
+        if not os.path.exists(GDRIVE_ROOT):
+            try:
+                os.makedirs(GDRIVE_ROOT, exist_ok=True)
+            except Exception:
+                pass
+                
         if os.path.exists(GDRIVE_ROOT):
-            self.add_log("Abrindo pasta de câmeras do Google Drive...")
+            self.add_log("Abrindo pasta de câmeras do HD FARMACIA...")
             os.startfile(GDRIVE_ROOT)
             self.flash_button(self.btn_open_folder, "✔️ Pasta Aberta!", "#10B981")
         else:
-            self.add_log("ERRO: Pasta G:\\Meu Drive\\CAMERAS inacessível.")
-            messagebox.showerror("Erro de Acesso", "Não foi possível abrir o Google Drive. Verifique se ele está rodando.")
+            self.add_log(f"ERRO: Pasta do HD {GDRIVE_ROOT} inacessível.")
+            messagebox.showerror("Erro de Acesso", f"Não foi possível abrir a pasta do HD:\n{GDRIVE_ROOT}\n\nVerifique se o HD Externo está conectado.")
 
     def click_monitor(self):
         self.add_log("Abrindo Monitor no navegador...")
@@ -2385,17 +2920,31 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         global GDRIVE_ROOT
         novo_caminho = self.entry_path.get().strip()
         if not novo_caminho:
-            messagebox.showerror("Erro", "O caminho do Drive/Rede não pode ser vazio.")
+            messagebox.showerror("Erro", "O caminho do HD não pode ser vazio.")
             return
             
         GDRIVE_ROOT = novo_caminho
         CONFIG["gdrive_root"] = GDRIVE_ROOT
         salvar_config(CONFIG)
         
-        self.add_log(f"Caminho do Google Drive/Rede atualizado para: {GDRIVE_ROOT}")
+        self.add_log(f"Caminho do HD FARMACIA atualizado para: {GDRIVE_ROOT}")
         messagebox.showinfo("Caminho Salvo", f"O caminho foi atualizado com sucesso para:\n{GDRIVE_ROOT}")
         if hasattr(self, "btn_save_path"):
             self.flash_button(self.btn_save_path, "✔️ Salvo!", "#10B981")
+
+    def click_salvar_intervalo(self):
+        global CONFIG
+        valor_sel = self.combo_block.get()
+        try:
+            minutos = int(valor_sel.split()[0])
+            CONFIG["bloco_minutos"] = minutos
+            salvar_config(CONFIG)
+            self.add_log(f"Intervalo de gravação de vídeo atualizado para: {minutos} minutos.")
+            if hasattr(self, "btn_save_interval"):
+                self.flash_button(self.btn_save_interval, "✔️ Salvo!", "#10B981")
+            messagebox.showinfo("Intervalo Salvo", f"O intervalo de gravação foi atualizado para {minutos} minutos com sucesso!")
+        except Exception as e:
+            self.add_log(f"ERRO ao salvar intervalo: {str(e)}")
 
     def click_escanear_corrompidos(self, show_popup=True):
         if not self.silent:
@@ -2425,7 +2974,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             try:
                 # Escaneia recursivamente incluindo as subpastas organizadas por data
                 for root_dir, _, files in os.walk(directory):
-                    mp4_files = [f for f in files if f.endswith(".mp4")]
+                    mp4_files = [f for f in files if f.endswith((".mp4", ".ts"))]
                     for filename in mp4_files:
                         filepath = os.path.join(root_dir, filename)
                         scanned_count += 1
@@ -2465,11 +3014,45 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             except Exception:
                 pass
                  
+        # Executa a limpeza por rotação de vídeos (deleta arquivos >90 dias)
+        self.rotacionar_videos_hd(GDRIVE_ROOT)
+
         if not self.silent:
             self.add_log(f"Escaneamento concluído. {scanned_count} arquivos analisados, {corrupted_count} corrompidos excluídos.")
             
             if show_popup:
                 self.root.after(0, lambda: messagebox.showinfo("Scanner de Integridade", f"Varredura concluída!\n\nArquivos escaneados: {scanned_count}\nArquivos corrompidos deletados: {corrupted_count}\n\nOs arquivos corrompidos foram excluídos permanentemente para poupar espaço e limpar diretórios."))
+
+    def rotacionar_videos_hd(self, hd_root, max_days=90):
+        try:
+            if not hd_root or not os.path.exists(hd_root):
+                return
+            limite_data = datetime.now() - timedelta(days=max_days)
+            removidos = 0
+            
+            # Varre as pastas de câmera (camera 1, camera 2)
+            for camera_dir in os.listdir(hd_root):
+                cam_path = os.path.join(hd_root, camera_dir)
+                if os.path.isdir(cam_path):
+                    # Varre as subpastas de data (YYYY-MM-DD)
+                    for data_dir in os.listdir(cam_path):
+                        data_path = os.path.join(cam_path, data_dir)
+                        if os.path.isdir(data_path):
+                            # Tenta parsear no formato YYYY-MM-DD
+                            try:
+                                folder_date = datetime.strptime(data_dir, "%Y-%m-%d")
+                                if folder_date < limite_data:
+                                    shutil.rmtree(data_path)
+                                    removidos += 1
+                                    if not self.silent:
+                                        self.add_log(f"Pasta de gravação antiga deletada por rotação (>90 dias): {camera_dir}/{data_dir}")
+                            except ValueError:
+                                pass
+            if removidos > 0 and not self.silent:
+                self.add_log(f"Rotação de vídeos concluída: {removidos} pasta(s) de dias antigos limpa(s).")
+        except Exception as e:
+            if not self.silent:
+                self.add_log(f"Erro na rotação de vídeos do HD: {str(e)}")
 
     def flash_button(self, button, temp_text, temp_bg):
         old_text = button.cget("text")
@@ -2508,28 +3091,40 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         self.graceful_shutdown()
 
     def graceful_shutdown(self):
+        if getattr(self, "_shutdown_executed", False):
+            return
+        self._shutdown_executed = True
+        
         # Restaura as configurações originais de suspensão do Windows
         self.apply_prevent_sleep(False)
         
         # Para as conexões de vídeo das câmeras embutidas antes do encerramento
         if hasattr(self, "camera_widgets"):
-            for cam_widget in self.camera_widgets.values():
-                cam_widget.stop_stream()
+            try:
+                for cam_widget in self.camera_widgets.values():
+                    cam_widget.stop_stream()
+            except Exception:
+                pass
                 
-        self.run_stop_sequence()
-        time.sleep(1.0)
+        try:
+            self.run_stop_sequence()
+        except Exception:
+            pass
+            
+        time.sleep(0.5)
         if not self.silent:
             try:
                 self.root.destroy()
             except Exception:
                 pass
-        sys.exit(0)
 
     def limpar_e_fundir_pastas_legadas(self):
-        # 1. Pastas antigas a limpar e fundir nas pastas corretas
+        # Fusão local na nova raiz HD caso existam pastas antigas lá
         mapa_fusao = [
-            ("CAMERA 3 FARMACIA_MJPEG", "CAMERA 1 FARMACIA"),
-            ("CAMERA 4 FARMACIA2_MJPEG", "CAMERA 2 FARMACIA")
+            ("CAMERA 1 FARMACIA", "camera 1"),
+            ("CAMERA 2 FARMACIA", "camera 2"),
+            ("CAMERA 3 FARMACIA_MJPEG", "camera 1"),
+            ("CAMERA 4 FARMACIA2_MJPEG", "camera 2")
         ]
         
         if os.path.exists(GDRIVE_ROOT):
@@ -2537,22 +3132,18 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
                 origem_dir = os.path.join(GDRIVE_ROOT, pasta_origem_nome)
                 destino_dir = os.path.join(GDRIVE_ROOT, pasta_destino_nome)
                 
-                if os.path.exists(origem_dir):
+                if os.path.exists(origem_dir) and origem_dir != destino_dir:
                     if not self.silent:
-                        self.add_log(f"Organizando pasta legada: {pasta_origem_nome}...")
+                        self.add_log(f"Organizando pasta legada no HD: {pasta_origem_nome}...")
                     
                     try:
-                        # Varre todos os subdiretórios e arquivos da pasta legada recursivamente
                         for root_dir, dirs, files in os.walk(origem_dir, topdown=False):
                             for f in files:
                                 filepath_origem = os.path.join(root_dir, f)
-                                
-                                # Preserva a estrutura interna de datas (ex: YYYY-MM-DD/arquivo.mp4)
                                 rel_path = os.path.relpath(filepath_origem, origem_dir)
                                 filepath_destino = os.path.join(destino_dir, rel_path)
                                 
                                 os.makedirs(os.path.dirname(filepath_destino), exist_ok=True)
-                                
                                 try:
                                     shutil.move(filepath_origem, filepath_destino)
                                 except Exception:
@@ -2561,26 +3152,20 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
                                     except Exception:
                                         pass
                             
-                            # Apaga as subpastas vazias
                             for d in dirs:
                                 try:
                                     os.rmdir(os.path.join(root_dir, d))
                                 except Exception:
                                     pass
-                                    
-                        # Remove a pasta legada raiz vazia
                         try:
                             os.rmdir(origem_dir)
-                            if not self.silent:
-                                self.add_log(f"Pasta legada {pasta_origem_nome} limpa e excluída com sucesso!")
                         except Exception:
                             pass
-                            
                     except Exception as e:
                         if not self.silent:
-                            self.add_log(f"Erro ao organizar pasta {pasta_origem_nome}: {str(e)}")
+                            self.add_log(f"Erro ao organizar pasta legada no HD: {str(e)}")
                             
-            # 2. Deleta arquivos de lock soltos na raiz do Drive
+            # 3. Deleta arquivos de lock soltos na raiz do HD
             try:
                 for f in os.listdir(GDRIVE_ROOT):
                     if f.startswith(".active_recorder_") and f.endswith(".json"):
@@ -2605,7 +3190,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
                 stream_temp_dir = os.path.join(temp_root, stream)
                 if not os.path.exists(stream_temp_dir):
                     continue
-                files = [f for f in os.listdir(stream_temp_dir) if f.endswith(".mp4")]
+                files = [f for f in os.listdir(stream_temp_dir) if f.endswith((".mp4", ".ts"))]
                 if not files:
                     continue
                 
@@ -2633,6 +3218,8 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
                             try:
                                 shutil.move(temp_file, dest_file)
                                 self.add_log(f"Arquivo orfao recuperado com sucesso: {nome_novo}")
+                                # Garante que o backup local não exceda 1 GB
+                                garantir_limite_backup_local(os.path.join(PROJ_DIR, "sistema", "backup_gravacoes"))
                             except Exception as e:
                                 self.add_log(f"Erro ao mover arquivo orfao {filename}: {str(e)}")
                         else:
@@ -2721,10 +3308,9 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         except Exception as e:
             self.add_log(f"Erro ao buscar atualizacoes: {str(e)}")
 
-        # Agenda nova verificação automática para daqui a 1 hora
-        self.root.after(3600000, self.trigger_periodic_update)
-
     def trigger_periodic_update(self):
+        # Agenda nova verificação automática para daqui a 1 hora (Executado no Thread Principal)
+        self.root.after(3600000, self.trigger_periodic_update)
         threading.Thread(target=self.check_for_updates_thread, daemon=True).start()
             
     def prompt_update(self, online_version, url_gerenciador, url_visualizador):
