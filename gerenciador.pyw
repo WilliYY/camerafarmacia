@@ -1976,6 +1976,21 @@ class CameraManagerApp:
                 os.makedirs(logs_dir, exist_ok=True)
                 my_host = socket.gethostname()
                 log_file_path = os.path.join(logs_dir, f"log_{my_host}.txt")
+                
+                # Rotaciona o log se passar de 2MB
+                if os.path.exists(log_file_path) and os.path.getsize(log_file_path) > 2 * 1024 * 1024:
+                    try:
+                        with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
+                            lines = f.readlines()
+                        if len(lines) > 500:
+                            with open(log_file_path, "w", encoding="utf-8") as f:
+                                f.writelines(lines[-500:])
+                        else:
+                            with open(log_file_path, "w", encoding="utf-8") as f:
+                                f.truncate(0)
+                    except Exception:
+                        pass
+                        
                 tstamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 with open(log_file_path, "a", encoding="utf-8") as f_ssd:
                     f_ssd.write(f"[{tstamp}] {msg}\n")
