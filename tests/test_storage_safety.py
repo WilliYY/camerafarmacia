@@ -2,6 +2,7 @@ import importlib.machinery
 import importlib.util
 import ast
 import contextlib
+import hashlib
 import io
 import os
 from pathlib import Path
@@ -359,6 +360,154 @@ class StorageSafetyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.module.normalize_smoke_test_seconds(1801)
 
+    def test_stream_config_rejects_yaml_injection_and_unknown_protocols(self):
+        streams = self.module.normalize_streams_config({
+            "farmacia": "tuya://camera.example/?token=ok",
+            "camera\ninjetada": "rtsp://camera.example/live",
+            "camera2": "rtsp://camera.example/live\napi: aberto",
+            "camera3": "file:///C:/video.ts",
+        })
+
+        self.assertEqual(streams, {"farmacia": "tuya://camera.example/?token=ok"})
+
+    def test_storage_identity_requires_the_expected_volume_serial(self):
+        path = Path(self.temp_dir.name) / "external" / "camera"
+        path.mkdir(parents=True)
+        original_identity = self.module.get_volume_identity
+        self.module.get_volume_identity = lambda _path: {"serial": "A1B2C3D4", "label": "FARMACIA"}
+        try:
+            self.assertTrue(self.module.storage_path_matches_identity(
+                str(path), {"serial": "A1B2C3D4", "label": "FARMACIA"}
+            ))
+            self.assertFalse(self.module.storage_path_matches_identity(
+                str(path), {"serial": "00000000", "label": "FARMACIA"}
+            ))
+        finally:
+            self.module.get_volume_identity = original_identity
+
+    def test_generated_go2rtc_config_is_authenticated_and_serves_only_public_viewer(self):
+        source_viewer = Path(self.module.PROJ_DIR) / "sistema" / "visualizador.html"
+        source_viewer.parent.mkdir(parents=True, exist_ok=True)
+        source_viewer.write_text("<html>viewer</html>", encoding="utf-8")
+        original_config = self.module.CONFIG
+        self.module.CONFIG = {
+            "streams": {"farmacia": "tuya://camera.example/?token=ok"},
+            "web_auth": {"username": "viewer", "password": "senha-segura-123456"},
+        }
+        try:
+            self.assertTrue(self.module.atualizar_go2rtc_yaml(self.module.PROJ_DIR))
+        finally:
+            self.module.CONFIG = original_config
+
+        yaml_path = Path(self.module.PROJ_DIR) / "sistema" / "go2rtc" / "go2rtc.yaml"
+        public_viewer = Path(self.module.PROJ_DIR) / "sistema" / "web" / "visualizador.html"
+        yaml_text = yaml_path.read_text(encoding="utf-8")
+        self.assertIn('static_dir: "../web"', yaml_text)
+        self.assertIn('username: "viewer"', yaml_text)
+        self.assertIn('password: "senha-segura-123456"', yaml_text)
+        self.assertEqual(public_viewer.read_text(encoding="utf-8"), "<html>viewer</html>")
+
+    def test_stream_parser_uses_validated_config_without_yaml_quotes(self):
+        app = self.new_app()
+        original_config = self.module.CONFIG
+        self.module.CONFIG = {
+            "streams": {
+                "farmacia": "tuya://camera.example/?token=ok",
+                "farmacia2": "tuya://camera.example/?token=ok2",
+            }
+        }
+        try:
+            self.assertEqual(app.parse_streams(), ["farmacia", "farmacia2"])
+        finally:
+            self.module.CONFIG = original_config
+
+    def test_binary_hash_validation_rejects_unknown_file(self):
+        candidate = Path(self.temp_dir.name) / "go2rtc.exe"
+        candidate.write_bytes(b"not-the-approved-binary")
+        self.assertFalse(self.module.binary_is_trusted(
+            str(candidate), self.module.TRUSTED_BINARY_HASHES["go2rtc.exe"]
+        ))
+
+    def test_update_payload_requires_preapproved_hashes(self):
+        app = self.new_app()
+        manager = b'''VERSION = "4.13"\nclass CameraManagerApp:\n    pass\ndef gravar_bloco_cam():\n    pass\ndef safe_atomic_copy():\n    pass\ndef validate_update_payloads():\n    pass\n# --wait-for-pid\nif __name__ == "__main__":\n    pass\n'''
+        viewer = b'<html><div class="camera-grid"></div><script>loadActiveStreams()</script></html>'
+        hashes = {
+            "manager_sha256": hashlib.sha256(manager).hexdigest(),
+            "viewer_sha256": hashlib.sha256(viewer).hexdigest(),
+        }
+
+        self.assertEqual(
+            app.validate_update_payloads("4.13", manager, viewer, hashes),
+            hashes["manager_sha256"],
+        )
+        hashes["viewer_sha256"] = "0" * 64
+        with self.assertRaises(Exception):
+            app.validate_update_payloads("4.13", manager, viewer, hashes)
+
+    def test_stop_managed_go2rtc_does_not_use_global_process_kill(self):
+        app = self.new_app()
+        app.go2rtc_api_fails = 2
+
+        class FakeProcess:
+            def __init__(self):
+                self.running = True
+                self.terminated = False
+
+            def poll(self):
+                return None if self.running else 0
+
+            def terminate(self):
+                self.terminated = True
+                self.running = False
+
+            def wait(self, timeout):
+                return 0
+
+        process = FakeProcess()
+        app._go2rtc_process = process
+        app.stop_managed_go2rtc()
+
+        self.assertTrue(process.terminated)
+        self.assertIsNone(app._go2rtc_process)
+        self.assertEqual(app.go2rtc_api_fails, 0)
+
+    def test_low_space_does_not_delete_recordings_without_explicit_policy(self):
+        app = self.new_app()
+        app.silent = True
+        app.add_log = lambda *_args, **_kwargs: None
+        hd_root = Path(self.temp_dir.name) / "retention-hd"
+        old_day = (self.module.datetime.now() - self.module.timedelta(days=120)).strftime("%Y-%m-%d")
+        recording_day = hd_root / "camera 1" / old_day
+        recording_day.mkdir(parents=True)
+        (recording_day / "video.ts").write_bytes(b"recording")
+
+        original_config = self.module.CONFIG
+        original_root = self.module.GDRIVE_ROOT
+        original_disk_usage = self.module.shutil.disk_usage
+        self.module.CONFIG = {
+            **original_config,
+            "storage_identity": None,
+            "retention_days": 90,
+            "emergency_cleanup_enabled": False,
+        }
+        self.module.GDRIVE_ROOT = str(hd_root)
+        self.module.shutil.disk_usage = lambda _path: (
+            100 * 1024 ** 3,
+            90 * 1024 ** 3,
+            10 * 1024 ** 3,
+        )
+        app.get_camera_storage_dirs = lambda: [str(hd_root / "camera 1")]
+
+        try:
+            app.executar_limpeza_emergencial()
+        finally:
+            self.module.CONFIG = original_config
+            self.module.GDRIVE_ROOT = original_root
+            self.module.shutil.disk_usage = original_disk_usage
+
+        self.assertTrue(recording_day.exists())
+
     def test_safe_shutdown_request_runs_only_once(self):
         app = self.new_app()
         app._shutdown_request_lock = threading.Lock()
@@ -442,12 +591,17 @@ class StorageSafetyTests(unittest.TestCase):
         app.recording_destinations = {}
         logs = []
         hd_dir = str(Path(self.temp_dir.name) / "external" / "camera 1")
+        Path(hd_dir).mkdir(parents=True)
         original_status = self.module.garantir_limite_backup_local
+        original_config = self.module.CONFIG
+        original_identity = self.module.get_volume_identity
         self.module.garantir_limite_backup_local = lambda _path: {
             "ok": True,
             "free_bytes": 20 * 1024 ** 3,
             "reserve_bytes": 5 * 1024 ** 3,
         }
+        self.module.CONFIG = {**original_config, "storage_identity": {"serial": "A1B2C3D4", "label": "FARMACIA"}}
+        self.module.get_volume_identity = lambda _path: {"serial": "A1B2C3D4", "label": "FARMACIA"}
         app.get_gdrive_dir = lambda _stream, _index: hd_dir
 
         try:
@@ -463,6 +617,8 @@ class StorageSafetyTests(unittest.TestCase):
             self.assertTrue(any("disponivel novamente" in message for message in logs))
         finally:
             self.module.garantir_limite_backup_local = original_status
+            self.module.CONFIG = original_config
+            self.module.get_volume_identity = original_identity
 
     def test_stop_sequence_waits_for_local_recording_thread(self):
         app = self.new_app()
@@ -641,8 +797,13 @@ class StorageSafetyTests(unittest.TestCase):
         (old_dir / "same.ts").write_bytes(b"old-content")
         (new_dir / "same.ts").write_bytes(b"new-content")
         self.module.GDRIVE_ROOT = str(hd_root)
+        original_config = self.module.CONFIG
+        self.module.CONFIG = {**original_config, "storage_identity": None}
 
-        app.limpar_e_fundir_pastas_legadas()
+        try:
+            app.limpar_e_fundir_pastas_legadas()
+        finally:
+            self.module.CONFIG = original_config
 
         contents = {path.read_bytes() for path in new_dir.glob("same*.ts")}
         self.assertEqual(contents, {b"old-content", b"new-content"})

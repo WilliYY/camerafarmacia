@@ -15,11 +15,11 @@ possui cinco relatorios recentes `Kernel_144`, historicamente associados a
 USBXHCI. O teste reduz a suspeita sobre o NVR, mas nao absolve cabo, porta,
 controlador, energia ou driver sem um ensaio prolongado.
 
-O fluxo de gravacao e resiliente, mas a superficie de rede nao esta pronta para
-ser considerada segura: a API do go2rtc, RTSP e WebRTC sao liberados para toda
-a rede, e um ensaio controlado confirmou que a rota web entrega a configuracao
-local. Nao deixar este PC em rede publica nem encaminhar essas portas no
-roteador antes da correcao de `SEC-00`.
+O fluxo de gravacao e resiliente. Nesta revisao, o go2rtc passou a publicar
+somente o visualizador em uma pasta isolada, com autenticacao para clientes da
+rede, rotas restritas e RTSP protegido. O firewall existente permanece aberto
+na rede interna por decisao do responsavel; nao encaminhar essas portas no
+roteador nem usar perfil de rede publica.
 
 ## Achados por prioridade
 
@@ -34,59 +34,49 @@ mantiveram cinco relatorios; nenhum novo apareceu nos ensaios. Manter o teste de
 
 ### Critico de seguranca
 
-**SEC-00 - API e configuracao das cameras expostas na rede local**
+**SEC-00 - Mitigado no servico; firewall interno mantido por decisao operacional**
 
-Impacto: qualquer equipamento que alcance o PC pode visualizar streams e, no
-estado atual, obter a configuracao com credenciais das cameras. A configuracao
-gera `api.listen: ":1984"` e `static_dir: ".."`
-(`gerenciador.pyw:80-81`), enquanto o firewall libera `1984`, `8554` e `8555`
-para qualquer IP e tambem para o perfil Publico (`gerenciador.pyw:5282-5285`).
-No ensaio controlado de 2026-07-17, sem solicitar video, `GET /config.json`
-respondeu `200` com 380 bytes de configuracao; `GET /visualizador.html` e
-`GET /api/streams` tambem responderam. A regra `Camera Farmacia - API (1984)`
-esta habilitada para os perfis Dominio, Particular e Publico.
+O YAML gerado agora usa `static_dir: "../web"`, fora da pasta de configuracao,
+e adiciona usuario/senha para a API e RTSP. O arquivo local deixa de ser
+controlado pelo Git. Assim, `config.json` e
+`go2rtc.yaml` nao devem mais estar disponiveis pela rota web; a visualizacao,
+API e RTSP exigem autenticacao para clientes da LAN.
 
-Antes de qualquer acesso pela rede, limitar go2rtc a `127.0.0.1` ou colocar a
-visualizacao externa atras de proxy com autenticacao, TLS e lista curta de
-rotas. Remover as regras abertas ou restringi-las a IPs conhecidos e perfil
-Particular. Como as credenciais ja existem no arquivo de configuracao servido,
-devem ser trocadas depois da correcao.
+Risco residual aceito: as regras de firewall para `1984`, `8554` e `8555`
+continuam como estavam, inclusive com perfis amplos, porque o usuario pediu que
+nao fossem alteradas. A protecao depende de a rede interna continuar confiavel.
+Nao encaminhar portas no roteador. As credenciais Tuya que ja apareceram no
+historico precisam ser trocadas manualmente no provedor das cameras.
 
 ### Alto
 
-**SEC-01 - Dependencias executaveis sem verificacao de autoria**
+**SEC-01 - Resolvido: dependencias executaveis com hash fixado**
 
-O primeiro uso baixa go2rtc e FFmpeg e valida apenas a estrutura do ZIP
-(`gerenciador.pyw:117-118`). HTTPS ajuda no transporte, mas nao substitui hash
-fixado ou assinatura. Um download comprometido executaria codigo nesta maquina.
-Adicionar manifesto de hashes por versao antes de automatizar novas instalacoes.
+O bootstrap agora aceita `go2rtc.exe` e `ffmpeg.exe` somente quando o SHA-256
+confere com os binarios aprovados da versao. Download, extracao e reutilizacao
+de binarios existentes passam pela mesma verificacao; um arquivo divergente nao
+e executado.
 
-**SEC-02 - Credenciais de contingencia incorporadas no codigo**
+**SEC-02 - Resolvido no codigo e Git; rotacao manual ainda obrigatoria**
 
-O gerador de configuracao possui um fallback com dados de acesso dentro de
-`atualizar_go2rtc_yaml` (`gerenciador.pyw:56`). Mesmo sendo um sistema interno,
-um repositorio, backup ou log compartilhado amplia a exposicao. A correcao
-completa exige remover o fallback, manter segredos apenas no arquivo local
-ignorado e trocar as credenciais ja publicadas no historico.
+Os fallbacks com camera foram removidos do codigo. O YAML e a configuracao local
+foram removidos do controle de versao e ignorados, e a senha da interface web e
+gerada localmente. Isso nao apaga segredos de commits anteriores nem troca a
+senha da conta Tuya: essa rotacao precisa ser feita manualmente pelo responsavel.
 
-**SEC-03 - Atualizacao e dependencia sem identidade criptografica fixada**
+**SEC-03 - Resolvido: atualizacao remota passa a falhar fechada**
 
-O atualizador baixa o Python de `main` e o troca depois de validar apenas
-sintaxe, marcadores e versao (`gerenciador.pyw:5315-5430`). A instalacao inicial
-tambem aceita ZIPs sem hash fixado e instala Pillow sem versao travada. O limite
-de tamanho e o rollback protegem contra arquivo truncado, nao contra codigo
-malicioso publicado no repositorio ou entregue por dependencia comprometida.
-Usar releases assinadas ou manifesto de SHA-256 versionado e exigir revisao
-manual para cada atualizacao.
+O NVR nao executa mais `pip install` no inicio. Uma versao remota so e oferecida
+quando `trusted_update_hashes` local contem os hashes SHA-256 do gerenciador e
+do visualizador; a verificacao ocorre antes de parar gravacoes. Sem autorizacao
+local, a atualizacao fica bloqueada e o sistema continua gravando.
 
-**SEC-04 - Volume e configuracao compartilhada nao possuem identidade forte**
+**SEC-04 - Resolvido: volume vinculado por serial e configuracao limitada**
 
-O destino e escolhido por label `FARMACIA` ou pela existencia de uma pasta e a
-configuracao compartilhada e mesclada sem lista de campos permitidos
-(`gerenciador.pyw:366-496`). Um disco errado, pendrive preparado ou arquivo
-corrompido pode redirecionar o destino e alterar streams. Associar o volume por
-serial/UUID armazenado na primeira configuracao e aceitar somente campos
-esperados antes de regenerar o YAML.
+O primeiro volume valido tem serial armazenado em `storage_identity`; leituras,
+gravacao, sincronizacao, limpeza e abertura de pasta exigem essa identidade. A
+configuracao compartilhada aceita apenas streams validados, bloco e identidade,
+sem poder substituir credenciais, atualizacao ou destino local arbitrariamente.
 
 ### Medio
 
@@ -99,21 +89,20 @@ ponte de stream, nao regressao desta alteracao. O gravador preserva o TS bruto
 em `gravar_bloco_cam` (`gerenciador.pyw:4267`); remux continuo aumentaria CPU e
 nao deve ser adotado sem teste de reproducao e carga.
 
-**DATA-02 - Limpeza emergencial e permanente**
+**DATA-02 - Resolvido: limpeza emergencial exige politica explicita**
 
-Quando o HD fica abaixo do limite, `executar_limpeza_emergencial`
-(`gerenciador.pyw:3261`) remove pastas antigas ate recuperar espaco. Isso evita
-disco cheio, mas pode reduzir a retencao mais do que o esperado. Tornar a
-politica explicita na configuracao e registrar previamente os dias escolhidos.
+A exclusao emergencial agora vem desativada. Em pouco espaco, o NVR alerta,
+preserva o acervo e usa o fallback local quando possivel. Se for habilitada em
+manutencao, ela respeita `retention_days` (90 por padrao) e nao apaga dias
+recentes para atingir um limite arbitrario.
 
 ### Medio
 
-**OPS-01 - Encerramento da ponte por nome de processo**
+**OPS-01 - Resolvido: encerramento por processo proprio**
 
-O watchdog e a parada usam `taskkill /IM go2rtc.exe`
-(`gerenciador.pyw:3444`, `gerenciador.pyw:4684`). Se outro aplicativo usar a
-mesma ponte neste PC, ele tambem pode ser encerrado. Guardar o PID retornado por
-`Popen`, validar seu caminho e encerrar somente aquele processo.
+O processo retornado por `Popen` e guardado pela instancia do NVR. Watchdog e
+encerramento usam esse objeto e nao executam mais `taskkill /IM go2rtc.exe`,
+preservando qualquer go2rtc de outro aplicativo no mesmo PC.
 
 **OPS-02 - Monolito e erros silenciosos dificultam manutencao**
 
@@ -146,8 +135,15 @@ de evento.
   aproximadamente 31,9 MB e tendencia de memoria de apenas +1,9 MB na coleta.
 - Blocos v4.12 publicados com 589.824 bytes e 11.796.480 bytes; ambos aceitos
   pelo FFmpeg com codigo de saida zero.
-- Suite isolada: 31 testes aprovados, incluindo prioridades, falso alerta,
-  primeira leitura USB inconclusiva e limite de amostras em memoria.
+- Suite isolada v4.13: 39 testes aprovados, incluindo injeção YAML, identidade
+  do volume, hashes de atualização, interrupção apenas da ponte própria,
+  retenção sem exclusão emergencial implícita e parser de streams escapados.
+- Serviço v4.13: `visualizador.html` respondeu `200` no loopback,
+  `config.json` respondeu `404`, e visualizador/API pela interface LAN sem
+  credenciais responderam `401`.
+- Ensaio v4.13 de 60 segundos: um bloco novo de cada câmera foi publicado no
+  HD (2.097.152 e 4.325.376 bytes), ambos aceitos pelo FFmpeg com código zero.
+  Não restaram processos Python/go2rtc/FFmpeg nem artefatos temporários.
 
 ## Proximo criterio de liberacao
 
@@ -197,7 +193,5 @@ bloqueio do scanner automatico em `trigger_periodic_scan`
 
 1. Validar as correlacoes em um teste supervisionado de 24 horas.
 2. Medir falsos alertas de camera sem dados em quedas reais de internet.
-3. Adicionar identidade persistente do volume antes de automatizar recuperacao
-   mais agressiva do HD.
-4. Manter qualquer integracao futura com IA externa opcional, sem imagens ou
+3. Manter qualquer integracao futura com IA externa opcional, sem imagens ou
    credenciais e sem autoridade para acoes destrutivas.

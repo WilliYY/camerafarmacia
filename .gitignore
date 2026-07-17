@@ -6,8 +6,10 @@ sistema/diagnostico.txt
 *.lock
 sistema/gravando_temp/
 sistema/go2rtc/ffmpeg.exe
+sistema/go2rtc/go2rtc.yaml
 sistema/config.json
 sistema/config.json.bak
+sistema/web/
 sistema/logs/
 sistema/backup_gravacoes/
 sistema/quarentena_corrompidos/

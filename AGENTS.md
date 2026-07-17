@@ -78,6 +78,8 @@ estiverem aumentando.
   somente depois encerrar go2rtc e Tkinter.
 - Nunca escolha uma unidade apenas por ser `D:`. Use configuracao explicita,
   pasta existente ou identidade validada do volume.
+- A limpeza emergencial deve ficar desativada por padrao e, quando habilitada,
+  nunca pode remover gravacoes mais novas que a retencao aprovada.
 - Testes de armazenamento usam somente diretorios temporarios. Nunca testam
   exclusao, rotacao ou quarentena sobre gravacoes reais.
 
@@ -104,6 +106,9 @@ estiverem aumentando.
 - Execucao de `taskkill`, desligamento, gravacao ou scanner sobre o acervo real.
 - Mudanca de credenciais ou identificadores das cameras. Nao exponha segredos
   em logs, testes, respostas ou commits.
+- Configuracoes geradas pelo go2rtc, segredos locais, hashes de atualizacao e
+  a pasta web publicada nunca entram no Git. A API deve expor somente as rotas
+  necessarias, com autenticacao para clientes da rede.
 
 ## Contexto operacional conhecido
 
@@ -115,6 +120,9 @@ estiverem aumentando.
   testes antes de separar modulos.
 - O fluxo direto `/api/stream.ts?src=NOME` deve ser preservado, sem adicionar
   transcodificacao continua ou dependencias pesadas.
+- As regras de firewall atuais sao uma decisao operacional do responsavel. Nao
+  amplie portas ou perfis sem pedido explicito; endureca primeiro o proprio
+  servico e suas credenciais.
 
 ## Definicao de pronto
 

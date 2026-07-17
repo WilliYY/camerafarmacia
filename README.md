@@ -1,4 +1,4 @@
-# 🎥 NVR Inteligente Câmeras Farmácia — Versão 4.12
+# 🎥 NVR Inteligente Câmeras Farmácia — Versão 4.13
 
 Este projeto é uma solução completa de NVR (Network Video Recorder) local e híbrida de baixíssimo consumo de hardware. Ele foi projetado para capturar, gravar, monitorar e gerenciar câmeras inteligentes compatíveis com o ecossistema Tuya, Smart Life e Positivo, com foco em segurança, portabilidade e tolerância a falhas.
 
@@ -26,7 +26,7 @@ As gravações são organizadas automaticamente em pastas diárias (`AAAA-MM-DD`
 
 ### 2. Sincronização e Contingência Offline Inteligente
 
-- **Destino primário:** HD configurado pelo aplicativo, identificado preferencialmente pelo volume `FARMACIA`.
+- **Destino primário:** HD configurado pelo aplicativo e vinculado ao serial do volume. Um disco com o mesmo nome não é aceito automaticamente.
 - **Backup local automático:** se o HD estiver offline, sem espaço ou inacessível, as gravações são desviadas para `backup_gravacoes`.
 - **Sincronizador em background:** uma thread monitora a disponibilidade do HD. Quando a conexão volta, os arquivos locais são enviados para o destino correto e removidos do backup somente após validação.
 
@@ -57,9 +57,15 @@ O grid é responsivo e preserva a proporção original de 16:9:
 - **Logs coloridos:** o painel mostra mensagens por tipo: informação, sucesso, aviso e erro, com limpeza automática limitada a 200 linhas.
 - **Feedback de voz:** avisos como "Gravando" e "Gravação parada" são disparados em segundo plano.
 
-### 6. Atualização Automática Inteligente
+### 6. Atualização Verificável
 
-O gerenciador compara a versão local com a versão publicada no GitHub e só atualiza quando a versão remota é estritamente mais nova, evitando downgrade acidental.
+O gerenciador compara a versão local com a versão publicada no GitHub, mas só oferece a instalação quando os hashes SHA-256 da versão remota já foram aprovados no arquivo local de configuração. Uma atualização sem hashes aprovados é apenas informada e não interrompe a gravação.
+
+### 7. Retenção e Espaço em Disco
+
+- A rotação automática preserva os últimos 90 dias por padrão.
+- Com menos de 15 GB livres, o NVR alerta e preserva o acervo; ele pode usar o fallback local e pausar se ambos os destinos ficarem sem espaço.
+- A exclusão emergencial é desativada por padrão. Quando habilitada por manutenção consciente, ainda remove apenas pastas mais antigas que a retenção configurada.
 
 ---
 
@@ -67,17 +73,18 @@ O gerenciador compara a versão local com a versão publicada no GitHub e só at
 
 ```text
 camera farmacia/
-├── go2rtc/
-│   ├── go2rtc.exe
-│   ├── go2rtc.yaml
-│   ├── ffmpeg.exe
-│   └── go2rtc_start.log
-├── backup_gravacoes/
-├── gravando_temp/
-├── logs/
+├── sistema/
+│   ├── go2rtc/
+│   │   ├── go2rtc.exe
+│   │   ├── go2rtc.yaml         # local, gerado e ignorado pelo Git
+│   │   └── ffmpeg.exe
+│   ├── web/
+│   │   └── visualizador.html   # publicação segura do visualizador
+│   ├── backup_gravacoes/
+│   ├── gravando_temp/
+│   ├── logs/
+│   └── config.json             # local, contém segredos e identidade do HD
 ├── gerenciador.pyw
-├── visualizador.html
-├── Liberar Rede Local (Executar como Admin).bat
 ├── README.md
 └── .gitignore
 ```
@@ -98,9 +105,9 @@ pip install Pillow
 
 ### 2. Configurar o go2rtc
 
-Edite `go2rtc/go2rtc.yaml` com as credenciais e os identificadores das câmeras Tuya, Smart Life ou Positivo.
+Não edite `sistema/go2rtc/go2rtc.yaml`: ele é gerado a partir da configuração local e é substituído ao iniciar. As credenciais e os identificadores das câmeras ficam somente em `sistema/config.json`, que é ignorado pelo Git.
 
-O gerenciador detecta os streams configurados e monta a interface automaticamente.
+O gerenciador valida os nomes e as URLs dos streams, gera uma senha local forte para a interface web e publica somente `visualizador.html` na porta do go2rtc. A API, RTSP e o visualizador na rede local exigem autenticação; o navegador solicitará as credenciais ao abrir o painel remoto.
 
 ### 3. Configurar o destino das gravações
 
@@ -112,7 +119,15 @@ D:\farmacia camera
 
 Esse caminho também pode ser ajustado pela interface gráfica ou pelo arquivo local `config.json`.
 
-### 4. Executar o painel
+Ao confirmar o destino, o NVR guarda a identidade do volume. Para trocar o HD intencionalmente, selecione o novo caminho no aplicativo enquanto o volume estiver conectado.
+
+### 4. Atualizações e dependências
+
+Instale o Pillow manualmente antes do primeiro uso. O NVR não executa `pip install` sozinho durante a gravação.
+
+Os binários fixados de go2rtc e FFmpeg são aceitos somente quando o SHA-256 confere. A atualização automática do código exige, em `config.json`, os hashes aprovados para a versão desejada em `trusted_update_hashes`; sem essa aprovação, faça a atualização de forma assistida e validada.
+
+### 5. Executar o painel
 
 Abra:
 
@@ -137,6 +152,8 @@ pythonw.exe gerenciador.pyw --silent
 5. **Não quebre as pastas diárias.** Gravações e sincronização devem respeitar subpastas `AAAA-MM-DD`.
 6. **Proteja contra duplicidade.** O heartbeat JSON é parte crítica da segurança de gravação em rede.
 7. **Evite dependências pesadas.** O projeto foi desenhado para rodar com baixo consumo em máquinas simples.
+8. **Não publique configurações.** `go2rtc.yaml`, `config.json`, backups de configuração e a pasta `sistema/web` não pertencem ao Git nem a compartilhamentos externos.
+9. **Não amplie a limpeza automática.** A retenção e qualquer exclusão emergencial exigem política explícita; nunca apague gravações pendentes ou recentes para recuperar espaço.
 
 ---
 

@@ -1,31 +1,22 @@
 import sys
 import subprocess
 
-# 0. Verificação e instalação automática de dependências (Pillow)
+# 0. Verificação da dependência de interface (Pillow).
+# A instalação automática por pip transforma a inicialização do NVR em uma
+# atualização de código não auditada; a dependência deve existir antes do uso.
 try:
     from PIL import Image, ImageTk
-except ImportError:
-    try:
-        # Tenta instalar silenciosamente a biblioteca Pillow
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "Pillow"],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=120,
-        )
-        from PIL import Image, ImageTk
-    except Exception as e:
-        import ctypes
-        ctypes.windll.user32.MessageBoxW(
-            0,
-            f"Não foi possível instalar a biblioteca de imagens (Pillow) automaticamente.\n\n"
-            f"Erro: {str(e)}\n\n"
-            f"Por favor, execute o comando 'pip install Pillow' manualmente.",
-            "Erro de Dependência - NVR",
-            0x10 | 0x0
-        )
-        sys.exit(1)
+except ImportError as error:
+    import ctypes
+    ctypes.windll.user32.MessageBoxW(
+        0,
+        "A biblioteca de imagens Pillow não está instalada.\n\n"
+        "Instale-a manualmente no ambiente do NVR antes de iniciar o sistema.\n\n"
+        f"Detalhe: {error}",
+        "Dependência ausente - NVR",
+        0x10 | 0x0,
+    )
+    sys.exit(1)
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -38,9 +29,102 @@ import queue
 import time
 import ctypes
 import shutil
+import re
+import secrets
+import hashlib
 from datetime import datetime, timedelta
 import io
 import zipfile
+
+
+STREAM_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+ALLOWED_STREAM_PREFIXES = (
+    "tuya://",
+    "rtsp://",
+    "rtsps://",
+    "http://",
+    "https://",
+)
+
+# Binários conhecidos e testados nesta versão. Uma divergência não é
+# automaticamente substituída: o bootstrap baixa novamente e só aceita o
+# arquivo cujo SHA-256 corresponde à versão fixada.
+TRUSTED_BINARY_HASHES = {
+    "go2rtc.exe": "923d57252e8139a69c52e4acc1e399a640244a8ef457fd9b7267a25847d68f8c",
+    "ffmpeg.exe": "1326dde4c84ff1f96fe6b8916c5bed29e163e9b5dccf995f6f3db069d143ec5e",
+}
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as file_obj:
+        for chunk in iter(lambda: file_obj.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def binary_is_trusted(path, expected_hash):
+    try:
+        return os.path.isfile(path) and sha256_file(path) == expected_hash
+    except Exception:
+        return False
+
+
+def require_trusted_binary(path, filename):
+    expected_hash = TRUSTED_BINARY_HASHES[filename]
+    if not binary_is_trusted(path, expected_hash):
+        raise Exception(f"{filename} não corresponde ao binário aprovado para esta versão.")
+
+
+def generate_web_auth():
+    return {
+        "username": "viewer",
+        "password": secrets.token_urlsafe(24),
+    }
+
+
+def normalize_web_auth(value):
+    if not isinstance(value, dict):
+        return generate_web_auth()
+    username = value.get("username")
+    password = value.get("password")
+    if not isinstance(username, str) or not re.fullmatch(r"[A-Za-z0-9_-]{3,32}", username):
+        username = "viewer"
+    if not isinstance(password, str) or len(password) < 16 or any(char in password for char in "\r\n\x00"):
+        password = secrets.token_urlsafe(24)
+    return {"username": username, "password": password}
+
+
+def normalize_streams_config(streams):
+    normalized = {}
+    if not isinstance(streams, dict):
+        return normalized
+    for raw_name, raw_url in streams.items():
+        if not isinstance(raw_name, str) or not STREAM_NAME_PATTERN.fullmatch(raw_name):
+            continue
+        if not isinstance(raw_url, str):
+            continue
+        url = raw_url.strip()
+        if any(char in url for char in "\r\n\x00"):
+            continue
+        if not url.lower().startswith(ALLOWED_STREAM_PREFIXES):
+            continue
+        normalized[raw_name] = url
+    return normalized
+
+
+def sync_public_viewer(proj_dir):
+    source = os.path.join(proj_dir, "sistema", "visualizador.html")
+    public_dir = os.path.join(proj_dir, "sistema", "web")
+    destination = os.path.join(public_dir, "visualizador.html")
+    if not os.path.exists(source):
+        return False
+    os.makedirs(public_dir, exist_ok=True)
+    temporary = destination + ".tmp"
+    shutil.copy2(source, temporary)
+    os.replace(temporary, destination)
+    return True
+
 
 def get_short_path(long_path):
     try:
@@ -57,28 +141,37 @@ def atualizar_go2rtc_yaml(proj_dir):
     yaml_path = os.path.join(proj_dir, "sistema", "go2rtc", "go2rtc.yaml")
     ffmpeg_exe = os.path.join(proj_dir, "sistema", "go2rtc", "ffmpeg.exe")
     short_ffmpeg = get_short_path(ffmpeg_exe).replace("\\", "\\\\")
-    
+
     global CONFIG
-    streams_dict = CONFIG.get("streams") if (globals().get("CONFIG") and CONFIG.get("streams")) else {
-        "farmacia": "tuya://protect-us.ismartlife.me?device_id=eb227d7fd83d2a794c4gvc&email=willian13258%40gmail.com&password=biscoito123",
-        "farmacia2": "tuya://protect-us.ismartlife.me?device_id=ebb17fa4c624a5e72ec6gk&email=willian13258%40gmail.com&password=biscoito123"
-    }
-    
+    streams_dict = normalize_streams_config((globals().get("CONFIG") or {}).get("streams"))
+    web_auth = normalize_web_auth((globals().get("CONFIG") or {}).get("web_auth"))
+
     streams_lines = []
     live_lines = []
     mjpeg_lines = []
     for name, url in streams_dict.items():
-        streams_lines.append(f'  {name}: "{url}"')
-        live_lines.append(f'  {name}_live: "ffmpeg:{name}#video=h264#hardware"')
-        mjpeg_lines.append(f'  {name}_mjpeg: "ffmpeg:{name}#video=mjpeg#hardware"')
-        
+        streams_lines.append(f"  {json.dumps(name)}: {json.dumps(url)}")
+        live_lines.append(f"  {json.dumps(name + '_live')}: {json.dumps(f'ffmpeg:{name}#video=h264#hardware')}")
+        mjpeg_lines.append(f"  {json.dumps(name + '_mjpeg')}: {json.dumps(f'ffmpeg:{name}#video=mjpeg#hardware')}")
+
     streams_block = "\n".join(streams_lines)
     live_block = "\n".join(live_lines)
     mjpeg_block = "\n".join(mjpeg_lines)
-    
+
     conteudo = f'''api:
   listen: ":1984"
-  static_dir: ".."
+  username: {json.dumps(web_auth["username"])}
+  password: {json.dumps(web_auth["password"])}
+  local_auth: false
+  static_dir: "../web"
+
+exec:
+  allow_paths: [ffmpeg]
+
+rtsp:
+  listen: ":8554"
+  username: {json.dumps(web_auth["username"])}
+  password: {json.dumps(web_auth["password"])}
 
 ffmpeg:
   bin: "{short_ffmpeg}"
@@ -97,8 +190,10 @@ streams:
         os.makedirs(os.path.dirname(yaml_path), exist_ok=True)
         with open(yaml_path, "w", encoding="utf-8") as f:
             f.write(conteudo)
+        sync_public_viewer(proj_dir)
+        return True
     except Exception:
-        pass
+        return False
 
 def verificar_e_baixar_dependencias(proj_dir, silent=False):
     go2rtc_dir = os.path.join(proj_dir, "sistema", "go2rtc")
@@ -107,12 +202,11 @@ def verificar_e_baixar_dependencias(proj_dir, silent=False):
     go2rtc_exe = os.path.join(go2rtc_dir, "go2rtc.exe")
     ffmpeg_exe = os.path.join(go2rtc_dir, "ffmpeg.exe")
     
-    needs_go2rtc = not os.path.exists(go2rtc_exe)
-    needs_ffmpeg = not os.path.exists(ffmpeg_exe)
+    needs_go2rtc = not binary_is_trusted(go2rtc_exe, TRUSTED_BINARY_HASHES["go2rtc.exe"])
+    needs_ffmpeg = not binary_is_trusted(ffmpeg_exe, TRUSTED_BINARY_HASHES["ffmpeg.exe"])
     
     if not needs_go2rtc and not needs_ffmpeg:
-        atualizar_go2rtc_yaml(proj_dir)
-        return True
+        return atualizar_go2rtc_yaml(proj_dir)
         
     go2rtc_url = "https://github.com/AlexxIT/go2rtc/releases/download/v1.9.14/go2rtc_win64.zip"
     ffmpeg_url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
@@ -123,8 +217,9 @@ def verificar_e_baixar_dependencias(proj_dir, silent=False):
                 download_and_extract_go2rtc_silencioso(go2rtc_url, go2rtc_exe, go2rtc_dir)
             if needs_ffmpeg:
                 download_and_extract_ffmpeg_silencioso(ffmpeg_url, ffmpeg_exe, go2rtc_dir)
-            atualizar_go2rtc_yaml(proj_dir)
-            return True
+            require_trusted_binary(go2rtc_exe, "go2rtc.exe")
+            require_trusted_binary(ffmpeg_exe, "ffmpeg.exe")
+            return atualizar_go2rtc_yaml(proj_dir)
         except Exception:
             return False
     else:
@@ -202,6 +297,7 @@ def verificar_e_baixar_dependencias(proj_dir, silent=False):
                             if z.testzip() is not None:
                                 raise Exception("Arquivo go2rtc.zip corrompido ou incompleto.")
                             z.extract("go2rtc.exe", go2rtc_dir)
+                        require_trusted_binary(go2rtc_exe, "go2rtc.exe")
                             
                         try:
                             os.remove(temp_zip)
@@ -247,6 +343,7 @@ def verificar_e_baixar_dependencias(proj_dir, silent=False):
                             with z.open(ffmpeg_path_in_zip) as source_file:
                                 with open(ffmpeg_exe, "wb") as dest_file:
                                     dest_file.write(source_file.read())
+                        require_trusted_binary(ffmpeg_exe, "ffmpeg.exe")
                                     
                         try:
                             os.remove(temp_zip)
@@ -254,7 +351,8 @@ def verificar_e_baixar_dependencias(proj_dir, silent=False):
                             pass
                                     
                 update_gui("Configurando rotas de vídeo e caminhos...", 98)
-                atualizar_go2rtc_yaml(proj_dir)
+                if not atualizar_go2rtc_yaml(proj_dir):
+                    raise Exception("Não foi possível gerar a configuração segura do go2rtc.")
                 update_gui("Instalação concluída com sucesso!", 100)
                 time.sleep(1.0)
                 success[0] = True
@@ -302,6 +400,7 @@ def download_and_extract_go2rtc_silencioso(url, dest_path, go2rtc_dir):
         if z.testzip() is not None:
             raise Exception("Arquivo go2rtc.zip corrompido.")
         z.extract("go2rtc.exe", go2rtc_dir)
+    require_trusted_binary(dest_path, "go2rtc.exe")
     try:
         os.remove(temp_zip)
     except Exception:
@@ -327,6 +426,9 @@ def download_and_extract_ffmpeg_silencioso(url, dest_path, go2rtc_dir):
             with z.open(ffmpeg_path_in_zip) as source_file:
                 with open(dest_path, "wb") as dest_file:
                     dest_file.write(source_file.read())
+        else:
+            raise Exception("ffmpeg.exe não foi encontrado no arquivo ZIP.")
+    require_trusted_binary(dest_path, "ffmpeg.exe")
                     
     try:
         os.remove(temp_zip)
@@ -345,7 +447,7 @@ class SYSTEM_POWER_STATUS(ctypes.Structure):
     ]
 
 # Versão do Sistema (usada para o auto-update)
-VERSION = "4.12"
+VERSION = "4.13"
 
 # Configurações do Projeto
 PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -363,7 +465,7 @@ CONFIG_PATH = os.path.join(PROJ_DIR, "sistema", "config.json")
 # Limpa o arquivo temporário de update da sessão anterior se existir
 # Os arquivos .old sao mantidos como rollback da ultima atualizacao.
 
-def detectar_gdrive_automatico():
+def detectar_gdrive_automatico_legacy():
     import ctypes
     import string
     kernel32 = ctypes.windll.kernel32
@@ -407,7 +509,7 @@ def detectar_gdrive_automatico():
 
 CONFIG_LOCK = threading.Lock()
 
-def carregar_config():
+def carregar_config_legacy():
     global CONFIG_LOCK
     with CONFIG_LOCK:
         hd_detectado = detectar_gdrive_automatico()
@@ -416,10 +518,7 @@ def carregar_config():
         padrao = {
             "gdrive_root": hd_padrao, 
             "bloco_minutos": 30,
-            "streams": {
-                "farmacia": "tuya://protect-us.ismartlife.me?device_id=eb227d7fd83d2a794c4gvc&email=willian13258%40gmail.com&password=biscoito123",
-                "farmacia2": "tuya://protect-us.ismartlife.me?device_id=ebb17fa4c624a5e72ec6gk&email=willian13258%40gmail.com&password=biscoito123"
-            }
+            "streams": {}
         }
         backup_path = CONFIG_PATH + ".bak"
         
@@ -495,7 +594,7 @@ def carregar_config():
         except Exception:
             return padrao
 
-def salvar_config_locked(config):
+def salvar_config_locked_legacy(config):
     try:
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=4)
@@ -512,10 +611,7 @@ def salvar_config_locked(config):
                 shared_path = os.path.join(gdrive_root, "config_compartilhado.json")
                 shared_data = {
                     "bloco_minutos": config.get("bloco_minutos", 30),
-                    "streams": config.get("streams", {
-                        "farmacia": "tuya://protect-us.ismartlife.me?device_id=eb227d7fd83d2a794c4gvc&email=willian13258%40gmail.com&password=biscoito123",
-                        "farmacia2": "tuya://protect-us.ismartlife.me?device_id=ebb17fa4c624a5e72ec6gk&email=willian13258%40gmail.com&password=biscoito123"
-                    })
+                    "streams": normalize_streams_config(config.get("streams"))
                 }
                 with open(shared_path, "w", encoding="utf-8") as sf:
                     json.dump(shared_data, sf, indent=4)
@@ -524,10 +620,273 @@ def salvar_config_locked(config):
     except Exception:
         pass
 
-def salvar_config(config):
+def salvar_config_legacy(config):
     global CONFIG_LOCK
     with CONFIG_LOCK:
         salvar_config_locked(config)
+
+def get_volume_identity(path):
+    drive, _ = os.path.splitdrive(os.path.abspath(path or ""))
+    if not drive:
+        return None
+    try:
+        volume_name = ctypes.create_unicode_buffer(1024)
+        filesystem_name = ctypes.create_unicode_buffer(1024)
+        serial = ctypes.c_ulong()
+        maximum_component_length = ctypes.c_ulong()
+        filesystem_flags = ctypes.c_ulong()
+        ok = ctypes.windll.kernel32.GetVolumeInformationW(
+            ctypes.c_wchar_p(drive + "\\"),
+            volume_name,
+            len(volume_name),
+            ctypes.byref(serial),
+            ctypes.byref(maximum_component_length),
+            ctypes.byref(filesystem_flags),
+            filesystem_name,
+            len(filesystem_name),
+        )
+        if not ok:
+            return None
+        return {"serial": f"{serial.value:08X}", "label": volume_name.value.upper()}
+    except Exception:
+        return None
+
+
+def normalize_storage_identity(value):
+    if not isinstance(value, dict):
+        return None
+    serial = value.get("serial")
+    label = value.get("label", "")
+    if not isinstance(serial, str) or not re.fullmatch(r"[0-9A-Fa-f]{8}", serial):
+        return None
+    return {
+        "serial": serial.upper(),
+        "label": label.upper() if isinstance(label, str) else "",
+    }
+
+
+def storage_path_matches_identity(path, expected_identity):
+    if not path:
+        return False
+    expected = normalize_storage_identity(expected_identity)
+    if expected is None:
+        return os.path.exists(path)
+    observed = get_volume_identity(path)
+    return bool(observed and observed.get("serial") == expected["serial"])
+
+
+def detectar_gdrive_automatico(expected_identity=None):
+    import string
+
+    expected = normalize_storage_identity(expected_identity)
+    kernel32 = ctypes.windll.kernel32
+    old_mode = kernel32.SetErrorMode(1)
+    candidates = []
+    try:
+        for letter in string.ascii_uppercase:
+            drive_path = f"{letter}:\\"
+            drive_type = kernel32.GetDriveTypeW(ctypes.c_wchar_p(drive_path))
+            if drive_type not in (2, 3):
+                continue
+            identity = get_volume_identity(drive_path)
+            target_folder = os.path.join(drive_path, "farmacia camera")
+            if expected is not None:
+                if identity and identity.get("serial") == expected["serial"]:
+                    return target_folder
+                continue
+            if identity and identity.get("label") == "FARMACIA":
+                candidates.append(target_folder)
+            elif os.path.exists(target_folder):
+                candidates.append(target_folder)
+    except Exception:
+        return None
+    finally:
+        kernel32.SetErrorMode(old_mode)
+    return candidates[0] if candidates else None
+
+
+def normalize_trusted_update_hashes(value):
+    normalized = {}
+    if not isinstance(value, dict):
+        return normalized
+    for version, hashes in value.items():
+        if not isinstance(version, str) or not isinstance(hashes, dict):
+            continue
+        manager_hash = hashes.get("manager_sha256")
+        viewer_hash = hashes.get("viewer_sha256")
+        if all(
+            isinstance(item, str) and re.fullmatch(r"[0-9A-Fa-f]{64}", item)
+            for item in (manager_hash, viewer_hash)
+        ):
+            normalized[version] = {
+                "manager_sha256": manager_hash.lower(),
+                "viewer_sha256": viewer_hash.lower(),
+            }
+    return normalized
+
+
+def normalize_retention_days(value):
+    if isinstance(value, bool):
+        return 90
+    try:
+        days = int(value)
+    except (TypeError, ValueError):
+        return 90
+    return days if 30 <= days <= 3650 else 90
+
+
+def write_json_atomically(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temporary = f"{path}.{os.getpid()}.tmp"
+    with open(temporary, "w", encoding="utf-8") as file_obj:
+        json.dump(data, file_obj, indent=4)
+        file_obj.flush()
+        try:
+            os.fsync(file_obj.fileno())
+        except Exception:
+            pass
+    os.replace(temporary, path)
+
+
+def load_json_file(path):
+    with open(path, "r", encoding="utf-8") as file_obj:
+        return json.load(file_obj)
+
+
+def carregar_config():
+    with CONFIG_LOCK:
+        defaults = {
+            "gdrive_root": "",
+            "storage_identity": None,
+            "bloco_minutos": 30,
+            "streams": {},
+            "web_auth": generate_web_auth(),
+            "trusted_update_hashes": {},
+            "retention_days": 90,
+            "emergency_cleanup_enabled": False,
+        }
+        backup_path = CONFIG_PATH + ".bak"
+        config = None
+        try:
+            config = load_json_file(CONFIG_PATH)
+        except Exception:
+            try:
+                if os.path.exists(backup_path):
+                    config = load_json_file(backup_path)
+            except Exception:
+                config = None
+        if not isinstance(config, dict):
+            config = {}
+
+        updated = False
+        configured_root = config.get("gdrive_root") if isinstance(config.get("gdrive_root"), str) else ""
+        configured_identity = normalize_storage_identity(config.get("storage_identity"))
+        if configured_root and os.path.exists(configured_root):
+            observed_identity = get_volume_identity(configured_root)
+            if configured_identity is None and observed_identity:
+                configured_identity = observed_identity
+                config["storage_identity"] = observed_identity
+                updated = True
+            elif configured_identity and not storage_path_matches_identity(configured_root, configured_identity):
+                configured_root = ""
+                config["gdrive_root"] = ""
+                updated = True
+
+        detected_root = detectar_gdrive_automatico(configured_identity)
+        if detected_root:
+            try:
+                shared_path = os.path.join(detected_root, "config_compartilhado.json")
+                shared_config = load_json_file(shared_path) if os.path.exists(shared_path) else None
+                observed_identity = get_volume_identity(detected_root)
+                shared_identity = normalize_storage_identity(
+                    shared_config.get("storage_identity") if isinstance(shared_config, dict) else None
+                )
+                if isinstance(shared_config, dict) and (
+                    shared_identity is None
+                    or (observed_identity and shared_identity["serial"] == observed_identity["serial"])
+                ):
+                    shared_streams = normalize_streams_config(shared_config.get("streams"))
+                    if shared_streams:
+                        config["streams"] = shared_streams
+                        updated = True
+                    if shared_config.get("bloco_minutos") in (10, 15, 30):
+                        config["bloco_minutos"] = shared_config["bloco_minutos"]
+                        updated = True
+                    if configured_identity is None and observed_identity:
+                        configured_identity = observed_identity
+                        config["storage_identity"] = observed_identity
+                        updated = True
+            except Exception:
+                pass
+
+        if not configured_root and detected_root:
+            configured_root = detected_root
+            config["gdrive_root"] = configured_root
+            updated = True
+        if configured_root and configured_identity is None:
+            observed_identity = get_volume_identity(configured_root)
+            if observed_identity:
+                config["storage_identity"] = observed_identity
+                updated = True
+        if config.get("bloco_minutos") not in (10, 15, 30):
+            config["bloco_minutos"] = defaults["bloco_minutos"]
+            updated = True
+        streams = normalize_streams_config(config.get("streams"))
+        if config.get("streams") != streams:
+            config["streams"] = streams
+            updated = True
+        web_auth = normalize_web_auth(config.get("web_auth"))
+        if config.get("web_auth") != web_auth:
+            config["web_auth"] = web_auth
+            updated = True
+        trusted_updates = normalize_trusted_update_hashes(config.get("trusted_update_hashes"))
+        if config.get("trusted_update_hashes") != trusted_updates:
+            config["trusted_update_hashes"] = trusted_updates
+            updated = True
+        retention_days = normalize_retention_days(config.get("retention_days"))
+        if config.get("retention_days") != retention_days:
+            config["retention_days"] = retention_days
+            updated = True
+        emergency_cleanup_enabled = config.get("emergency_cleanup_enabled") is True
+        if config.get("emergency_cleanup_enabled") is not emergency_cleanup_enabled:
+            config["emergency_cleanup_enabled"] = emergency_cleanup_enabled
+            updated = True
+        if "gdrive_root" not in config:
+            config["gdrive_root"] = defaults["gdrive_root"]
+            updated = True
+        if updated or not os.path.exists(CONFIG_PATH):
+            salvar_config_locked(config)
+        return config
+
+
+def salvar_config_locked(config):
+    try:
+        config["streams"] = normalize_streams_config(config.get("streams"))
+        config["web_auth"] = normalize_web_auth(config.get("web_auth"))
+        config["storage_identity"] = normalize_storage_identity(config.get("storage_identity"))
+        config["trusted_update_hashes"] = normalize_trusted_update_hashes(config.get("trusted_update_hashes"))
+        config["retention_days"] = normalize_retention_days(config.get("retention_days"))
+        config["emergency_cleanup_enabled"] = config.get("emergency_cleanup_enabled") is True
+        write_json_atomically(CONFIG_PATH, config)
+        shutil.copy2(CONFIG_PATH, CONFIG_PATH + ".bak")
+
+        gdrive_root = config.get("gdrive_root")
+        if storage_path_matches_identity(gdrive_root, config.get("storage_identity")):
+            shared_path = os.path.join(gdrive_root, "config_compartilhado.json")
+            write_json_atomically(shared_path, {
+                "bloco_minutos": config.get("bloco_minutos", 30),
+                "streams": config["streams"],
+                "storage_identity": config.get("storage_identity"),
+            })
+        return True
+    except Exception:
+        return False
+
+
+def salvar_config(config):
+    with CONFIG_LOCK:
+        return salvar_config_locked(config)
+
 
 CONFIG = carregar_config()
 GDRIVE_ROOT = CONFIG.get("gdrive_root") or ""
@@ -1364,6 +1723,7 @@ class CameraManagerApp:
         self._smart_snapshot = {"status": "pending", "drives": [], "error": None}
         self._power_snapshot = {"status": "unknown", "battery_percent": None}
         self.go2rtc_restart_count = 0
+        self._go2rtc_process = None
         self.recording_started_at = {}
         self.stream_bytes_written = {}
         self.stream_last_data_at = {}
@@ -1632,6 +1992,10 @@ class CameraManagerApp:
                 w._recalc_camera_sizes()
 
     def parse_streams(self):
+        configured_streams = normalize_streams_config((globals().get("CONFIG") or {}).get("streams"))
+        if configured_streams:
+            return list(configured_streams.keys())
+
         yaml_path = os.path.join(PROJ_DIR, "sistema", "go2rtc", "go2rtc.yaml")
         streams = []
         if not os.path.exists(yaml_path):
@@ -1650,6 +2014,11 @@ class CameraManagerApp:
                     if line.startswith(" ") or line.startswith("\t"):
                         if ":" in line_strip:
                             name = line_strip.split(":")[0].strip()
+                            if name.startswith('"'):
+                                try:
+                                    name = json.loads(name)
+                                except Exception:
+                                    name = name.strip('"')
                             if name and not name.startswith("#"):
                                 streams.append(name)
                     else:
@@ -2481,18 +2850,27 @@ class CameraManagerApp:
                 go2rtc_ok = self.check_process_go2rtc()
             
             # 2. Verifica se o HD Externo está conectado (ou se foi conectado agora)
-            gdrive_ok = os.path.exists(GDRIVE_ROOT)
+            gdrive_ok = storage_path_matches_identity(
+                GDRIVE_ROOT,
+                CONFIG.get("storage_identity"),
+            )
             if not gdrive_ok:
-                gdrive_detectado = detectar_gdrive_automatico()
+                gdrive_detectado = detectar_gdrive_automatico(
+                    CONFIG.get("storage_identity"),
+                )
                 if gdrive_detectado:
                     GDRIVE_ROOT = gdrive_detectado
                     CONFIG["gdrive_root"] = GDRIVE_ROOT
+                    CONFIG["storage_identity"] = get_volume_identity(GDRIVE_ROOT)
                     salvar_config(CONFIG)
                     try:
                         os.makedirs(GDRIVE_ROOT, exist_ok=True)
                     except Exception:
                         pass
-                    gdrive_ok = os.path.exists(GDRIVE_ROOT)
+                    gdrive_ok = storage_path_matches_identity(
+                        GDRIVE_ROOT,
+                        CONFIG.get("storage_identity"),
+                    )
                     if gdrive_ok and not self.silent:
                         self.root.after(0, lambda: self.add_log(f"HD FARMACIA detectado dinamicamente em: {GDRIVE_ROOT}"))
                         self.root.after(0, lambda: self.entry_path.delete(0, tk.END))
@@ -3259,8 +3637,8 @@ class CameraManagerApp:
         return lines
 
     def executar_limpeza_emergencial(self):
-        """Libera espaço no HD externo deletando pastas mais antigas se o espaço livre for inferior a 15GB"""
-        if not os.path.exists(GDRIVE_ROOT):
+        """Aplica retencao aprovada apenas quando a limpeza emergencial foi habilitada."""
+        if not storage_path_matches_identity(GDRIVE_ROOT, CONFIG.get("storage_identity")):
             return
             
         try:
@@ -3268,7 +3646,18 @@ class CameraManagerApp:
             free_gb = free / (1024 ** 3)
             
             if free_gb >= 15.0:
+                self._emergency_cleanup_warning_active = False
                 return  # Espaço confortável
+
+            if not CONFIG.get("emergency_cleanup_enabled", False):
+                if not getattr(self, "_emergency_cleanup_warning_active", False):
+                    self.add_log(
+                        "[HEALTH][WARNING][HD_LOW_SPACE] HD abaixo de 15 GB; exclusao emergencial esta desativada. "
+                        "A gravacao preservara o acervo e usara o fallback local se necessario.",
+                        "tag_warn",
+                    )
+                    self._emergency_cleanup_warning_active = True
+                return
                 
             if not self.silent:
                 self.add_log(f"🚨 [ESPAÇO CRÍTICO] Apenas {free_gb:.2f} GB livres no HD! Iniciando limpeza emergencial...")
@@ -3290,12 +3679,23 @@ class CameraManagerApp:
                 return
                 
             datas_ordenadas = sorted(list(pastas_data))
-            hoje_str = datetime.now().strftime("%Y-%m-%d")
-            datas_deletaveis = [d for d in datas_ordenadas if d != hoje_str]
+            retention_days = normalize_retention_days(CONFIG.get("retention_days"))
+            limite_data = (datetime.now() - timedelta(days=retention_days)).date()
+            datas_deletaveis = []
+            for folder_name in datas_ordenadas:
+                try:
+                    folder_date = datetime.strptime(folder_name, "%Y-%m-%d").date()
+                except ValueError:
+                    continue
+                if folder_date < limite_data:
+                    datas_deletaveis.append(folder_name)
             
             if not datas_deletaveis:
                 if not self.silent:
-                    self.add_log("⚠️ Apenas gravações do dia de hoje estão disponíveis. Abortando exclusão por segurança.")
+                    self.add_log(
+                        f"⚠️ Nenhuma gravação mais antiga que {retention_days} dias está elegível. "
+                        "Abortando exclusão por segurança."
+                    )
                 return
                 
             for data_deletar in datas_deletaveis:
@@ -3409,26 +3809,38 @@ class CameraManagerApp:
         # 4. Encerra o aplicativo
         self.request_tk_shutdown()
 
-    def check_process_go2rtc(self):
+    def managed_go2rtc_running(self):
+        process = getattr(self, "_go2rtc_process", None)
         try:
-            output = subprocess.check_output(
-                ["tasklist", "/FI", "IMAGENAME eq go2rtc.exe"],
-                text=True,
-                timeout=5,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            process_exists = "go2rtc.exe" in output
+            return process is not None and process.poll() is None
         except Exception:
-            process_exists = False
-            
-        if not process_exists:
+            return False
+
+    def stop_managed_go2rtc(self):
+        """Encerra somente a ponte criada por esta instância do NVR."""
+        process = getattr(self, "_go2rtc_process", None)
+        if process is None:
+            return
+        try:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+        except Exception:
+            pass
+        finally:
+            self._go2rtc_process = None
+            self.go2rtc_api_fails = 0
+
+    def check_process_go2rtc(self):
+        if not self.managed_go2rtc_running():
             self.go2rtc_api_fails = 0
             return False
-            
-        # Watchdog de resposta HTTP da API do go2rtc (detecção de travamento zumbi)
-        if not hasattr(self, "go2rtc_api_fails"):
-            self.go2rtc_api_fails = 0
-            
+
+        # Watchdog de resposta HTTP da API do go2rtc (detecção de travamento zumbi).
         try:
             req = urllib.request.Request("http://127.0.0.1:1984/api/streams")
             with urllib.request.urlopen(req, timeout=2) as response:
@@ -3436,22 +3848,12 @@ class CameraManagerApp:
                     self.go2rtc_api_fails = 0
                     return True
         except Exception:
-            self.go2rtc_api_fails += 1
+            self.go2rtc_api_fails = getattr(self, "go2rtc_api_fails", 0) + 1
             if self.go2rtc_api_fails >= 3:
                 self.add_log("[HEALTH][WARNING][GO2RTC_WATCHDOG] Ponte RTSP sem resposta; reiniciando.", "tag_warn")
-                try:
-                    subprocess.run(
-                        ["taskkill", "/F", "/IM", "go2rtc.exe"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=10,
-                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                    )
-                except Exception:
-                    pass
-                self.go2rtc_api_fails = 0
+                self.stop_managed_go2rtc()
                 return False
-                
+
         return True
 
     def probe_go2rtc_api(self, timeout=2.0):
@@ -3472,7 +3874,7 @@ class CameraManagerApp:
                 go2rtc_dir = os.path.dirname(GO2RTC_EXE)
                 env = os.environ.copy()
                 env["PATH"] = go2rtc_dir + os.pathsep + env.get("PATH", "")
-                subprocess.Popen(
+                self._go2rtc_process = subprocess.Popen(
                     [GO2RTC_EXE],
                     cwd=go2rtc_dir,
                     env=env,
@@ -3917,7 +4319,10 @@ class CameraManagerApp:
             return None, ""
 
         gdrive_dir = self.get_gdrive_dir(stream_name, index)
-        if self.storage_path_is_writable(gdrive_dir):
+        if (
+            storage_path_matches_identity(gdrive_dir, CONFIG.get("storage_identity"))
+            and self.storage_path_is_writable(gdrive_dir)
+        ):
             previous = self.recording_destinations.get(stream_name)
             self.recording_destinations[stream_name] = "hd"
             if previous == "backup":
@@ -3994,7 +4399,7 @@ class CameraManagerApp:
         while self.running_sync:
             time.sleep(30)
             
-            if not os.path.exists(GDRIVE_ROOT):
+            if not storage_path_matches_identity(GDRIVE_ROOT, CONFIG.get("storage_identity")):
                 continue
                 
             backup_dir = os.path.join(PROJ_DIR, "sistema", "backup_gravacoes")
@@ -4576,6 +4981,7 @@ class CameraManagerApp:
                 self.root.after(0, lambda: self.add_log("Inicialização concluída em segundo plano."))
                 self.root.after(0, lambda: self.set_button_state("RECORDING"))
         except Exception as e:
+            self.add_log(f"[STARTUP][ERROR] Falha ao iniciar gravacao: {str(e)}", "tag_erro")
             if not self.silent:
                 self.root.after(0, lambda: self.add_log(f"ERRO ao iniciar gravação: {str(e)}"))
                 self.root.after(0, lambda: messagebox.showerror("Erro ao Iniciar", f"Não foi possível iniciar o serviço:\n{str(e)}"))
@@ -4679,26 +5085,17 @@ class CameraManagerApp:
 
             # 3. A ponte so e encerrada depois de as gravacoes locais terem a
             # oportunidade de fechar e publicar seus arquivos.
-            try:
-                subprocess.run(
-                    ["taskkill", "/F", "/IM", "go2rtc.exe"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=15,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
-            except Exception:
-                pass
+            self.stop_managed_go2rtc()
             self.limpar_processos_ffmpeg_zumbis(sync=True)
 
     def click_abrir_pasta(self):
-        if not os.path.exists(GDRIVE_ROOT):
+        if storage_path_matches_identity(GDRIVE_ROOT, CONFIG.get("storage_identity")):
             try:
                 os.makedirs(GDRIVE_ROOT, exist_ok=True)
             except Exception:
                 pass
                 
-        if os.path.exists(GDRIVE_ROOT):
+        if storage_path_matches_identity(GDRIVE_ROOT, CONFIG.get("storage_identity")):
             self.add_log("Abrindo pasta de câmeras do HD FARMACIA...")
             os.startfile(GDRIVE_ROOT)
             self.flash_button(self.btn_open_folder, "✔️ Pasta Aberta!", "#10B981")
@@ -5003,10 +5400,13 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         finally:
             self._scan_lock.release()
 
-    def rotacionar_videos_hd(self, hd_root, max_days=90):
+    def rotacionar_videos_hd(self, hd_root, max_days=None):
         try:
-            if not hd_root or not os.path.exists(hd_root):
+            if not storage_path_matches_identity(hd_root, CONFIG.get("storage_identity")):
                 return
+            max_days = normalize_retention_days(
+                CONFIG.get("retention_days") if max_days is None else max_days
+            )
             limite_data = datetime.now() - timedelta(days=max_days)
             removidos = 0
             
@@ -5140,7 +5540,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             ("CAMERA 4 FARMACIA2_MJPEG", "camera 2")
         ]
         
-        if os.path.exists(GDRIVE_ROOT):
+        if storage_path_matches_identity(GDRIVE_ROOT, CONFIG.get("storage_identity")):
             for pasta_origem_nome, pasta_destino_nome in mapa_fusao:
                 origem_dir = os.path.join(GDRIVE_ROOT, pasta_origem_nome)
                 destino_dir = os.path.join(GDRIVE_ROOT, pasta_destino_nome)
@@ -5328,7 +5728,17 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             if match:
                 online_version = match.group(1)
                 if self.is_version_newer(online_version, VERSION):
-                    self.add_log(f"Nova versao v{online_version} encontrada! (Versao local: v{VERSION})")
+                    trusted_updates = normalize_trusted_update_hashes(
+                        CONFIG.get("trusted_update_hashes")
+                    )
+                    if online_version not in trusted_updates:
+                        self.add_log(
+                            f"Atualizacao v{online_version} encontrada, mas sem hashes aprovados; "
+                            "a instalacao automatica foi bloqueada por seguranca.",
+                            "tag_warn",
+                        )
+                        return
+                    self.add_log(f"Nova versao v{online_version} encontrada e aprovada. (Versao local: v{VERSION})")
                     self.root.after(0, lambda: self.prompt_update(online_version, url_gerenciador, url_visualizador))
             else:
                 self.add_log("Nao foi possivel identificar a versao remota.")
@@ -5359,7 +5769,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             raise Exception("Atualizacao excede o tamanho maximo permitido")
         return content
 
-    def validate_update_payloads(self, expected_version, manager_content, viewer_content):
+    def validate_update_payloads(self, expected_version, manager_content, viewer_content, trusted_hashes):
         import ast
         import hashlib
         import re
@@ -5386,7 +5796,17 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             if marker not in viewer_text:
                 raise Exception(f"Visualizador invalido: marcador ausente ({marker})")
 
-        return hashlib.sha256(manager_content).hexdigest()
+        trusted_hashes = normalize_trusted_update_hashes({expected_version: trusted_hashes}).get(expected_version)
+        if not trusted_hashes:
+            raise Exception("Atualizacao sem hashes SHA-256 previamente aprovados")
+
+        manager_hash = hashlib.sha256(manager_content).hexdigest()
+        viewer_hash = hashlib.sha256(viewer_content).hexdigest()
+        if manager_hash != trusted_hashes["manager_sha256"]:
+            raise Exception("SHA-256 do arquivo principal nao corresponde ao valor aprovado")
+        if viewer_hash != trusted_hashes["viewer_sha256"]:
+            raise Exception("SHA-256 do visualizador nao corresponde ao valor aprovado")
+        return manager_hash
 
     def write_update_stage(self, filepath, content):
         with open(filepath, "wb") as staged_file:
@@ -5419,9 +5839,19 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         loops_paused = False
         
         try:
+            trusted_hashes = normalize_trusted_update_hashes(
+                CONFIG.get("trusted_update_hashes")
+            ).get(online_version)
+            if not trusted_hashes:
+                raise Exception("Atualizacao bloqueada: a versao nao possui hashes aprovados localmente")
             g_content = self.download_update_payload(url_gerenciador, 5 * 1024 * 1024)
             v_content = self.download_update_payload(url_visualizador, 2 * 1024 * 1024)
-            update_hash = self.validate_update_payloads(online_version, g_content, v_content)
+            update_hash = self.validate_update_payloads(
+                online_version,
+                g_content,
+                v_content,
+                trusted_hashes,
+            )
 
             self.write_update_stage(gerenciador_temp, g_content)
             self.write_update_stage(visualizador_temp, v_content)
@@ -5443,6 +5873,8 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             backups_ready = True
             os.replace(gerenciador_temp, dest_gerenciador)
             os.replace(visualizador_temp, dest_visualizador)
+            if not sync_public_viewer(PROJ_DIR):
+                raise Exception("Nao foi possivel publicar o visualizador atualizado")
             
             self.add_log("Sistema atualizado com sucesso!")
             self.root.after(0, lambda: messagebox.showinfo("Atualizado", "O sistema foi atualizado com sucesso para a nova versao!\n\nO aplicativo sera reiniciado agora."))
@@ -5469,6 +5901,10 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
                         self.restore_update_backup(backup_path, destination_path)
                     except Exception as rollback_error:
                         rollback_errors.append(str(rollback_error))
+                try:
+                    sync_public_viewer(PROJ_DIR)
+                except Exception as rollback_error:
+                    rollback_errors.append(str(rollback_error))
 
             if rollback_errors:
                 self.add_log(f"ERRO CRITICO no rollback da atualizacao: {'; '.join(rollback_errors)}")
@@ -5538,7 +5974,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
 
         # 3. Armazenamento principal
         log.append("\n--- [3] ARMAZENAMENTO PRINCIPAL ---")
-        if os.path.exists(GDRIVE_ROOT):
+        if storage_path_matches_identity(GDRIVE_ROOT, CONFIG.get("storage_identity")):
             log.append(f" - Pasta Raiz Câmeras: Encontrada ({GDRIVE_ROOT})")
             
             for idx, stream in enumerate(self.streams):
@@ -5640,7 +6076,9 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             log.append(f" - Gravador {stream.upper()}: {'RODANDO' if c_running else 'PARADO'}")
         
         log.append(f"\n--- [3] ARMAZENAMENTO PRINCIPAL ---")
-        log.append(f" - Disponível: {'SIM' if os.path.exists(GDRIVE_ROOT) else 'NÃO'}")
+        log.append(
+            f" - Disponível: {'SIM' if storage_path_matches_identity(GDRIVE_ROOT, CONFIG.get('storage_identity')) else 'NÃO'}"
+        )
         
         log.append(f"\n--- [4] AMBIENTE ---")
         log.append(f" - Python: {sys.version}")
