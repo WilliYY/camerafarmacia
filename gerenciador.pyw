@@ -7,7 +7,13 @@ try:
 except ImportError:
     try:
         # Tenta instalar silenciosamente a biblioteca Pillow
-        subprocess.run([sys.executable, "-m", "pip", "install", "Pillow"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "Pillow"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=120,
+        )
         from PIL import Image, ImageTk
     except Exception as e:
         import ctypes
@@ -28,6 +34,7 @@ import socket
 import urllib.request
 import json
 import threading
+import queue
 import time
 import ctypes
 import shutil
@@ -329,16 +336,16 @@ def download_and_extract_ffmpeg_silencioso(url, dest_path, go2rtc_dir):
 # Estrutura para obter status de energia e bateria do Windows (queda de energia)
 class SYSTEM_POWER_STATUS(ctypes.Structure):
     _fields_ = [
-        ("ACLineStatus", ctypes.c_byte),
-        ("BatteryFlag", ctypes.c_byte),
-        ("BatteryLifePercent", ctypes.c_byte),
-        ("SystemStatusFlag", ctypes.c_byte),
+        ("ACLineStatus", ctypes.c_ubyte),
+        ("BatteryFlag", ctypes.c_ubyte),
+        ("BatteryLifePercent", ctypes.c_ubyte),
+        ("SystemStatusFlag", ctypes.c_ubyte),
         ("BatteryLifeTime", ctypes.c_ulong),
         ("BatteryFullLifeTime", ctypes.c_ulong),
     ]
 
 # Versão do Sistema (usada para o auto-update)
-VERSION = "4.9"
+VERSION = "4.10"
 
 # Configurações do Projeto
 PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -354,12 +361,7 @@ os.makedirs(os.path.join(PROJ_DIR, "sistema", "gravando_temp"), exist_ok=True)
 CONFIG_PATH = os.path.join(PROJ_DIR, "sistema", "config.json")
 
 # Limpa o arquivo temporário de update da sessão anterior se existir
-old_file = os.path.join(PROJ_DIR, "gerenciador.pyw.old")
-if os.path.exists(old_file):
-    try:
-        os.remove(old_file)
-    except Exception:
-        pass
+# Os arquivos .old sao mantidos como rollback da ultima atualizacao.
 
 def detectar_gdrive_automatico():
     import ctypes
@@ -372,7 +374,7 @@ def detectar_gdrive_automatico():
         for letter in string.ascii_uppercase:
             drive_path = f"{letter}:\\"
             drive_type = kernel32.GetDriveTypeW(ctypes.c_wchar_p(drive_path))
-            if drive_type <= 1:
+            if drive_type not in (2, 3):
                 continue
             volumeNameBuffer = ctypes.create_unicode_buffer(1024)
             rc = kernel32.GetVolumeInformationW(
@@ -398,10 +400,10 @@ def detectar_gdrive_automatico():
     finally:
         kernel32.SetErrorMode(old_mode)
     
-    # Fallback padrão
-    if os.path.exists("D:\\"):
-        return r"D:\farmacia camera"
-    return r"D:\farmacia camera"
+    # Nao escolhe uma unidade arbitraria. Em um PC novo, o destino fica
+    # pendente ate encontrar o volume FARMACIA, uma pasta existente ou o
+    # usuario configurar explicitamente o caminho.
+    return None
 
 CONFIG_LOCK = threading.Lock()
 
@@ -409,7 +411,7 @@ def carregar_config():
     global CONFIG_LOCK
     with CONFIG_LOCK:
         hd_detectado = detectar_gdrive_automatico()
-        hd_padrao = hd_detectado if hd_detectado else r"D:\farmacia camera"
+        hd_padrao = hd_detectado or ""
         
         padrao = {
             "gdrive_root": hd_padrao, 
@@ -528,47 +530,30 @@ def salvar_config(config):
         salvar_config_locked(config)
 
 CONFIG = carregar_config()
-GDRIVE_ROOT = CONFIG.get("gdrive_root", r"D:\farmacia camera")
+GDRIVE_ROOT = CONFIG.get("gdrive_root") or ""
 
-def garantir_limite_backup_local(backup_dir, max_size_bytes=1024*1024*1024):
+LOCAL_STORAGE_RESERVE_BYTES = 5 * 1024 * 1024 * 1024
+HEALTH_CHECK_INTERVAL_SECONDS = 60
+HEALTH_HARDWARE_CACHE_SECONDS = 30 * 60
+STARTUP_LOG_LIMIT = 500
+
+
+def garantir_limite_backup_local(backup_dir, min_free_bytes=LOCAL_STORAGE_RESERVE_BYTES):
+    """Informa se ha reserva local sem apagar gravacoes ainda nao sincronizadas."""
     try:
-        if not os.path.exists(backup_dir):
-            return
-        
-        arquivos = []
-        tamanho_total = 0
-        for root_dir, _, files in os.walk(backup_dir):
-            for f in files:
-                if f.endswith((".mp4", ".ts")):
-                    filepath = os.path.join(root_dir, f)
-                    try:
-                        sz = os.path.getsize(filepath)
-                        mtime = os.path.getmtime(filepath)
-                        arquivos.append((filepath, sz, mtime))
-                        tamanho_total += sz
-                    except Exception:
-                        pass
-        
-        if tamanho_total <= max_size_bytes:
-            return
-            
-        # Ordena por mtime crescente (mais antigos primeiro)
-        arquivos.sort(key=lambda x: x[2])
-        
-        for filepath, sz, _ in arquivos:
-            if tamanho_total <= max_size_bytes:
-                break
-            try:
-                os.remove(filepath)
-                tamanho_total -= sz
-                # Tenta apagar a pasta pai se ficou vazia
-                parent_dir = os.path.dirname(filepath)
-                if not os.listdir(parent_dir):
-                    os.rmdir(parent_dir)
-            except Exception:
-                pass
+        os.makedirs(backup_dir, exist_ok=True)
+        _, _, free_bytes = shutil.disk_usage(backup_dir)
+        return {
+            "ok": free_bytes >= min_free_bytes,
+            "free_bytes": free_bytes,
+            "reserve_bytes": min_free_bytes,
+        }
     except Exception:
-        pass
+        return {
+            "ok": False,
+            "free_bytes": 0,
+            "reserve_bytes": min_free_bytes,
+        }
 
 # Cores do Tema Escuro Premium
 BG_COLOR = "#0D0E12"       # Fundo principal cinza escuro azulado
@@ -1062,7 +1047,12 @@ class LiveCameraWidget(tk.Frame):
 
     def open_recordings_folder(self):
         try:
-            folder_path = os.path.join(GDRIVE_ROOT, self.stream_name)
+            if self.stream_name not in self.app.streams:
+                raise Exception("camera nao encontrada na configuracao")
+            stream_index = self.app.streams.index(self.stream_name)
+            folder_path = self.app.get_gdrive_dir(self.stream_name, stream_index)
+            if not folder_path:
+                raise Exception("destino do HD ainda nao foi configurado")
             os.makedirs(folder_path, exist_ok=True)
             os.startfile(folder_path)
             self.app.add_log(f"Abrindo pasta de gravações da {self.stream_name}: {folder_path}")
@@ -1100,9 +1090,27 @@ class CameraManagerApp:
         # Variáveis de Gravação em Memória (NVR Integrado)
         self.recording_active = {}
         self.recording_threads = {}
+        self.recording_destinations = {}
         self.active_connections = {}
         self.reconnect_failures = {}
         self.status_lock = threading.Lock()
+        self._log_lock = threading.Lock()
+        self._ui_log_queue = queue.Queue(maxsize=1000)
+        self._external_log_queue = queue.Queue(maxsize=500)
+        self._stop_lock = threading.Lock()
+        self._scan_lock = threading.Lock()
+        self._scan_state_path = os.path.join(LOGS_DIR, "integrity_scan_state.json")
+        self._health_lock = threading.Lock()
+        self._health_snapshot = None
+        self._health_issue_keys = set()
+        self._last_health_check = 0.0
+        self._last_go2rtc_ok = False
+        self._usb_report_cache = None
+        self._usb_report_cache_time = 0.0
+        self._smart_snapshot = {"status": "pending", "drives": [], "error": None}
+        self._power_snapshot = {"status": "unknown", "battery_percent": None}
+        self.go2rtc_restart_count = 0
+        self.recording_started_at = {}
         self.alerted_duplicates = {} # Evita exibir alerta popup repetidamente
         
         # Cache de performance para evitar chamadas repetidas
@@ -1130,6 +1138,9 @@ class CameraManagerApp:
         
         self.setup_styles()
         self.create_widgets()
+        self.root.after(200, self.drain_ui_log_queue)
+        self._external_log_thread = threading.Thread(target=self.external_log_writer_loop, daemon=True)
+        self._external_log_thread.start()
         
         # Inicializa a máquina de estados do botão e animação
         self.button_state = "STOPPED"
@@ -1209,12 +1220,12 @@ class CameraManagerApp:
             logs_to_flush = self._startup_logs
             self._startup_logs = []
             for msg_item in logs_to_flush:
-                self.add_log(msg_item)
+                self._append_to_log_widget(msg_item, self.infer_log_tag(msg_item))
                 
         self.add_log("Janela restaurada a pedido do usuário.")
 
     def limpar_arquivos_temporarios_orfaos(self):
-        """Limpa arquivos temporários inacabados (.ts ou .tmp) de execuções anteriores na pasta gravando_temp"""
+        """Remove apenas temporarios vazios; videos com dados ficam para recuperacao."""
         temp_dir = os.path.join(PROJ_DIR, "sistema", "gravando_temp")
         if not os.path.exists(temp_dir):
             return
@@ -1222,56 +1233,84 @@ class CameraManagerApp:
         try:
             count = 0
             size = 0
+            preserved = 0
             for root_dir, _, files in os.walk(temp_dir):
                 for f in files:
                     if f.endswith((".ts", ".tmp")):
                         file_path = os.path.join(root_dir, f)
                         try:
-                            size += os.path.getsize(file_path)
-                            os.remove(file_path)
-                            count += 1
+                            file_size = os.path.getsize(file_path)
+                            if file_size == 0 or f.endswith(".tmp"):
+                                size += file_size
+                                os.remove(file_path)
+                                count += 1
+                            else:
+                                preserved += 1
                         except Exception:
                             pass
             if count > 0 and not self.silent:
                 self.add_log(f"🧹 [STARTUP] Limpeza concluída: removidos {count} arquivo(s) temporário(s) órfão(s) ({size / (1024*1024):.2f} MB liberados).")
+            if preserved > 0 and not self.silent:
+                self.add_log(f"[STARTUP] {preserved} video(s) temporario(s) com dados preservados para nova recuperacao.")
         except Exception:
             pass
 
     def verificar_saude_discos_smart(self):
-        """Verifica a integridade física dos discos via WMI no PowerShell e reporta no console se houver falhas"""
+        """Consulta o status informado pelo Windows sem bloquear indefinidamente."""
         def check():
-            try:
-                cmd = ["powershell", "-Command", "Get-WmiObject -Class Win32_DiskDrive | Select-Object Model, Status | ConvertTo-Json"]
-                output = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL)
-                if not output.strip():
-                    return
-                drives = json.loads(output)
-                if isinstance(drives, dict):
-                    drives = [drives]
-                
-                healthy = True
-                for drive in drives:
-                    model = drive.get("Model", "Desconhecido")
-                    status = drive.get("Status", "Desconhecido")
-                    if status != "OK":
-                        healthy = False
-                        if not self.silent:
-                            self.root.after(0, lambda m=model, s=status: self.add_log(
-                                f"🚨 [ALERTA HARDWARE] O disco '{m}' reportou status de falha S.M.A.R.T.: '{s}'! Risco de perda de gravações!",
-                                "tag_erro"
-                            ))
-                if healthy and not self.silent:
-                    self.root.after(0, lambda: self.add_log("🩺 [DIAGNÓSTICO S.M.A.R.T.] Todos os discos físicos conectados estão saudáveis (Status: OK)."))
-            except Exception:
-                pass
+            self._smart_snapshot = self.query_smart_status()
+            if self._smart_snapshot["status"] == "degraded":
+                for drive in self._smart_snapshot["drives"]:
+                    if str(drive["status"]).upper() != "OK":
+                        self.add_log(
+                            f"[HEALTH][CRITICAL][SMART_DEGRADED] Disco '{drive['model']}' reportou status '{drive['status']}'.",
+                            "tag_erro",
+                        )
         threading.Thread(target=check, daemon=True).start()
+
+    def query_smart_status(self):
+        try:
+            cmd = ["powershell", "-Command", "Get-WmiObject -Class Win32_DiskDrive | Select-Object Model, Status | ConvertTo-Json"]
+            output = subprocess.check_output(
+                cmd,
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if not output.strip():
+                raise Exception("consulta retornou vazia")
+            drives = json.loads(output)
+            if isinstance(drives, dict):
+                drives = [drives]
+            normalized_drives = [
+                {
+                    "model": drive.get("Model", "Desconhecido"),
+                    "status": drive.get("Status", "Desconhecido"),
+                }
+                for drive in drives
+            ]
+            unhealthy = [drive for drive in normalized_drives if str(drive["status"]).upper() != "OK"]
+            return {
+                "status": "degraded" if unhealthy else "ok",
+                "drives": normalized_drives,
+                "error": None,
+                "checked_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        except Exception as error:
+            return {
+                "status": "unknown",
+                "drives": [],
+                "error": str(error),
+                "checked_at": datetime.now().isoformat(timespec="seconds"),
+            }
 
     def limpar_processos_ffmpeg_zumbis(self, sync=False):
         """Busca e finaliza processos ffmpeg.exe órfãos rodando sob a pasta do projeto no Windows"""
         def clean():
             try:
                 cmd = ["powershell", "-Command", "Get-Process ffmpeg -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*sistema\\\\go2rtc*' } | Stop-Process -Force"]
-                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
             except Exception:
                 pass
         if sync:
@@ -1342,12 +1381,22 @@ class CameraManagerApp:
         return streams
 
     def get_gdrive_dir(self, stream_name, index):
+        if not GDRIVE_ROOT:
+            return ""
         if index == 0:
             return os.path.join(GDRIVE_ROOT, "camera 1")
         elif index == 1:
             return os.path.join(GDRIVE_ROOT, "camera 2")
         else:
             return os.path.join(GDRIVE_ROOT, f"camera {index+1}")
+
+    def get_camera_storage_dirs(self):
+        dirs = []
+        for idx, stream in enumerate(self.streams):
+            path = self.get_gdrive_dir(stream, idx)
+            if path and path not in dirs:
+                dirs.append(path)
+        return dirs
 
     def get_local_ip(self):
         try:
@@ -1894,7 +1943,7 @@ class CameraManagerApp:
             logs_to_flush = self._startup_logs
             del self._startup_logs
             for msg_item in logs_to_flush:
-                self.add_log(msg_item)
+                self._append_to_log_widget(msg_item, self.infer_log_tag(msg_item))
 
     # ================= LOG DE EVENTOS =================
     def _append_to_log_widget(self, msg, tag):
@@ -1914,90 +1963,146 @@ class CameraManagerApp:
         except Exception:
             pass
 
-    def add_log(self, msg):
-        # Se o console de log (txt_log) ainda não existe ou se estamos rodando ocultos (silent)
-        if not hasattr(self, "txt_log") or self.txt_log is None or self.silent:
-            if not hasattr(self, "_startup_logs"):
-                self._startup_logs = []
-            self._startup_logs.append(msg)
+    def infer_log_tag(self, msg):
+        msg_lower = msg.lower()
+        if any(word in msg_lower for word in ("erro", "falha", "critico", "crítico", "excluido", "excluído")):
+            return "tag_erro"
+        if any(word in msg_lower for word in ("sucesso", "concluid", "concluíd", "ativo", "configurad", "resolvido")):
+            return "tag_ok"
+        if any(word in msg_lower for word in ("iniciando", "escaneamento", "diagnostico", "diagnóstico", "verificando", "automatic")):
+            return "tag_info"
+        if any(word in msg_lower for word in ("aviso", "aguardando", "tentando", "parando", "atencao", "atenção")):
+            return "tag_warn"
+        return "tag_default"
+
+    def append_persistent_log_file(self, log_file_path, msg):
+        os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
+        if os.path.exists(log_file_path) and os.path.getsize(log_file_path) > 2 * 1024 * 1024:
             try:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+                with open(log_file_path, "r", encoding="utf-8", errors="ignore") as log_file:
+                    lines = log_file.readlines()
+                with open(log_file_path, "w", encoding="utf-8") as log_file:
+                    log_file.writelines(lines[-500:])
             except Exception:
+                return
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(log_file_path, "a", encoding="utf-8") as log_file:
+            log_file.write(f"[{timestamp}] {msg}\n")
+
+    def write_persistent_log(self, msg):
+        hostname = socket.gethostname()
+        local_log_path = os.path.join(LOGS_DIR, f"log_{hostname}.txt")
+        try:
+            self.append_persistent_log_file(local_log_path, msg)
+        except Exception:
+            pass
+
+        external_queue = getattr(self, "_external_log_queue", None)
+        if external_queue is not None:
+            try:
+                external_queue.put_nowait(msg)
+            except queue.Full:
                 try:
-                    encoding = sys.stdout.encoding or 'utf-8'
-                    safe_msg = msg.encode(encoding, errors='replace').decode(encoding)
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {safe_msg}")
+                    external_queue.get_nowait()
+                    external_queue.put_nowait(msg)
                 except Exception:
                     pass
-            return
 
-        # Rastreia mensagens repetidas para evitar flood
-        if not hasattr(self, "_last_logged_msgs"):
-            self._last_logged_msgs = {}
-            self._suppressed_counts = {}
-            
-        import re
-        msg_key = re.sub(r'\d{4}-\d{2}-\d{2}[_\s\-]\d{2}[-:]\d{2}([-:]\d{2})?', '[DATE]', msg)
-        msg_key = re.sub(r'0x[0-9a-fA-F]+', '[HEX]', msg_key)
-        
-        now = time.time()
-        if msg_key in self._last_logged_msgs:
-            last_time = self._last_logged_msgs[msg_key]
-            if now - last_time < 120:  # Silencia se repetir dentro de 2 minutos
-                self._suppressed_counts[msg_key] = self._suppressed_counts.get(msg_key, 0) + 1
-                return
-            else:
-                supp_count = self._suppressed_counts.get(msg_key, 0)
-                if supp_count > 0:
-                    supp_msg = f"[DEDUPLICAÇÃO] A mensagem anterior se repetiu {supp_count} vezes nos últimos 2 minutos."
-                    self._suppressed_counts[msg_key] = 0
-                    self._append_to_log_widget(supp_msg, "tag_info")
-                    
-        self._last_logged_msgs[msg_key] = now
-        self._suppressed_counts[msg_key] = 0
-
-        # Determina a tag de cor baseada no conteúdo
-        msg_lower = msg.lower()
-        if "erro" in msg_lower or "falha" in msg_lower or "crítico" in msg_lower or "excluído" in msg_lower:
-            tag = "tag_erro"
-        elif "sucesso" in msg_lower or "concluíd" in msg_lower or "ativo" in msg_lower or "ok" in msg_lower or "configurad" in msg_lower:
-            tag = "tag_ok"
-        elif "iniciando" in msg_lower or "escaneamento" in msg_lower or "diagnóstico" in msg_lower or "verificando" in msg_lower or "automátic" in msg_lower:
-            tag = "tag_info"
-        elif "aviso" in msg_lower or "aguardando" in msg_lower or "tentando" in msg_lower or "parando" in msg_lower:
-            tag = "tag_warn"
-        else:
-            tag = "tag_default"
-            
-        # Salva o log no SSD se estiver disponível (centralizado por Hostname)
-        if globals().get("GDRIVE_ROOT") and os.path.exists(GDRIVE_ROOT):
+    def external_log_writer_loop(self):
+        hostname = socket.gethostname()
+        while not getattr(self, "_shutdown_executed", False):
             try:
-                logs_dir = os.path.join(GDRIVE_ROOT, "logs_nvr")
-                os.makedirs(logs_dir, exist_ok=True)
-                my_host = socket.gethostname()
-                log_file_path = os.path.join(logs_dir, f"log_{my_host}.txt")
-                
-                # Rotaciona o log se passar de 2MB
-                if os.path.exists(log_file_path) and os.path.getsize(log_file_path) > 2 * 1024 * 1024:
-                    try:
-                        with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
-                            lines = f.readlines()
-                        if len(lines) > 500:
-                            with open(log_file_path, "w", encoding="utf-8") as f:
-                                f.writelines(lines[-500:])
-                        else:
-                            with open(log_file_path, "w", encoding="utf-8") as f:
-                                f.truncate(0)
-                    except Exception:
-                        pass
-                        
-                tstamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                with open(log_file_path, "a", encoding="utf-8") as f_ssd:
-                    f_ssd.write(f"[{tstamp}] {msg}\n")
+                msg = self._external_log_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            try:
+                if not GDRIVE_ROOT or not os.path.isdir(GDRIVE_ROOT):
+                    continue
+                external_log_path = os.path.join(GDRIVE_ROOT, "logs_nvr", f"log_{hostname}.txt")
+                self.append_persistent_log_file(external_log_path, msg)
+            except Exception:
+                continue
+
+    def drain_ui_log_queue(self):
+        try:
+            for _ in range(100):
+                try:
+                    msg, tag = self._ui_log_queue.get_nowait()
+                except queue.Empty:
+                    break
+                self._append_to_log_widget(msg, tag)
+        except Exception:
+            pass
+
+        if not getattr(self, "_shutdown_executed", False):
+            try:
+                self.root.after(200, self.drain_ui_log_queue)
             except Exception:
                 pass
 
-        self._append_to_log_widget(msg, tag)
+    def queue_log_for_ui(self, msg, tag):
+        if self.silent or not hasattr(self, "txt_log") or self.txt_log is None:
+            if not hasattr(self, "_startup_logs"):
+                self._startup_logs = []
+            self._startup_logs.append(msg)
+            if len(self._startup_logs) > STARTUP_LOG_LIMIT:
+                del self._startup_logs[:-STARTUP_LOG_LIMIT]
+            return
+
+        if threading.current_thread() is threading.main_thread():
+            self._append_to_log_widget(msg, tag)
+            return
+
+        try:
+            self._ui_log_queue.put_nowait((msg, tag))
+        except queue.Full:
+            try:
+                self._ui_log_queue.get_nowait()
+                self._ui_log_queue.put_nowait((msg, tag))
+            except Exception:
+                pass
+
+    def add_log(self, msg, tag_override=None):
+        import re
+
+        msg = str(msg)
+        log_lock = getattr(self, "_log_lock", None)
+        if log_lock is None:
+            log_lock = threading.Lock()
+            self._log_lock = log_lock
+
+        with log_lock:
+            if not hasattr(self, "_last_logged_msgs"):
+                self._last_logged_msgs = {}
+                self._suppressed_counts = {}
+
+            msg_key = re.sub(r'\d{4}-\d{2}-\d{2}[_\s\-]\d{2}[-:]\d{2}([-:]\d{2})?', '[DATE]', msg)
+            msg_key = re.sub(r'0x[0-9a-fA-F]+', '[HEX]', msg_key)
+            now = time.time()
+            last_time = self._last_logged_msgs.get(msg_key)
+            if last_time is not None and now - last_time < 120:
+                self._suppressed_counts[msg_key] = self._suppressed_counts.get(msg_key, 0) + 1
+                return
+
+            suppressed = self._suppressed_counts.get(msg_key, 0)
+            self._last_logged_msgs[msg_key] = now
+            self._suppressed_counts[msg_key] = 0
+
+            if suppressed:
+                summary = f"[DEDUPLICACAO] A mensagem anterior se repetiu {suppressed} vezes nos ultimos 2 minutos."
+                self.write_persistent_log(summary)
+                self.queue_log_for_ui(summary, "tag_info")
+
+            tag = tag_override or self.infer_log_tag(msg)
+            self.write_persistent_log(msg)
+            self.queue_log_for_ui(msg, tag)
+
+        if self.silent:
+            try:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+            except Exception:
+                pass
 
     def copy_link_to_clipboard(self):
         self.root.clipboard_clear()
@@ -2063,13 +2168,13 @@ class CameraManagerApp:
                 if self.recording_active.get(stream, False):
                     t = self.recording_threads.get(stream)
                     if t is None or not t.is_alive():
-                        if not self.silent:
-                            self.add_log(f"⚠️ [THREAD WATCHDOG] Detectada queda da thread da camera {stream.upper()}! Reiniciando...")
+                        self.add_log(f"[HEALTH][WARNING][THREAD_WATCHDOG] Thread da camera {stream.upper()} parou; reiniciando.", "tag_warn")
                         new_t = threading.Thread(
                             target=self.record_stream_thread, 
                             args=(stream, idx), 
                             daemon=True
                         )
+                        self.recording_started_at[stream] = time.time()
                         self.recording_threads[stream] = new_t
                         new_t.start()
             
@@ -2116,6 +2221,9 @@ class CameraManagerApp:
             # Atualiza a interface (se não estiver em modo silencioso)
             if not self.silent:
                 self.root.after(0, self.update_ui_states, go2rtc_ok, gdrive_ok, live_viewers, cam_states, backup_count, backup_size)
+
+            self._last_go2rtc_ok = go2rtc_ok
+            self.trigger_health_assessment()
             
             # Dorme por 3 segundos
             time.sleep(3)
@@ -2145,6 +2253,524 @@ class CameraManagerApp:
         self._cached_backup_time = now
         return total_files, total_size
 
+    def make_health_issue(self, code, severity, summary, evidence, action, stream=None):
+        issue = {
+            "code": code,
+            "severity": severity,
+            "summary": summary,
+            "evidence": evidence,
+            "action": action,
+        }
+        if stream:
+            issue["stream"] = stream
+        issue["key"] = f"{code}:{stream or 'system'}"
+        return issue
+
+    def find_latest_video_mtime(self, directories):
+        latest_mtime = None
+        for directory in directories:
+            if not directory or not os.path.isdir(directory):
+                continue
+            try:
+                entries = list(os.scandir(directory))
+            except Exception:
+                continue
+
+            candidate_dirs = [entry.path for entry in entries if entry.is_dir(follow_symlinks=False)]
+            candidate_dirs = sorted(candidate_dirs, reverse=True)[:3]
+            candidate_dirs.append(directory)
+            for candidate_dir in candidate_dirs:
+                try:
+                    for entry in os.scandir(candidate_dir):
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                        if not entry.name.lower().endswith((".ts", ".mp4")):
+                            continue
+                        file_mtime = entry.stat(follow_symlinks=False).st_mtime
+                        if latest_mtime is None or file_mtime > latest_mtime:
+                            latest_mtime = file_mtime
+                except Exception:
+                    continue
+        return latest_mtime
+
+    def get_pending_backup_details(self, max_files=5000):
+        backup_root = os.path.join(PROJ_DIR, "sistema", "backup_gravacoes")
+        count = 0
+        total_size = 0
+        oldest_mtime = None
+        truncated = False
+        try:
+            for root_dir, _, files in os.walk(backup_root):
+                for filename in files:
+                    if not filename.lower().endswith((".ts", ".mp4")):
+                        continue
+                    filepath = os.path.join(root_dir, filename)
+                    try:
+                        stat = os.stat(filepath)
+                    except Exception:
+                        continue
+                    count += 1
+                    total_size += stat.st_size
+                    if oldest_mtime is None or stat.st_mtime < oldest_mtime:
+                        oldest_mtime = stat.st_mtime
+                    if count >= max_files:
+                        truncated = True
+                        return {
+                            "count": count,
+                            "size_bytes": total_size,
+                            "oldest_mtime": oldest_mtime,
+                            "truncated": truncated,
+                        }
+        except Exception:
+            pass
+        return {
+            "count": count,
+            "size_bytes": total_size,
+            "oldest_mtime": oldest_mtime,
+            "truncated": truncated,
+        }
+
+    def get_stale_storage_artifacts(self, older_than_seconds=3600, max_files=2000):
+        roots = [
+            os.path.join(PROJ_DIR, "sistema", "gravando_temp"),
+            os.path.join(PROJ_DIR, "sistema", "backup_gravacoes"),
+        ]
+        suffixes = (".finalizing", ".syncing", ".recovering")
+        now = time.time()
+        stale = []
+        inspected = 0
+        for scan_root in roots:
+            if not os.path.isdir(scan_root):
+                continue
+            try:
+                for root_dir, _, files in os.walk(scan_root):
+                    for filename in files:
+                        inspected += 1
+                        if inspected > max_files:
+                            return stale
+                        if not filename.lower().endswith(suffixes):
+                            continue
+                        filepath = os.path.join(root_dir, filename)
+                        try:
+                            age = now - os.path.getmtime(filepath)
+                        except Exception:
+                            continue
+                        if age >= older_than_seconds:
+                            stale.append({"path": filepath, "age_seconds": int(age)})
+            except Exception:
+                continue
+        return stale
+
+    def scan_recent_kernel_144_reports(self, hours=24):
+        now = time.time()
+        if self._usb_report_cache is not None and now - self._usb_report_cache_time < HEALTH_HARDWARE_CACHE_SECONDS:
+            return self._usb_report_cache
+
+        program_data = os.environ.get("ProgramData", r"C:\ProgramData")
+        roots = [
+            os.path.join(program_data, "Microsoft", "Windows", "WER", "ReportArchive"),
+            os.path.join(program_data, "Microsoft", "Windows", "WER", "ReportQueue"),
+        ]
+        cutoff = now - (hours * 3600)
+        count = 0
+        latest_mtime = None
+        accessible_roots = 0
+        for report_root in roots:
+            try:
+                entries = list(os.scandir(report_root))
+                accessible_roots += 1
+            except Exception:
+                continue
+            for entry in entries[:2000]:
+                if not entry.is_dir(follow_symlinks=False) or not entry.name.lower().startswith("kernel_144"):
+                    continue
+                try:
+                    report_mtime = entry.stat(follow_symlinks=False).st_mtime
+                except Exception:
+                    continue
+                if report_mtime < cutoff:
+                    continue
+                count += 1
+                if latest_mtime is None or report_mtime > latest_mtime:
+                    latest_mtime = report_mtime
+
+        result = {
+            "status": "ok" if accessible_roots else "unknown",
+            "count_24h": count,
+            "latest": datetime.fromtimestamp(latest_mtime).isoformat(timespec="seconds") if latest_mtime else None,
+            "checked_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        self._usb_report_cache = result
+        self._usb_report_cache_time = now
+        return result
+
+    def get_process_memory_mb(self):
+        try:
+            from ctypes import wintypes
+
+            class PROCESS_MEMORY_COUNTERS_EX(ctypes.Structure):
+                _fields_ = [
+                    ("cb", ctypes.c_ulong),
+                    ("PageFaultCount", ctypes.c_ulong),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                    ("PrivateUsage", ctypes.c_size_t),
+                ]
+
+            counters = PROCESS_MEMORY_COUNTERS_EX()
+            counters.cb = ctypes.sizeof(counters)
+            get_current_process = ctypes.windll.kernel32.GetCurrentProcess
+            get_current_process.restype = wintypes.HANDLE
+            process_handle = get_current_process()
+            get_process_memory_info = ctypes.windll.psapi.GetProcessMemoryInfo
+            get_process_memory_info.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(PROCESS_MEMORY_COUNTERS_EX),
+                wintypes.DWORD,
+            ]
+            get_process_memory_info.restype = wintypes.BOOL
+            success = get_process_memory_info(
+                process_handle,
+                ctypes.byref(counters),
+                counters.cb,
+            )
+            if not success:
+                return None
+            return round(counters.WorkingSetSize / (1024 ** 2), 2)
+        except Exception:
+            return None
+
+    def collect_health_snapshot(self):
+        now = time.time()
+        issues = []
+        active_streams = [stream for stream in self.streams if self.recording_active.get(stream, False)]
+
+        backup_root = os.path.join(PROJ_DIR, "sistema", "backup_gravacoes")
+        local_status = garantir_limite_backup_local(backup_root)
+        local_free_gb = local_status["free_bytes"] / (1024 ** 3)
+        if local_free_gb < 5:
+            issues.append(self.make_health_issue(
+                "LOCAL_SPACE_CRITICAL",
+                "critical",
+                "Espaco local abaixo da reserva segura.",
+                f"Caminho local com {local_free_gb:.2f} GB livres.",
+                "Liberar espaco fora das pastas de gravacao; nao apagar backups pendentes.",
+            ))
+        elif local_free_gb < 10:
+            issues.append(self.make_health_issue(
+                "LOCAL_SPACE_LOW",
+                "warning",
+                "Espaco local se aproximando da reserva critica.",
+                f"Caminho local com {local_free_gb:.2f} GB livres.",
+                "Planejar liberacao de espaco antes de atingir 5 GB.",
+            ))
+
+        hd_available = bool(GDRIVE_ROOT and os.path.isdir(GDRIVE_ROOT))
+        hd_free_gb = None
+        if not GDRIVE_ROOT:
+            issues.append(self.make_health_issue(
+                "DESTINATION_NOT_CONFIGURED",
+                "warning",
+                "Destino principal ainda nao foi configurado.",
+                "gdrive_root esta vazio.",
+                "Conectar o HD FARMACIA e salvar seu caminho no aplicativo.",
+            ))
+        elif not hd_available:
+            severity = "critical" if active_streams and local_free_gb < 10 else "warning"
+            issues.append(self.make_health_issue(
+                "HD_UNAVAILABLE",
+                severity,
+                "HD principal indisponivel; gravacoes dependem do fallback local.",
+                f"Destino configurado: {GDRIVE_ROOT}.",
+                "Verificar cabo, energia, porta USB e se o volume FARMACIA esta montado.",
+            ))
+        else:
+            try:
+                _, _, hd_free = shutil.disk_usage(GDRIVE_ROOT)
+                hd_free_gb = hd_free / (1024 ** 3)
+                if hd_free_gb < 15:
+                    issues.append(self.make_health_issue(
+                        "HD_SPACE_CRITICAL",
+                        "critical",
+                        "HD principal com espaco criticamente baixo.",
+                        f"{hd_free_gb:.2f} GB livres em {GDRIVE_ROOT}.",
+                        "Revisar retencao e confirmar a copia das gravacoes antes de qualquer limpeza.",
+                    ))
+                elif hd_free_gb < 30:
+                    issues.append(self.make_health_issue(
+                        "HD_SPACE_LOW",
+                        "warning",
+                        "HD principal se aproximando do limite de limpeza.",
+                        f"{hd_free_gb:.2f} GB livres em {GDRIVE_ROOT}.",
+                        "Acompanhar o crescimento e planejar capacidade adicional.",
+                    ))
+            except Exception as error:
+                issues.append(self.make_health_issue(
+                    "HD_USAGE_UNKNOWN",
+                    "warning",
+                    "Nao foi possivel consultar o espaco do HD.",
+                    str(error),
+                    "Verificar estabilidade da conexao do disco.",
+                ))
+
+        pending_backup = self.get_pending_backup_details()
+        if pending_backup["count"]:
+            oldest_age = now - pending_backup["oldest_mtime"] if pending_backup["oldest_mtime"] else 0
+            if oldest_age >= 15 * 60 or pending_backup["size_bytes"] >= 1024 ** 3:
+                issues.append(self.make_health_issue(
+                    "BACKUP_PENDING",
+                    "warning",
+                    "Existem gravacoes locais aguardando sincronizacao.",
+                    f"{pending_backup['count']} arquivo(s), {pending_backup['size_bytes'] / (1024 ** 3):.2f} GB, mais antigo ha {oldest_age / 60:.0f} min.",
+                    "Manter o HD conectado e confirmar que a fila esta diminuindo.",
+                ))
+
+        process_memory_mb = self.get_process_memory_mb()
+        if process_memory_mb is not None and process_memory_mb >= 750:
+            issues.append(self.make_health_issue(
+                "PROCESS_MEMORY_HIGH",
+                "critical" if process_memory_mb >= 1500 else "warning",
+                "O processo do NVR esta usando memoria acima do esperado.",
+                f"Working set atual: {process_memory_mb:.2f} MB.",
+                "Observar crescimento no tempo e revisar streams, imagens e filas de log.",
+            ))
+        active_thread_count = threading.active_count()
+        if active_thread_count >= 80:
+            issues.append(self.make_health_issue(
+                "THREAD_COUNT_HIGH",
+                "warning",
+                "O NVR possui uma quantidade elevada de threads ativas.",
+                f"{active_thread_count} threads no processo.",
+                "Verificar scanners, diagnosticos ou reconexoes iniciados repetidamente.",
+            ))
+
+        block_minutes = CONFIG.get("bloco_minutos", 30)
+        stale_after = max(20 * 60, (block_minutes * 60) + (15 * 60))
+        for index, stream in enumerate(self.streams):
+            if not self.recording_active.get(stream, False):
+                continue
+            thread_obj = self.recording_threads.get(stream)
+            if thread_obj is None or not thread_obj.is_alive():
+                issues.append(self.make_health_issue(
+                    "RECORDING_THREAD_DEAD",
+                    "critical",
+                    f"A camera {stream.upper()} esta marcada como ativa, mas sua thread parou.",
+                    "Thread ausente ou finalizada.",
+                    "O watchdog deve reiniciar a thread; verificar o log se o problema repetir.",
+                    stream,
+                ))
+
+            failures = self.reconnect_failures.get(stream, 0)
+            if failures >= 3:
+                issues.append(self.make_health_issue(
+                    "RECONNECT_STORM",
+                    "critical" if failures >= 6 else "warning",
+                    f"A camera {stream.upper()} apresenta falhas consecutivas de reconexao.",
+                    f"{failures} falhas consecutivas.",
+                    "Verificar rede, alimentacao da camera e estabilidade do go2rtc.",
+                    stream,
+                ))
+
+            storage_dirs = [os.path.join(backup_root, stream)]
+            gdrive_dir = self.get_gdrive_dir(stream, index)
+            if gdrive_dir:
+                storage_dirs.append(gdrive_dir)
+            latest_mtime = self.find_latest_video_mtime(storage_dirs)
+            started_at = self.recording_started_at.get(stream, now)
+            running_for = now - started_at
+            if running_for >= stale_after and (latest_mtime is None or now - latest_mtime >= stale_after):
+                evidence = "nenhum arquivo finalizado encontrado" if latest_mtime is None else f"ultimo arquivo finalizado ha {(now - latest_mtime) / 60:.0f} min"
+                issues.append(self.make_health_issue(
+                    "RECORDING_STALLED",
+                    "critical",
+                    f"A camera {stream.upper()} parece ativa, mas nao publica blocos recentes.",
+                    evidence,
+                    "Verificar stream, temporarios, reconexoes e espaco antes de reiniciar.",
+                    stream,
+                ))
+
+            if self.recording_destinations.get(stream) == "backup":
+                issues.append(self.make_health_issue(
+                    "CAMERA_ON_FALLBACK",
+                    "warning",
+                    f"A camera {stream.upper()} esta gravando no fallback local.",
+                    "Destino dinamico atual: backup local.",
+                    "Restabelecer o HD e confirmar a sincronizacao dos blocos pendentes.",
+                    stream,
+                ))
+
+        stale_artifacts = self.get_stale_storage_artifacts()
+        if stale_artifacts:
+            issues.append(self.make_health_issue(
+                "STALE_TEMPORARIES",
+                "warning",
+                "Existem arquivos de publicacao temporaria antigos.",
+                f"{len(stale_artifacts)} artefato(s); exemplo: {stale_artifacts[0]['path']}.",
+                "Preservar os arquivos e executar a recuperacao antes de qualquer limpeza.",
+            ))
+
+        smart_snapshot = getattr(self, "_smart_snapshot", {"status": "pending"})
+        if smart_snapshot.get("status") == "degraded":
+            issues.append(self.make_health_issue(
+                "SMART_DEGRADED",
+                "critical",
+                "O Windows reportou degradacao em pelo menos um disco.",
+                json.dumps(smart_snapshot.get("drives", []), ensure_ascii=True),
+                "Interromper manutencoes pesadas e preparar copia dos dados importantes.",
+            ))
+        elif smart_snapshot.get("status") == "unknown":
+            issues.append(self.make_health_issue(
+                "SMART_UNKNOWN",
+                "warning",
+                "A consulta de saude dos discos nao foi conclusiva.",
+                smart_snapshot.get("error") or "status desconhecido",
+                "Executar diagnostico do fabricante ou consulta administrativa separada.",
+            ))
+
+        power_snapshot = getattr(self, "_power_snapshot", {"status": "unknown"})
+        if power_snapshot.get("status") == "battery":
+            battery_percent = power_snapshot.get("battery_percent")
+            severity = "critical" if battery_percent is not None and battery_percent <= 20 else "warning"
+            battery_text = "percentual desconhecido" if battery_percent is None else f"{battery_percent}% restantes"
+            issues.append(self.make_health_issue(
+                "POWER_ON_BATTERY",
+                severity,
+                "O computador esta operando em bateria ou nobreak.",
+                battery_text,
+                "Confirmar a energia e manter margem para o encerramento seguro.",
+            ))
+
+        kernel_reports = self.scan_recent_kernel_144_reports()
+        if kernel_reports.get("status") == "ok" and kernel_reports.get("count_24h", 0):
+            report_count = kernel_reports["count_24h"]
+            issues.append(self.make_health_issue(
+                "KERNEL_144_REPORTS",
+                "critical" if report_count >= 3 else "warning",
+                "O Windows registrou falhas recentes de controlador/dispositivo.",
+                f"{report_count} relatorio(s) Kernel_144 nas ultimas 24h; ultimo em {kernel_reports.get('latest')}.",
+                "Investigar USBXHCI, cabo, porta, energia e drivers; o aplicativo nao corrige falha fisica.",
+            ))
+
+        if active_streams and not self._last_go2rtc_ok:
+            issues.append(self.make_health_issue(
+                "GO2RTC_UNAVAILABLE",
+                "critical",
+                "A ponte go2rtc nao esta respondendo enquanto ha gravacoes ativas.",
+                f"Falhas da API: {getattr(self, 'go2rtc_api_fails', 0)}.",
+                "Aguardar o watchdog; se repetir, verificar logs, rede e executavel.",
+            ))
+        if self.go2rtc_restart_count >= 5:
+            issues.append(self.make_health_issue(
+                "GO2RTC_RESTART_STORM",
+                "warning",
+                "A ponte go2rtc reiniciou muitas vezes nesta sessao.",
+                f"{self.go2rtc_restart_count} reinicios.",
+                "Correlacionar com rede, cameras e eventos USB antes de reiniciar o PC.",
+            ))
+
+        severity_rank = {"healthy": 0, "warning": 1, "critical": 2}
+        overall_status = "healthy"
+        for issue in issues:
+            if severity_rank[issue["severity"]] > severity_rank[overall_status]:
+                overall_status = issue["severity"]
+
+        return {
+            "schema_version": 1,
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "hostname": socket.gethostname(),
+            "overall_status": overall_status,
+            "issues": issues,
+            "metrics": {
+                "active_streams": active_streams,
+                "thread_count": active_thread_count,
+                "process_memory_mb": process_memory_mb,
+                "local_free_gb": round(local_free_gb, 2),
+                "hd_available": hd_available,
+                "hd_free_gb": round(hd_free_gb, 2) if hd_free_gb is not None else None,
+                "pending_backup_count": pending_backup["count"],
+                "pending_backup_gb": round(pending_backup["size_bytes"] / (1024 ** 3), 3),
+                "go2rtc_restart_count": self.go2rtc_restart_count,
+                "kernel_144_reports_24h": kernel_reports.get("count_24h"),
+            },
+            "hardware": {
+                "smart": smart_snapshot,
+                "kernel_144": kernel_reports,
+                "power": power_snapshot,
+            },
+        }
+
+    def persist_health_snapshot(self, snapshot):
+        health_path = os.path.join(LOGS_DIR, "health_status.json")
+        temp_path = health_path + ".tmp"
+        with open(temp_path, "w", encoding="utf-8") as health_file:
+            json.dump(snapshot, health_file, ensure_ascii=True, indent=2)
+            health_file.flush()
+            try:
+                os.fsync(health_file.fileno())
+            except Exception:
+                pass
+        os.replace(temp_path, health_path)
+
+    def report_health_transitions(self, snapshot):
+        current_issues = {issue["key"]: issue for issue in snapshot["issues"]}
+        current_keys = set(current_issues)
+        for key in sorted(current_keys - self._health_issue_keys):
+            issue = current_issues[key]
+            self.add_log(
+                f"[HEALTH][{issue['severity'].upper()}][{issue['code']}] {issue['summary']} "
+                f"Evidencia: {issue['evidence']} Acao: {issue['action']}",
+                "tag_erro" if issue["severity"] == "critical" else "tag_warn",
+            )
+        for key in sorted(self._health_issue_keys - current_keys):
+            self.add_log(f"[HEALTH][RESOLVED] Situacao normalizada: {key}.", "tag_ok")
+        self._health_issue_keys = current_keys
+
+    def run_health_assessment(self):
+        if not self._health_lock.acquire(blocking=False):
+            return
+        try:
+            snapshot = self.collect_health_snapshot()
+            self.persist_health_snapshot(snapshot)
+            self.report_health_transitions(snapshot)
+            self._health_snapshot = snapshot
+        except Exception as error:
+            self.add_log(f"[HEALTH][WARNING][ASSESSMENT_FAILED] Falha no avaliador de saude: {str(error)}", "tag_warn")
+        finally:
+            self._health_lock.release()
+
+    def trigger_health_assessment(self, force=False):
+        now = time.time()
+        if not force and now - self._last_health_check < HEALTH_CHECK_INTERVAL_SECONDS:
+            return
+        if self._health_lock.locked():
+            return
+        self._last_health_check = now
+        threading.Thread(target=self.run_health_assessment, daemon=True).start()
+
+    def get_health_report_lines(self):
+        snapshot = self._health_snapshot
+        if snapshot is None:
+            try:
+                snapshot = self.collect_health_snapshot()
+            except Exception as error:
+                return [f" - Avaliador indisponivel: {str(error)}"]
+
+        lines = [f" - Estado geral: {snapshot['overall_status'].upper()}"]
+        if not snapshot["issues"]:
+            lines.append(" - Nenhuma situacao de risco detectada nesta coleta.")
+            return lines
+        for issue in snapshot["issues"]:
+            lines.append(f" - [{issue['severity'].upper()}] {issue['code']}: {issue['summary']}")
+            lines.append(f"   Evidencia: {issue['evidence']}")
+            lines.append(f"   Acao: {issue['action']}")
+        return lines
+
     def executar_limpeza_emergencial(self):
         """Libera espaço no HD externo deletando pastas mais antigas se o espaço livre for inferior a 15GB"""
         if not os.path.exists(GDRIVE_ROOT):
@@ -2162,16 +2788,14 @@ class CameraManagerApp:
                 
             # Varre subpastas das câmeras no HD externo para achar pastas de datas (formato YYYY-MM-DD)
             pastas_data = set()
-            for stream in self.streams:
-                for idx in range(len(self.streams)):
-                    gdrive_dest = self.get_gdrive_dir(stream, idx)
-                    if os.path.exists(gdrive_dest):
-                        for item in os.listdir(gdrive_dest):
-                            item_path = os.path.join(gdrive_dest, item)
-                            if os.path.isdir(item_path):
-                                import re
-                                if re.match(r'^\d{4}-\d{2}-\d{2}$', item):
-                                    pastas_data.add(item)
+            for gdrive_dest in self.get_camera_storage_dirs():
+                if os.path.exists(gdrive_dest):
+                    for item in os.listdir(gdrive_dest):
+                        item_path = os.path.join(gdrive_dest, item)
+                        if os.path.isdir(item_path):
+                            import re
+                            if re.match(r'^\d{4}-\d{2}-\d{2}$', item):
+                                pastas_data.add(item)
                                     
             if not pastas_data:
                 if not self.silent:
@@ -2191,16 +2815,14 @@ class CameraManagerApp:
                 if not self.silent:
                     self.add_log(f"🧹 Deletando gravações antigas do dia {data_deletar} para liberar espaço...")
                     
-                for stream in self.streams:
-                    for idx in range(len(self.streams)):
-                        gdrive_dest = self.get_gdrive_dir(stream, idx)
-                        pasta_dia = os.path.join(gdrive_dest, data_deletar)
-                        if os.path.exists(pasta_dia):
-                            try:
-                                shutil.rmtree(pasta_dia)
-                            except Exception as e:
-                                if not self.silent:
-                                    self.add_log(f"Erro ao deletar {pasta_dia}: {str(e)}")
+                for gdrive_dest in self.get_camera_storage_dirs():
+                    pasta_dia = os.path.join(gdrive_dest, data_deletar)
+                    if os.path.exists(pasta_dia):
+                        try:
+                            shutil.rmtree(pasta_dia)
+                        except Exception as e:
+                            if not self.silent:
+                                self.add_log(f"Erro ao deletar {pasta_dia}: {str(e)}")
                                     
                 # Reavalia
                 total, used, free = shutil.disk_usage(GDRIVE_ROOT)
@@ -2244,37 +2866,49 @@ class CameraManagerApp:
             if not self.silent:
                 self.add_log(f"Erro ao configurar estado de energia: {str(e)}")
 
-    def check_power_status(self):
+    def read_power_snapshot(self):
         try:
-            import ctypes
             status = SYSTEM_POWER_STATUS()
             if ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(status)):
-                # ACLineStatus: 0 = Offline (rodando em bateria), 1 = Online (energia AC), 255 = Desconhecido
                 ac_status = status.ACLineStatus
                 battery_percent = status.BatteryLifePercent
-                
-                if ac_status == 0:  # Rodando em bateria (Queda de energia!)
-                    if not self.on_battery:
-                        self.on_battery = True
-                        if not self.silent:
-                            self.add_log("🔌 QUEDA DE ENERGIA DETECTADA! PC rodando em bateria/nobreak.")
-                    
-                    # Se a bateria estiver abaixo de 20%, inicia o desligamento seguro
-                    if battery_percent != 255 and battery_percent <= 20:
-                        if not self.silent:
-                            self.add_log(f"🚨 Bateria crítica ({battery_percent}%). Iniciando desligamento seguro...")
-                        self.graceful_shutdown_due_to_power_loss()
-                else:
-                    if self.on_battery:
-                        self.on_battery = False
-                        if not self.silent:
-                            self.add_log("🔌 ENERGIA ELÉTRICA RESTABELECIDA! Retornando ao modo AC.")
-        except Exception:
-            pass
+                return {
+                    "status": "battery" if ac_status == 0 else ("ac" if ac_status == 1 else "unknown"),
+                    "battery_percent": None if battery_percent == 255 else int(battery_percent),
+                    "checked_at": datetime.now().isoformat(timespec="seconds"),
+                }
+            raise Exception("GetSystemPowerStatus falhou")
+        except Exception as error:
+            return {
+                "status": "unknown",
+                "battery_percent": None,
+                "error": str(error),
+                "checked_at": datetime.now().isoformat(timespec="seconds"),
+            }
+
+    def check_power_status(self):
+        self._power_snapshot = self.read_power_snapshot()
+        power_status = self._power_snapshot.get("status")
+        battery_percent = self._power_snapshot.get("battery_percent")
+
+        if power_status == "battery":
+            if not self.on_battery:
+                self.on_battery = True
+                self.add_log("[HEALTH][WARNING][POWER_ON_BATTERY] Queda de energia detectada; PC em bateria/nobreak.", "tag_warn")
+            if battery_percent is not None and battery_percent <= 20:
+                self.add_log(f"[HEALTH][CRITICAL][BATTERY_LOW] Bateria em {battery_percent}%; iniciando desligamento seguro.", "tag_erro")
+                self.graceful_shutdown_due_to_power_loss()
+        elif power_status == "ac" and self.on_battery:
+            self.on_battery = False
+            self.add_log("[HEALTH][RESOLVED] Energia eletrica restabelecida.", "tag_ok")
 
     def graceful_shutdown_due_to_power_loss(self):
         # 1. Avisa por voz em segundo plano
         self.speak("Queda de energia detectada. Salvando vídeos e desligando o computador para proteção.")
+
+        # Impede que o watchdog religue a ponte durante o encerramento.
+        self.running_monitor = False
+        self.running_sync = False
         
         # 2. Finaliza as gravações ativas de forma limpa (salva buffers no disco)
         self.run_stop_sequence()
@@ -2286,12 +2920,16 @@ class CameraManagerApp:
             pass
             
         # 4. Encerra o aplicativo
-        self.root.destroy()
-        sys.exit(0)
+        self.request_tk_shutdown()
 
     def check_process_go2rtc(self):
         try:
-            output = subprocess.check_output('tasklist /FI "IMAGENAME eq go2rtc.exe"', shell=True, text=True)
+            output = subprocess.check_output(
+                ["tasklist", "/FI", "IMAGENAME eq go2rtc.exe"],
+                text=True,
+                timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
             process_exists = "go2rtc.exe" in output
         except Exception:
             process_exists = False
@@ -2313,16 +2951,31 @@ class CameraManagerApp:
         except Exception:
             self.go2rtc_api_fails += 1
             if self.go2rtc_api_fails >= 3:
-                if not self.silent:
-                    self.add_log("⚠️ Ponte RTSP (go2rtc.exe) travada/sem resposta! Forçando reinício...")
+                self.add_log("[HEALTH][WARNING][GO2RTC_WATCHDOG] Ponte RTSP sem resposta; reiniciando.", "tag_warn")
                 try:
-                    subprocess.run("taskkill /F /IM go2rtc.exe", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    subprocess.run(
+                        ["taskkill", "/F", "/IM", "go2rtc.exe"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=10,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
                 except Exception:
                     pass
                 self.go2rtc_api_fails = 0
                 return False
                 
         return True
+
+    def probe_go2rtc_api(self, timeout=2.0):
+        try:
+            request = urllib.request.Request("http://127.0.0.1:1984/api/streams")
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            stream_names = sorted(payload.keys()) if isinstance(payload, dict) else []
+            return {"ok": response.status == 200, "streams": stream_names, "error": None}
+        except Exception as error:
+            return {"ok": False, "streams": [], "error": str(error)}
 
     def iniciar_go2rtc(self):
         try:
@@ -2338,6 +2991,7 @@ class CameraManagerApp:
                     env=env,
                     creationflags=subprocess.CREATE_NO_WINDOW
                 )
+                self.go2rtc_restart_count += 1
                 return True
         except Exception as e:
             if not self.silent:
@@ -2397,7 +3051,8 @@ class CameraManagerApp:
                     f'wmic process where "CommandLine like \'%gerenciador.pyw%\' and not CommandLine like \'%wmic%\'" get ProcessId',
                     shell=True,
                     text=True,
-                    stderr=subprocess.DEVNULL
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
                 )
                 pids = [line.strip() for line in output.split('\n') if line.strip().isdigit()]
                 return len(pids) > 0
@@ -2669,31 +3324,155 @@ class CameraManagerApp:
                     card["lbl_sync"].configure(text=state["sync"])
 
     # ================= SINCRONIZADOR DE BACKUP EM SEGUNDO PLANO =================
-    def safe_rate_limited_copy(self, src, dst):
-        """Copia o arquivo em chunks de 1MB limitando a taxa a ~10MB/s com sleep para evitar saturar o I/O do SSD"""
+    def file_content_fingerprint(self, filepath, sample_size=256 * 1024):
+        """Compara tamanho e amostras do inicio, meio e fim sem reler o video inteiro."""
+        import hashlib
+
+        file_size = os.path.getsize(filepath)
+        digest = hashlib.sha256()
+        digest.update(str(file_size).encode("ascii"))
+        offsets = {
+            0,
+            max(0, (file_size // 2) - (sample_size // 2)),
+            max(0, file_size - sample_size),
+        }
+        with open(filepath, "rb") as file_obj:
+            for offset in sorted(offsets):
+                file_obj.seek(offset)
+                digest.update(file_obj.read(sample_size))
+        return file_size, digest.hexdigest()
+
+    def files_have_same_content(self, first_path, second_path):
         try:
+            return self.file_content_fingerprint(first_path) == self.file_content_fingerprint(second_path)
+        except Exception:
+            return False
+
+    def get_nonconflicting_destination(self, src, dst):
+        if not os.path.exists(dst) or self.files_have_same_content(src, dst):
+            return dst
+
+        base_name, extension = os.path.splitext(dst)
+        stamp = datetime.now().strftime("%H%M%S")
+        candidate = f"{base_name}_parte_{stamp}{extension}"
+        counter = 1
+        while os.path.exists(candidate) and not self.files_have_same_content(src, candidate):
+            candidate = f"{base_name}_parte_{stamp}_{counter}{extension}"
+            counter += 1
+        return candidate
+
+    def storage_path_is_writable(self, directory):
+        if not directory:
+            return False
+        test_path = None
+        try:
+            os.makedirs(directory, exist_ok=True)
+            test_name = f".nvr_write_test_{os.getpid()}_{threading.get_ident()}"
+            test_path = os.path.join(directory, test_name)
+            with open(test_path, "xb") as test_file:
+                test_file.write(b"ok")
+                test_file.flush()
+                try:
+                    os.fsync(test_file.fileno())
+                except Exception:
+                    pass
+            return True
+        except Exception:
+            return False
+        finally:
+            if test_path:
+                try:
+                    os.remove(test_path)
+                except Exception:
+                    pass
+
+    def select_recording_destination(self, stream_name, index, escrever_log_cam):
+        backup_root = os.path.join(PROJ_DIR, "sistema", "backup_gravacoes")
+        local_status = garantir_limite_backup_local(backup_root)
+        if not local_status["ok"]:
+            free_gb = local_status["free_bytes"] / (1024 ** 3)
+            previous = self.recording_destinations.get(stream_name)
+            self.recording_destinations[stream_name] = "paused"
+            if previous != "paused":
+                escrever_log_cam(
+                    f"ERRO CRITICO: apenas {free_gb:.2f} GB livres no disco local. "
+                    "Gravacao pausada para evitar preencher o Windows; nenhum backup foi apagado."
+                )
+            return None, ""
+
+        gdrive_dir = self.get_gdrive_dir(stream_name, index)
+        if self.storage_path_is_writable(gdrive_dir):
+            previous = self.recording_destinations.get(stream_name)
+            self.recording_destinations[stream_name] = "hd"
+            if previous == "backup":
+                escrever_log_cam("HD disponivel novamente. Proximos blocos voltarao ao destino principal.")
+            return gdrive_dir, gdrive_dir
+
+        backup_dir = os.path.join(backup_root, stream_name)
+        if not self.storage_path_is_writable(backup_dir):
+            self.recording_destinations[stream_name] = "paused"
+            escrever_log_cam("ERRO CRITICO: HD e backup local estao indisponiveis. Gravacao pausada.")
+            return None, ""
+
+        previous = self.recording_destinations.get(stream_name)
+        self.recording_destinations[stream_name] = "backup"
+        if previous != "backup":
+            escrever_log_cam(f"AVISO: HD indisponivel. Usando backup local: {backup_dir}")
+        return backup_dir, ""
+
+    def safe_atomic_copy(self, src, dst, temp_suffix=".syncing", throttle_seconds=0.0):
+        """Copia para um temporario no destino e publica apenas quando estiver completo."""
+        tmp_dst = dst + temp_suffix
+        try:
+            if os.path.exists(dst):
+                if self.files_have_same_content(src, dst):
+                    return True
+                raise Exception(f"Destino ja existe com conteudo diferente: {dst}")
+
+            if os.path.exists(tmp_dst):
+                try:
+                    os.remove(tmp_dst)
+                except Exception:
+                    pass
+
             with open(src, "rb") as f_src:
-                with open(dst, "wb") as f_dst:
+                with open(tmp_dst, "wb") as f_dst:
                     while True:
                         chunk = f_src.read(1024 * 1024)
                         if not chunk:
                             break
                         f_dst.write(chunk)
-                        f_dst.flush()
-                        try:
-                            os.fsync(f_dst.fileno())
-                        except Exception:
-                            pass
-                        time.sleep(0.1)
-            shutil.copystat(src, dst)
+                        if throttle_seconds > 0:
+                            time.sleep(throttle_seconds)
+                    f_dst.flush()
+                    try:
+                        os.fsync(f_dst.fileno())
+                    except Exception:
+                        pass
+
+            if os.path.getsize(src) != os.path.getsize(tmp_dst):
+                raise Exception("Copia incompleta: tamanho do temporario diferente da origem")
+            if not self.files_have_same_content(src, tmp_dst):
+                raise Exception("Copia incompleta: conteudo do temporario diferente da origem")
+
+            shutil.copystat(src, tmp_dst)
+            os.replace(tmp_dst, dst)
             return True
         except Exception as e:
             try:
-                if os.path.exists(dst):
-                    os.remove(dst)
+                if os.path.exists(tmp_dst):
+                    os.remove(tmp_dst)
             except Exception:
                 pass
             raise e
+
+    def safe_rate_limited_copy(self, src, dst):
+        return self.safe_atomic_copy(
+            src,
+            dst,
+            temp_suffix=".syncing",
+            throttle_seconds=0.1,
+        )
 
     def background_sync_loop(self):
         while self.running_sync:
@@ -2751,11 +3530,14 @@ class CameraManagerApp:
                                 self.root.after(0, lambda fn=filename, s=stream: self.add_log(f"Copiando backup de {s.upper()} para o HD: {fn}..."))
                             
                             try:
+                                dest_filepath = self.get_nonconflicting_destination(local_filepath, dest_filepath)
                                 self.safe_rate_limited_copy(local_filepath, dest_filepath)
-                                if os.path.getsize(local_filepath) == os.path.getsize(dest_filepath):
+                                if self.files_have_same_content(local_filepath, dest_filepath):
                                     os.remove(local_filepath)
                                     if not self.silent:
                                         self.root.after(0, lambda fn=filename, s=stream: self.add_log(f"Backup sincronizado no HD e apagado local: {fn}"))
+                                else:
+                                    raise Exception("validacao de conteudo falhou apos a sincronizacao")
                             except Exception as e:
                                 if not self.silent:
                                     self.root.after(0, lambda fn=filename, err=str(e): self.add_log(f"Erro ao enviar {fn} para o HD: {err}"))
@@ -2774,7 +3556,8 @@ class CameraManagerApp:
 
     # ================= SISTEMA NVR INTEGRADO (GRAVAÇÃO INTERNA EM THREADS) =================
     def record_stream_thread(self, stream_name, index):
-        gdrive_dir = self.get_gdrive_dir(stream_name, index)
+        gdrive_dir = ""
+        heartbeat_dirs = set()
         lock_file = f"gravando_{stream_name}.lock"
         log_file = f"{stream_name}_erros.log"
         
@@ -2821,25 +3604,23 @@ class CameraManagerApp:
 
         escrever_log_cam("=== INICIANDO TAREFA DE GRAVACAO INTERNA (REMUX THREAD) ===")
         
-        # Testa a escrita no Drive para fallback
-        try:
-            os.makedirs(gdrive_dir, exist_ok=True)
-            teste_path = os.path.join(gdrive_dir, ".teste_escrita")
-            with open(teste_path, "w") as f:
-                f.write("teste")
-            os.remove(teste_path)
-            pasta_final = gdrive_dir
-        except Exception as e:
-            pasta_fallback = os.path.join(PROJ_DIR, "sistema", "backup_gravacoes", stream_name)
-            os.makedirs(pasta_fallback, exist_ok=True)
-            pasta_final = pasta_fallback
-            escrever_log_cam(f"AVISO: Pasta do Drive indisponivel ({str(e)}). Usando backup local: {pasta_fallback}")
-
         # Loop principal da gravação
         while self.recording_active.get(stream_name, False):
             try:
+                # Reavalia o destino a cada bloco para acompanhar queda ou retorno do HD.
+                pasta_final, gdrive_dir = self.select_recording_destination(
+                    stream_name,
+                    index,
+                    escrever_log_cam,
+                )
+                if not pasta_final:
+                    self.recording_active[stream_name] = False
+                    break
+                if gdrive_dir:
+                    heartbeat_dirs.add(gdrive_dir)
+
                 # Verifica duplicidade na rede
-                conflito = self.verificar_duplicidade_rede_cam(gdrive_dir, stream_name)
+                conflito = self.verificar_duplicidade_rede_cam(gdrive_dir, stream_name) if gdrive_dir else None
                 if conflito:
                     escrever_log_cam(f"[ERRO_DUPLICADO] O computador {conflito['hostname']} ({conflito['ip']}) ja esta gravando esta camera.")
                     break
@@ -2848,6 +3629,11 @@ class CameraManagerApp:
                 status = self.gravar_bloco_cam(stream_name, pasta_final, gdrive_dir, escrever_log_cam)
                 
                 if status == "parar" or status == "duplicado":
+                    break
+
+                if status == "espaco_critico":
+                    self.recording_active[stream_name] = False
+                    escrever_log_cam("Gravacao encerrada com seguranca por falta de espaco local.")
                     break
                     
                 if status == "erro" or status == "reconectar":
@@ -2878,19 +3664,22 @@ class CameraManagerApp:
             except Exception:
                 pass
                 
-        try:
-            net_lock_path = os.path.join(gdrive_dir, ".active_recorder.json")
-            if os.path.exists(net_lock_path):
-                with open(net_lock_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if data.get("hostname") == socket.gethostname():
-                    os.remove(net_lock_path)
-        except Exception:
-            pass
+        for heartbeat_dir in heartbeat_dirs:
+            try:
+                net_lock_path = os.path.join(heartbeat_dir, ".active_recorder.json")
+                if os.path.exists(net_lock_path):
+                    with open(net_lock_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if data.get("hostname") == socket.gethostname():
+                        os.remove(net_lock_path)
+            except Exception:
+                pass
             
         escrever_log_cam("=== TAREFA DE GRAVACAO INTERNA ENCERRADA ===")
 
     def verificar_duplicidade_rede_cam(self, gdrive_dir, stream_name):
+        if not gdrive_dir:
+            return None
         lock_path = os.path.join(gdrive_dir, ".active_recorder.json")
         
         if not os.path.exists(lock_path):
@@ -2921,6 +3710,8 @@ class CameraManagerApp:
         return None
 
     def atualizar_heartbeat_cam(self, gdrive_dir, stream_name):
+        if not gdrive_dir:
+            return
         if not os.path.exists(gdrive_dir):
             try:
                 os.makedirs(gdrive_dir, exist_ok=True)
@@ -2967,8 +3758,6 @@ class CameraManagerApp:
         
         # Cria subpasta com a data do dia dentro do destino para melhor organização visual
         pasta_dia_final = os.path.join(pasta_final, data_dia)
-        os.makedirs(pasta_dia_final, exist_ok=True)
-        
         nome_arquivo = os.path.join(pasta_dia_final, f"camera_{data_dia}_{hora_inicio}_ate_{hora_fim}.ts")
         
         # Gravação local temporária
@@ -2982,6 +3771,7 @@ class CameraManagerApp:
         
         self.atualizar_heartbeat_cam(gdrive_dir, stream_name)
         last_heartbeat_time = time.time()
+        last_storage_check = 0.0
         
         status_ret = "reconectar"
         
@@ -3022,6 +3812,19 @@ class CameraManagerApp:
                             if agora_ts - last_heartbeat_time >= 30:
                                 self.atualizar_heartbeat_cam(gdrive_dir, stream_name)
                                 last_heartbeat_time = agora_ts
+
+                            if agora_ts - last_storage_check >= 30:
+                                backup_root = os.path.join(PROJ_DIR, "sistema", "backup_gravacoes")
+                                local_status = garantir_limite_backup_local(backup_root)
+                                last_storage_check = agora_ts
+                                if not local_status["ok"]:
+                                    free_gb = local_status["free_bytes"] / (1024 ** 3)
+                                    escrever_log_cam(
+                                        f"ERRO CRITICO: espaco local caiu para {free_gb:.2f} GB. "
+                                        "Finalizando o bloco atual antes de pausar."
+                                    )
+                                    status_ret = "espaco_critico"
+                                    break
                                 
                             # Leitura do fluxo de vídeo
                             try:
@@ -3044,6 +3847,9 @@ class CameraManagerApp:
                         continue
                     finally:
                         self.active_connections.pop(stream_name, None)
+
+                    if status_ret in ("parar", "duplicado", "espaco_critico"):
+                        break
                         
                 if datetime.now() >= fim_bloco:
                     status_ret = "rotacionar"
@@ -3058,24 +3864,38 @@ class CameraManagerApp:
             status_ret = "erro"
             
         # Move o arquivo temporário se concluído
-        if os.path.exists(nome_temp) and status_ret in ("rotacionar", "parar"):
+        if os.path.exists(nome_temp) and status_ret in ("rotacionar", "parar", "espaco_critico"):
             if os.path.getsize(nome_temp) > 0:
                 try:
                     os.makedirs(pasta_dia_final, exist_ok=True)
-                    shutil.move(nome_temp, nome_arquivo)
-                    escrever_log_cam(f"Bloco movido com sucesso para a pasta definitiva: {os.path.join(data_dia, os.path.basename(nome_arquivo))}")
+                    nome_arquivo = self.get_nonconflicting_destination(nome_temp, nome_arquivo)
+                    self.safe_atomic_copy(
+                        nome_temp,
+                        nome_arquivo,
+                        temp_suffix=".finalizing",
+                    )
                 except Exception as e_move:
                     escrever_log_cam(f"Erro ao mover bloco para {pasta_dia_final} ({str(e_move)}). Salvando no backup local.")
                     try:
                         backup_dia_dir = os.path.join(PROJ_DIR, "sistema", "backup_gravacoes", stream_name, data_dia)
                         os.makedirs(backup_dia_dir, exist_ok=True)
                         backup_arquivo = os.path.join(backup_dia_dir, f"camera_{data_dia}_{hora_inicio}_ate_{hora_fim}.ts")
-                        shutil.move(nome_temp, backup_arquivo)
+                        backup_arquivo = self.get_nonconflicting_destination(nome_temp, backup_arquivo)
+                        self.safe_atomic_copy(
+                            nome_temp,
+                            backup_arquivo,
+                            temp_suffix=".finalizing",
+                        )
+                        os.remove(nome_temp)
                         escrever_log_cam(f"Bloco salvo no backup local de contingencia: {os.path.join(data_dia, os.path.basename(backup_arquivo))}")
-                        # Garante que o backup local não exceda 1 GB
-                        garantir_limite_backup_local(os.path.join(PROJ_DIR, "sistema", "backup_gravacoes"))
                     except Exception as e_backup:
                         escrever_log_cam(f"ERRO CRITICO: Nao foi possivel salvar no backup local ({str(e_backup)})")
+                else:
+                    try:
+                        os.remove(nome_temp)
+                    except Exception as e_cleanup:
+                        escrever_log_cam(f"AVISO: Bloco publicado, mas o temporario local nao foi removido ({str(e_cleanup)})")
+                    escrever_log_cam(f"Bloco publicado com seguranca na pasta definitiva: {os.path.join(data_dia, os.path.basename(nome_arquivo))}")
             else:
                 try:
                     os.remove(nome_temp)
@@ -3185,7 +4005,8 @@ class CameraManagerApp:
                     ["powershell", "-Command", cmd],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
-                    creationflags=subprocess.CREATE_NO_WINDOW
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    timeout=30,
                 )
             except Exception:
                 pass
@@ -3212,6 +4033,7 @@ class CameraManagerApp:
                 if not self.silent:
                     self.add_log(f"Iniciando thread de gravacao da camera {stream.upper()}...")
                 self.recording_active[stream] = True
+                self.recording_started_at[stream] = time.time()
                 t = threading.Thread(
                     target=self.record_stream_thread, 
                     args=(stream, idx), 
@@ -3242,61 +4064,102 @@ class CameraManagerApp:
             self.root.after(0, lambda: self.set_button_state("STOPPED"))
 
     def run_stop_sequence(self):
-        # 1. Sinaliza parada para as threads locais
-        for stream in self.streams:
-            self.recording_active[stream] = False
-            
-        # Close all active connections before waiting for threads to exit
-        for stream, conn in list(self.active_connections.items()):
-            try:
-                conn.close()
-            except Exception:
-                pass
+        with self._stop_lock:
+            # 1. Sinaliza parada e fecha as leituras para que cada thread possa
+            # concluir flush, fsync e publicacao do bloco atual.
+            for stream in self.streams:
+                self.recording_active[stream] = False
 
-        # 2. Lê os PIDs dos arquivos de lock e depois os remove
-        pids = {}
-        for stream in self.streams:
-            lock_file = os.path.join(LOGS_DIR, f"gravando_{stream}.lock")
-            if os.path.exists(lock_file):
+            for _, conn in list(self.active_connections.items()):
                 try:
-                    with open(lock_file, "r") as f:
-                        content = f.read().strip()
-                    if content.isdigit():
-                        pids[stream] = int(content)
+                    conn.close()
                 except Exception:
                     pass
-                try:
-                    os.remove(lock_file)
-                except Exception:
-                    pass
-                    
-        if not self.silent:
-            self.root.after(0, lambda: self.add_log("Finalizando tarefas de gravação..."))
-        
-        # 3. Aguarda até 3 segundos para que as threads locais ou externas encerrem (ignora nosso próprio PID)
-        my_pid = os.getpid()
-        for _ in range(15):
-            any_running = False
+
+            pids = {}
+            lock_paths = {}
+            for stream in self.streams:
+                lock_file = os.path.join(LOGS_DIR, f"gravando_{stream}.lock")
+                lock_paths[stream] = lock_file
+                if os.path.exists(lock_file):
+                    try:
+                        with open(lock_file, "r") as f:
+                            content = f.read().strip()
+                        if content.isdigit():
+                            pids[stream] = int(content)
+                    except Exception:
+                        pass
+
+            if not self.silent:
+                self.root.after(0, lambda: self.add_log("Finalizando tarefas de gravacao..."))
+
+            current_thread = threading.current_thread()
+            local_threads = [
+                (stream, thread_obj)
+                for stream, thread_obj in list(self.recording_threads.items())
+                if thread_obj is not current_thread and thread_obj.is_alive()
+            ]
+            join_deadline = time.time() + 120.0
+            for stream, thread_obj in local_threads:
+                remaining = max(0.0, join_deadline - time.time())
+                if remaining <= 0:
+                    break
+                thread_obj.join(timeout=remaining)
+
+            still_running = [stream for stream, thread_obj in local_threads if thread_obj.is_alive()]
+            if still_running and not self.silent:
+                cameras = ", ".join(stream.upper() for stream in still_running)
+                self.root.after(
+                    0,
+                    lambda cams=cameras: self.add_log(
+                        f"AVISO: tempo limite ao finalizar {cams}; temporarios foram preservados para recuperacao."
+                    ),
+                )
+
+            # 2. Aguarda processos externos antigos, sem confundir as threads
+            # internas (que usam o PID do proprio painel).
+            my_pid = os.getpid()
+            for _ in range(15):
+                external_running = any(
+                    pid != my_pid and self.is_pid_running_and_python(pid)
+                    for pid in pids.values()
+                )
+                if not external_running:
+                    break
+                time.sleep(0.2)
+
             for stream, pid in pids.items():
                 if pid != my_pid and self.is_pid_running_and_python(pid):
-                    any_running = True
-            if not any_running:
-                break
-            time.sleep(0.2)
-            
-        # 4. Contingência: Finaliza à força qualquer instância externa de gravação (PID diferente do nosso)
-        my_pid = os.getpid()
-        for stream, pid in pids.items():
-            if pid != my_pid and self.is_pid_running_and_python(pid):
+                    try:
+                        os.kill(pid, 9)
+                        if not self.silent:
+                            self.root.after(0, lambda s=stream: self.add_log(f"Processo do gravador {s.upper()} finalizado."))
+                    except Exception:
+                        pass
+
+            for stream, lock_file in lock_paths.items():
+                local_thread = self.recording_threads.get(stream)
+                if local_thread is not None and local_thread.is_alive():
+                    continue
                 try:
-                    os.kill(pid, 9)
-                    if not self.silent:
-                        self.root.after(0, lambda s=stream: self.add_log(f"Processo do gravador {s.upper()} finalizado."))
+                    if os.path.exists(lock_file):
+                        os.remove(lock_file)
                 except Exception:
                     pass
 
-        # 5. Encerra go2rtc.exe
-        subprocess.run('taskkill /F /IM go2rtc.exe', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # 3. A ponte so e encerrada depois de as gravacoes locais terem a
+            # oportunidade de fechar e publicar seus arquivos.
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", "go2rtc.exe"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=15,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except Exception:
+                pass
+            self.limpar_processos_ffmpeg_zumbis(sync=True)
 
     def click_abrir_pasta(self):
         if not os.path.exists(GDRIVE_ROOT):
@@ -3346,7 +4209,17 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         if not novo_caminho:
             messagebox.showerror("Erro", "O caminho do HD não pode ser vazio.")
             return
-            
+
+        novo_caminho = os.path.abspath(os.path.normpath(novo_caminho))
+        drive_prefix, _ = os.path.splitdrive(novo_caminho)
+        drive_root = drive_prefix + os.sep if drive_prefix else ""
+        if not drive_root or not os.path.exists(drive_root):
+            messagebox.showerror(
+                "Erro",
+                "A unidade informada nao esta conectada. Conecte o HD antes de salvar o caminho.",
+            )
+            return
+
         GDRIVE_ROOT = novo_caminho
         CONFIG["gdrive_root"] = GDRIVE_ROOT
         salvar_config(CONFIG)
@@ -3371,81 +4244,234 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             self.add_log(f"ERRO ao salvar intervalo: {str(e)}")
 
     def click_escanear_corrompidos(self, show_popup=True):
+        if self._scan_lock.locked():
+            if not self.silent:
+                self.add_log("Scanner de integridade ja esta em execucao; nova solicitacao ignorada.")
+            return
         if not self.silent:
-            self.add_log("🔄 Escaneamento automático de arquivos corrompidos em andamento...")
+            self.add_log("Escaneamento incremental de arquivos em andamento...")
         threading.Thread(target=self.escanear_videos_corrompidos_thread, args=(show_popup,), daemon=True).start()
 
-    def escanear_videos_corrompidos_thread(self, show_popup=True):
-        ffmpeg_bin = os.path.join(PROJ_DIR, "sistema", "go2rtc", "ffmpeg.exe")
-        if not os.path.exists(ffmpeg_bin):
-            if not self.silent:
-                self.add_log("ERRO: ffmpeg.exe não encontrado para escanear.")
-            return
-            
-        dirs_to_scan = []
-        for idx, stream in enumerate(self.streams):
-            dirs_to_scan.append((stream, os.path.join(PROJ_DIR, "sistema", "backup_gravacoes", stream)))
-            if os.path.exists(GDRIVE_ROOT):
-                dirs_to_scan.append((stream, self.get_gdrive_dir(stream, idx)))
-                 
-        corrupted_count = 0
-        scanned_count = 0
-        
-        for stream_name, directory in dirs_to_scan:
-            if not os.path.exists(directory):
-                continue
-             
+    def mover_video_corrompido_para_quarentena(self, filepath):
+        abs_file = os.path.abspath(filepath)
+        hd_root = os.path.abspath(GDRIVE_ROOT) if GDRIVE_ROOT else ""
+        is_hd_file = False
+        if hd_root:
             try:
-                # Escaneia recursivamente incluindo as subpastas organizadas por data
-                for root_dir, _, files in os.walk(directory):
-                    mp4_files = [f for f in files if f.endswith((".mp4", ".ts"))]
-                    for filename in mp4_files:
-                        filepath = os.path.join(root_dir, filename)
-                        scanned_count += 1
-                         
-                        is_corrupt = False
-                         
-                        if os.path.getsize(filepath) == 0:
-                            is_corrupt = True
-                        else:
-                            try:
-                                # Executa verificação rápida no ffmpeg
-                                cmd = f'"{ffmpeg_bin}" -v error -i "{filepath}" -t 1 -f null -'
-                                res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
-                                if res.returncode != 0:
-                                    is_corrupt = True
-                            except subprocess.TimeoutExpired:
-                                is_corrupt = True
-                            except Exception:
-                                is_corrupt = True
-                                 
-                        if is_corrupt:
-                            corrupted_count += 1
-                            try:
-                                os.remove(filepath)
-                                if not self.silent:
-                                    self.add_log(f"[EXCLUÍDO] Arquivo corrompido deletado: {filename}")
-                                log_filepath = os.path.join(LOGS_DIR, "corrompidos_excluidos.log")
-                                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                try:
-                                    with open(log_filepath, "a", encoding="utf-8") as log_f:
-                                        log_f.write(f"[{timestamp}] Deletado: {filepath}\n")
-                                except Exception:
-                                    pass
-                            except Exception as e_del:
-                                if not self.silent:
-                                    self.add_log(f"Erro ao deletar {filename}: {str(e_del)}")
+                is_hd_file = os.path.commonpath([abs_file, hd_root]) == hd_root
+            except Exception:
+                is_hd_file = False
+
+        if is_hd_file:
+            # Mantem a quarentena no mesmo disco para evitar copiar videos
+            # suspeitos para o disco do Windows.
+            quarantine_root = os.path.join(GDRIVE_ROOT, ".quarentena_corrompidos")
+            rel_path = os.path.relpath(abs_file, hd_root)
+        else:
+            quarantine_root = os.path.join(PROJ_DIR, "sistema", "quarentena_corrompidos")
+            try:
+                rel_path = os.path.relpath(abs_file, os.path.abspath(PROJ_DIR))
+            except Exception:
+                rel_path = os.path.basename(filepath)
+
+        dest = os.path.join(quarantine_root, rel_path)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+
+        if os.path.exists(dest):
+            base_name, ext = os.path.splitext(dest)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            dest = f"{base_name}_{stamp}{ext}"
+
+        shutil.move(filepath, dest)
+        return dest
+
+    def load_integrity_scan_state(self):
+        try:
+            with open(self._scan_state_path, "r", encoding="utf-8") as state_file:
+                state = json.load(state_file)
+            if state.get("version") == 1 and isinstance(state.get("files"), dict):
+                return state
+        except Exception:
+            pass
+        return {"version": 1, "files": {}}
+
+    def save_integrity_scan_state(self, state):
+        temp_path = self._scan_state_path + ".tmp"
+        try:
+            with open(temp_path, "w", encoding="utf-8") as state_file:
+                json.dump(state, state_file, ensure_ascii=True, separators=(",", ":"))
+                state_file.flush()
+                try:
+                    os.fsync(state_file.fileno())
+                except Exception:
+                    pass
+            os.replace(temp_path, self._scan_state_path)
+        finally:
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
             except Exception:
                 pass
-                 
-        # Executa a limpeza por rotação de vídeos (deleta arquivos >90 dias)
-        self.rotacionar_videos_hd(GDRIVE_ROOT)
 
-        if not self.silent:
-            self.add_log(f"Escaneamento concluído. {scanned_count} arquivos analisados, {corrupted_count} corrompidos excluídos.")
-            
-            if show_popup:
-                self.root.after(0, lambda: messagebox.showinfo("Scanner de Integridade", f"Varredura concluída!\n\nArquivos escaneados: {scanned_count}\nArquivos corrompidos deletados: {corrupted_count}\n\nOs arquivos corrompidos foram excluídos permanentemente para poupar espaço e limpar diretórios."))
+    def escanear_videos_corrompidos_thread(self, show_popup=True):
+        if not self._scan_lock.acquire(blocking=False):
+            return
+
+        ffmpeg_bin = os.path.join(PROJ_DIR, "sistema", "go2rtc", "ffmpeg.exe")
+        try:
+            if not os.path.exists(ffmpeg_bin):
+                if not self.silent:
+                    self.add_log("ERRO: ffmpeg.exe nao encontrado para escanear.")
+                return
+
+            dirs_to_scan = []
+            for idx, stream in enumerate(self.streams):
+                dirs_to_scan.append((stream, os.path.join(PROJ_DIR, "sistema", "backup_gravacoes", stream)))
+                gdrive_dir = self.get_gdrive_dir(stream, idx)
+                if gdrive_dir and os.path.exists(gdrive_dir):
+                    dirs_to_scan.append((stream, gdrive_dir))
+
+            state = self.load_integrity_scan_state()
+            file_state = state["files"]
+            corrupted_count = 0
+            scanned_count = 0
+            skipped_count = 0
+            inconclusive_count = 0
+            now = time.time()
+            max_files_per_run = 500 if show_popup else 200
+            limit_reached = False
+
+            for _, directory in dirs_to_scan:
+                if limit_reached:
+                    break
+                if not os.path.exists(directory):
+                    continue
+
+                try:
+                    for root_dir, _, files in os.walk(directory):
+                        video_files = [f for f in files if f.lower().endswith((".mp4", ".ts"))]
+                        for filename in video_files:
+                            if scanned_count >= max_files_per_run or inconclusive_count >= 10:
+                                limit_reached = True
+                                break
+                            filepath = os.path.join(root_dir, filename)
+                            try:
+                                stat = os.stat(filepath)
+                            except Exception:
+                                continue
+
+                            # Arquivos recentes podem ainda estar sendo publicados ou sincronizados.
+                            if now - stat.st_mtime < 300:
+                                skipped_count += 1
+                                continue
+
+                            state_key = os.path.normcase(os.path.abspath(filepath))
+                            previous = file_state.get(state_key, {})
+                            same_version = (
+                                previous.get("size") == stat.st_size
+                                and previous.get("mtime_ns") == stat.st_mtime_ns
+                            )
+                            if same_version and previous.get("result") == "ok":
+                                skipped_count += 1
+                                continue
+
+                            scanned_count += 1
+                            scan_result = "failed"
+                            try:
+                                ffmpeg_reported_error = False
+                                if stat.st_size == 0:
+                                    return_code = 1
+                                else:
+                                    cmd = [
+                                        ffmpeg_bin,
+                                        "-v", "error",
+                                        "-nostdin",
+                                        "-i", filepath,
+                                        "-t", "1",
+                                        "-f", "null",
+                                        "-",
+                                    ]
+                                    completed = subprocess.run(
+                                        cmd,
+                                        shell=False,
+                                        stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.PIPE,
+                                        text=True,
+                                        timeout=15,
+                                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                                    )
+                                    return_code = completed.returncode
+                                    ffmpeg_reported_error = bool((completed.stderr or "").strip())
+                                scan_result = "ok" if return_code == 0 and not ffmpeg_reported_error else "failed"
+                            except subprocess.TimeoutExpired:
+                                scan_result = "inconclusive"
+                                inconclusive_count += 1
+                            except Exception:
+                                scan_result = "inconclusive"
+                                inconclusive_count += 1
+
+                            previous_failures = previous.get("failures", 0) if same_version else 0
+                            failures = previous_failures + 1 if scan_result == "failed" else 0
+                            file_state[state_key] = {
+                                "size": stat.st_size,
+                                "mtime_ns": stat.st_mtime_ns,
+                                "result": scan_result,
+                                "failures": failures,
+                                "checked_at": int(time.time()),
+                            }
+                            time.sleep(0.1)
+
+                            # Exige duas falhas em varreduras separadas do mesmo arquivo.
+                            if scan_result == "failed" and failures >= 2:
+                                try:
+                                    quarantine_path = self.mover_video_corrompido_para_quarentena(filepath)
+                                    corrupted_count += 1
+                                    file_state.pop(state_key, None)
+                                    if not self.silent:
+                                        self.add_log(f"[QUARENTENA] Arquivo reprovado duas vezes: {filename}")
+                                    log_filepath = os.path.join(LOGS_DIR, "corrompidos_quarentena.log")
+                                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                    try:
+                                        with open(log_filepath, "a", encoding="utf-8") as log_f:
+                                            log_f.write(f"[{timestamp}] Quarentena: {filepath} -> {quarantine_path}\n")
+                                    except Exception:
+                                        pass
+                                except Exception as quarantine_error:
+                                    if not self.silent:
+                                        self.add_log(f"Erro ao isolar {filename}: {str(quarantine_error)}")
+                        if limit_reached:
+                            break
+                except Exception:
+                    continue
+
+            # Descarta entradas de arquivos que ja nao existem para limitar o estado.
+            state["files"] = {
+                path: item for path, item in file_state.items() if os.path.exists(path)
+            }
+            self.save_integrity_scan_state(state)
+            self.rotacionar_videos_hd(GDRIVE_ROOT)
+
+            if not self.silent:
+                self.add_log(
+                    f"Escaneamento concluido: {scanned_count} novos/alterados, "
+                    f"{skipped_count} inalterados, {inconclusive_count} inconclusivos e "
+                    f"{corrupted_count} em quarentena"
+                    f"{' (limite seguro desta rodada atingido)' if limit_reached else ''}."
+                )
+                if show_popup:
+                    self.root.after(
+                        0,
+                        lambda: messagebox.showinfo(
+                            "Scanner de Integridade",
+                            "Varredura concluida!\n\n"
+                            f"Arquivos novos ou alterados: {scanned_count}\n"
+                            f"Arquivos inalterados ignorados: {skipped_count}\n"
+                            f"Resultados inconclusivos: {inconclusive_count}\n"
+                            f"Arquivos isolados apos duas falhas: {corrupted_count}",
+                        ),
+                    )
+        finally:
+            self._scan_lock.release()
 
     def rotacionar_videos_hd(self, hd_root, max_days=90):
         try:
@@ -3454,10 +4480,10 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             limite_data = datetime.now() - timedelta(days=max_days)
             removidos = 0
             
-            # Varre as pastas de câmera (camera 1, camera 2)
-            for camera_dir in os.listdir(hd_root):
-                cam_path = os.path.join(hd_root, camera_dir)
+            # Varre apenas as pastas de gravação conhecidas (camera 1, camera 2, ...)
+            for cam_path in self.get_camera_storage_dirs():
                 if os.path.isdir(cam_path):
+                    camera_dir = os.path.basename(cam_path)
                     # Varre as subpastas de data (YYYY-MM-DD)
                     for data_dir in os.listdir(cam_path):
                         data_path = os.path.join(cam_path, data_dir)
@@ -3515,10 +4541,34 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
     def handle_exit_signal(self, signum, frame):
         self.graceful_shutdown()
 
+    def close_tk_root(self):
+        try:
+            self.root.quit()
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
+    def request_tk_shutdown(self):
+        if threading.current_thread() is threading.main_thread():
+            self.close_tk_root()
+            return
+        try:
+            self.root.after(0, self.close_tk_root)
+        except Exception:
+            self.close_tk_root()
+
     def graceful_shutdown(self):
         if getattr(self, "_shutdown_executed", False):
             return
         self._shutdown_executed = True
+
+        # Para os loops de fundo antes de matar processos; sem isso, o
+        # monitor pode religar o go2rtc enquanto a janela esta fechando.
+        self.running_monitor = False
+        self.running_sync = False
         
         # Restaura as configurações originais de suspensão do Windows
         self.apply_prevent_sleep(False)
@@ -3538,11 +4588,9 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             pass
             
         time.sleep(0.5)
-        if not self.silent:
-            try:
-                self.root.destroy()
-            except Exception:
-                pass
+        # O root tambem precisa terminar no modo --silent; caso contrario a
+        # instancia antiga bloqueia a porta e impede a reinicializacao.
+        self.request_tk_shutdown()
 
     def limpar_e_fundir_pastas_legadas(self):
         # Fusão local na nova raiz HD caso existam pastas antigas lá
@@ -3571,12 +4619,18 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
                                 
                                 os.makedirs(os.path.dirname(filepath_destino), exist_ok=True)
                                 try:
-                                    shutil.move(filepath_origem, filepath_destino)
+                                    filepath_destino = self.get_nonconflicting_destination(
+                                        filepath_origem,
+                                        filepath_destino,
+                                    )
+                                    if os.path.exists(filepath_destino):
+                                        if self.files_have_same_content(filepath_origem, filepath_destino):
+                                            os.remove(filepath_origem)
+                                    else:
+                                        # As duas pastas estao no mesmo volume; replace e atomico.
+                                        os.replace(filepath_origem, filepath_destino)
                                 except Exception:
-                                    try:
-                                        os.remove(filepath_origem)
-                                    except Exception:
-                                        pass
+                                    continue
                             
                             for d in dirs:
                                 try:
@@ -3642,10 +4696,14 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
                             nome_novo = filename.replace("temp_camera_", "recuperado_camera_")
                             dest_file = os.path.join(dest_dir, nome_novo)
                             try:
-                                shutil.move(temp_file, dest_file)
+                                dest_file = self.get_nonconflicting_destination(temp_file, dest_file)
+                                self.safe_atomic_copy(
+                                    temp_file,
+                                    dest_file,
+                                    temp_suffix=".recovering",
+                                )
+                                os.remove(temp_file)
                                 self.add_log(f"Arquivo orfao recuperado com sucesso: {nome_novo}")
-                                # Garante que o backup local não exceda 1 GB
-                                garantir_limite_backup_local(os.path.join(PROJ_DIR, "sistema", "backup_gravacoes"))
                             except Exception as e:
                                 self.add_log(f"Erro ao mover arquivo orfao {filename}: {str(e)}")
                         else:
@@ -3663,8 +4721,12 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             
         try:
             res = subprocess.run(
-                'netsh advfirewall firewall show rule name="Camera Farmacia - API (1984)"',
-                shell=True, capture_output=True, text=True
+                ["netsh", "advfirewall", "firewall", "show", "rule", "name=Camera Farmacia - API (1984)"],
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             if "api (1984)" in res.stdout.lower() or "câmera farmácia" in res.stdout.lower() or res.returncode == 0:
                 with open(marker_file, "w") as f:
@@ -3715,7 +4777,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         time.sleep(5)
         
         url_gerenciador = "https://raw.githubusercontent.com/WilliYY/camerafarmacia/main/gerenciador.pyw"
-        url_visualizador = "https://raw.githubusercontent.com/WilliYY/camerafarmacia/main/visualizador.html"
+        url_visualizador = "https://raw.githubusercontent.com/WilliYY/camerafarmacia/main/sistema/visualizador.html"
         
         try:
             req = urllib.request.Request(url_gerenciador, headers={'User-Agent': 'Mozilla/5.0'})
@@ -3742,72 +4804,160 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
     def prompt_update(self, online_version, url_gerenciador, url_visualizador):
         msg = f"Uma nova versao (v{online_version}) esta disponivel no GitHub!\n\nSua versao local e v{VERSION}.\n\nDeseja atualizar o sistema automaticamente agora?"
         if messagebox.askyesno("Atualizacao Disponivel", msg):
-            threading.Thread(target=self.run_auto_update, args=(url_gerenciador, url_visualizador), daemon=True).start()
+            threading.Thread(
+                target=self.run_auto_update,
+                args=(online_version, url_gerenciador, url_visualizador),
+                daemon=True,
+            ).start()
+
+    def download_update_payload(self, url, max_bytes):
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=15) as conn:
+            content = conn.read(max_bytes + 1)
+        if not content:
+            raise Exception("Atualizacao vazia recebida do servidor")
+        if len(content) > max_bytes:
+            raise Exception("Atualizacao excede o tamanho maximo permitido")
+        return content
+
+    def validate_update_payloads(self, expected_version, manager_content, viewer_content):
+        import ast
+        import hashlib
+        import re
+
+        manager_text = manager_content.decode("utf-8", errors="strict")
+        ast.parse(manager_text, filename="gerenciador.pyw.tmp")
+
+        match = re.search(r'VERSION\s*=\s*["\']([^"\']+)["\']', manager_text)
+        if not match or match.group(1) != expected_version:
+            raise Exception("Versao do arquivo baixado nao corresponde a atualizacao anunciada")
+        for marker in (
+            "class CameraManagerApp",
+            "def gravar_bloco_cam",
+            "def safe_atomic_copy",
+            "def validate_update_payloads",
+            "--wait-for-pid",
+            "if __name__ == \"__main__\"",
+        ):
+            if marker not in manager_text:
+                raise Exception(f"Arquivo principal invalido: marcador ausente ({marker})")
+
+        viewer_text = viewer_content.decode("utf-8", errors="strict").lower()
+        for marker in ("<html", "camera-grid", "loadactivestreams"):
+            if marker not in viewer_text:
+                raise Exception(f"Visualizador invalido: marcador ausente ({marker})")
+
+        return hashlib.sha256(manager_content).hexdigest()
+
+    def write_update_stage(self, filepath, content):
+        with open(filepath, "wb") as staged_file:
+            staged_file.write(content)
+            staged_file.flush()
+            try:
+                os.fsync(staged_file.fileno())
+            except Exception:
+                pass
+
+    def restore_update_backup(self, backup_path, destination_path):
+        if not os.path.exists(backup_path):
+            return
+        restore_temp = destination_path + ".rollback.tmp"
+        shutil.copy2(backup_path, restore_temp)
+        os.replace(restore_temp, destination_path)
             
-    def run_auto_update(self, url_gerenciador, url_visualizador):
+    def run_auto_update(self, online_version, url_gerenciador, url_visualizador):
         self.add_log("Iniciando atualizacao automatica...")
         
         gerenciador_temp = os.path.join(PROJ_DIR, "gerenciador.pyw.tmp")
         visualizador_temp = os.path.join(PROJ_DIR, "sistema", "visualizador.html.tmp")
+        dest_gerenciador = os.path.join(PROJ_DIR, "gerenciador.pyw")
+        dest_visualizador = os.path.join(PROJ_DIR, "sistema", "visualizador.html")
+        old_gerenciador = os.path.join(PROJ_DIR, "gerenciador.pyw.old")
+        old_visualizador = os.path.join(PROJ_DIR, "sistema", "visualizador.html.old")
+        recording_was_active = any(self.recording_active.values())
+        stopped_for_update = False
+        backups_ready = False
+        loops_paused = False
         
         try:
-            req_g = urllib.request.Request(url_gerenciador, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req_g, timeout=10) as conn:
-                g_content = conn.read()
-                
-            req_v = urllib.request.Request(url_visualizador, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req_v, timeout=10) as conn:
-                v_content = conn.read()
-                
-            with open(gerenciador_temp, "wb") as f:
-                f.write(g_content)
-            with open(visualizador_temp, "wb") as f:
-                f.write(v_content)
-                
+            g_content = self.download_update_payload(url_gerenciador, 5 * 1024 * 1024)
+            v_content = self.download_update_payload(url_visualizador, 2 * 1024 * 1024)
+            update_hash = self.validate_update_payloads(online_version, g_content, v_content)
+
+            self.write_update_stage(gerenciador_temp, g_content)
+            self.write_update_stage(visualizador_temp, v_content)
+            self.add_log(f"Atualizacao validada antes da instalacao (SHA-256: {update_hash[:12]}...).")
+
             self.add_log("Parando gravacoes para aplicar atualizacao...")
+            self.running_monitor = False
+            self.running_sync = False
+            loops_paused = True
+            stopped_for_update = True
             self.run_stop_sequence()
             time.sleep(1.0)
             
             # Técnica de rename no Windows para evitar erro de arquivo travado
-            dest_gerenciador = os.path.join(PROJ_DIR, "gerenciador.pyw")
-            old_gerenciador = os.path.join(PROJ_DIR, "gerenciador.pyw.old")
-            
-            if os.path.exists(old_gerenciador):
-                try:
-                    os.remove(old_gerenciador)
-                except Exception:
-                    pass
-                    
-            try:
-                os.rename(dest_gerenciador, old_gerenciador)
-            except Exception:
-                pass
-                
-            shutil.move(gerenciador_temp, dest_gerenciador)
+            shutil.copy2(dest_gerenciador, old_gerenciador)
             
             # Para o visualizador.html não precisa de rename pois ele não está travado em execução
-            dest_visualizador = os.path.join(PROJ_DIR, "sistema", "visualizador.html")
-            if os.path.exists(dest_visualizador):
-                try:
-                    os.remove(dest_visualizador)
-                except Exception:
-                    pass
-            shutil.move(visualizador_temp, dest_visualizador)
+            shutil.copy2(dest_visualizador, old_visualizador)
+            backups_ready = True
+            os.replace(gerenciador_temp, dest_gerenciador)
+            os.replace(visualizador_temp, dest_visualizador)
             
             self.add_log("Sistema atualizado com sucesso!")
             self.root.after(0, lambda: messagebox.showinfo("Atualizado", "O sistema foi atualizado com sucesso para a nova versao!\n\nO aplicativo sera reiniciado agora."))
             
-            # Restart
-            subprocess.Popen([sys.executable, os.path.join(PROJ_DIR, "gerenciador.pyw")])
-            self.root.after(0, self.root.quit)
+            restart_args = [
+                sys.executable,
+                os.path.join(PROJ_DIR, "gerenciador.pyw"),
+                "--wait-for-pid",
+                str(os.getpid()),
+            ]
+            if self.silent:
+                restart_args.append("--silent")
+            subprocess.Popen(restart_args, creationflags=subprocess.CREATE_NO_WINDOW)
+            self.root.after(0, self.graceful_shutdown)
         except Exception as e:
             self.add_log(f"ERRO durante a atualizacao: {str(e)}")
+            rollback_errors = []
+            if backups_ready:
+                for backup_path, destination_path in (
+                    (old_gerenciador, dest_gerenciador),
+                    (old_visualizador, dest_visualizador),
+                ):
+                    try:
+                        self.restore_update_backup(backup_path, destination_path)
+                    except Exception as rollback_error:
+                        rollback_errors.append(str(rollback_error))
+
+            if rollback_errors:
+                self.add_log(f"ERRO CRITICO no rollback da atualizacao: {'; '.join(rollback_errors)}")
+            elif stopped_for_update and backups_ready:
+                self.add_log("Arquivos anteriores restaurados apos falha na atualizacao.")
+            elif stopped_for_update:
+                self.add_log("Atualizacao interrompida antes da troca dos arquivos ativos.")
+
             for temp_file in [gerenciador_temp, visualizador_temp]:
                 if os.path.exists(temp_file):
                     try:
                         os.remove(temp_file)
                     except Exception:
                         pass
+            if loops_paused:
+                self.running_monitor = True
+                self.running_sync = True
+                if not getattr(self, "monitor_thread", None) or not self.monitor_thread.is_alive():
+                    self.monitor_thread = threading.Thread(target=self.monitor_loop, daemon=True)
+                    self.monitor_thread.start()
+                if not getattr(self, "sync_thread", None) or not self.sync_thread.is_alive():
+                    self.sync_thread = threading.Thread(target=self.background_sync_loop, daemon=True)
+                    self.sync_thread.start()
+            if stopped_for_update and recording_was_active and not rollback_errors:
+                try:
+                    self.run_start_sequence()
+                except Exception as restart_error:
+                    self.add_log(f"ERRO ao retomar gravacoes apos rollback: {str(restart_error)}")
             self.root.after(0, lambda: messagebox.showerror("Erro de Atualizacao", f"Nao foi possivel atualizar o sistema:\n{str(e)}"))
 
     # ================= DIAGNÓSTICOS =================
@@ -3847,8 +4997,8 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         except Exception as e:
             log.append(f" - ERRO ao resolver DNS para {host}: {str(e)}")
 
-        # 3. Google Drive (G:)
-        log.append("\n--- [3] ARMAZENAMENTO NO GOOGLE DRIVE ---")
+        # 3. Armazenamento principal
+        log.append("\n--- [3] ARMAZENAMENTO PRINCIPAL ---")
         if os.path.exists(GDRIVE_ROOT):
             log.append(f" - Pasta Raiz Câmeras: Encontrada ({GDRIVE_ROOT})")
             
@@ -3872,12 +5022,12 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             log.append("        certifique-se de que a conta de e-mail vinculada possui acesso de 'Editor'")
             log.append("        (e não apenas de 'Leitor/Visualizador') nas pastas compartilhadas na nuvem.")
         else:
-            log.append(f" - ERRO: Diretório Raiz G:\\Meu Drive\\CAMERAS não foi encontrado!")
+            log.append(f" - ERRO: destino configurado nao foi encontrado: {GDRIVE_ROOT or 'NAO CONFIGURADO'}")
 
         # 4. Processos em Execução
         log.append("\n--- [4] PROCESSOS EM EXECUÇÃO ---")
-        go2rtc_running = self.check_process_go2rtc()
-        log.append(f" - Processo go2rtc.exe: {'RODANDO' if go2rtc_running else 'PARADO'}")
+        go2rtc_probe = self.probe_go2rtc_api()
+        log.append(f" - API go2rtc: {'RESPONDENDO' if go2rtc_probe['ok'] else 'INDISPONIVEL'}")
         for stream in self.streams:
             c_running = self.check_process_recorder(f"gravando_{stream}.lock", stream)
             log.append(f" - Gravador Câmera {stream.upper()}: {'RODANDO' if c_running else 'PARADO'}")
@@ -3901,13 +5051,17 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             s1984.close()
             with urllib.request.urlopen("http://127.0.0.1:1984/api/streams", timeout=1.0) as conn:
                 data = json.loads(conn.read().decode())
-                log.append(f" - Configuração de streams na API: {json.dumps(data, indent=2)}")
+                stream_names = sorted(data.keys()) if isinstance(data, dict) else []
+                log.append(f" - Streams reconhecidos pela API: {', '.join(stream_names) if stream_names else 'nenhum'}")
         except Exception as e:
             log.append(f" - Porta API (1984): FECHADA ou erro ao consultar: {str(e)}")
 
         # 6. Ambiente Python
         log.append("\n--- [6] AMBIENTE DO SISTEMA ---")
         log.append(f" - Versão do Python: {sys.version}")
+
+        log.append("\n--- [7] AVALIADOR DE SAUDE ---")
+        log.extend(self.get_health_report_lines())
 
         diag_file = os.path.join(PROJ_DIR, "sistema", "diagnostico.txt")
         try:
@@ -3940,18 +5094,21 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             log.append(f" - {name}: {status}")
         
         log.append("\n--- [2] PROCESSOS ---")
-        go2rtc_running = self.check_process_go2rtc()
-        log.append(f" - go2rtc.exe: {'RODANDO' if go2rtc_running else 'PARADO'}")
+        go2rtc_probe = self.probe_go2rtc_api()
+        log.append(f" - API go2rtc: {'RESPONDENDO' if go2rtc_probe['ok'] else 'INDISPONIVEL'}")
         for stream in self.streams:
             c_running = self.check_process_recorder(f"gravando_{stream}.lock", stream)
             log.append(f" - Gravador {stream.upper()}: {'RODANDO' if c_running else 'PARADO'}")
         
-        log.append(f"\n--- [3] Google Drive ---")
+        log.append(f"\n--- [3] ARMAZENAMENTO PRINCIPAL ---")
         log.append(f" - Disponível: {'SIM' if os.path.exists(GDRIVE_ROOT) else 'NÃO'}")
         
         log.append(f"\n--- [4] AMBIENTE ---")
         log.append(f" - Python: {sys.version}")
         log.append(f" - IP Local: {self.local_ip}")
+
+        log.append("\n--- [5] AVALIADOR DE SAUDE ---")
+        log.extend(self.get_health_report_lines())
         
         diag_file = os.path.join(PROJ_DIR, "sistema", "diagnostico.txt")
         try:
@@ -3963,7 +5120,51 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             if not self.silent:
                 self.root.after(0, lambda: self.add_log(f"Erro ao salvar diagnóstico automático: {str(e)}"))
 
+def run_standalone_health_check():
+    app = CameraManagerApp.__new__(CameraManagerApp)
+    app.silent = True
+    configured_streams = CONFIG.get("streams") or {}
+    app.streams = [name for name in configured_streams if not name.endswith(("_live", "_mjpeg"))]
+    if not app.streams:
+        app.streams = ["farmacia", "farmacia2"]
+    app.recording_active = {stream: False for stream in app.streams}
+    app.recording_threads = {}
+    app.recording_destinations = {}
+    app.recording_started_at = {}
+    app.reconnect_failures = {}
+    app._last_go2rtc_ok = False
+    app.go2rtc_restart_count = 0
+    app._smart_snapshot = app.query_smart_status()
+    app._power_snapshot = app.read_power_snapshot()
+    app._usb_report_cache = None
+    app._usb_report_cache_time = 0.0
+
+    try:
+        snapshot = app.collect_health_snapshot()
+        app.persist_health_snapshot(snapshot)
+        print(json.dumps(snapshot, ensure_ascii=True, indent=2))
+        return {"healthy": 0, "warning": 1, "critical": 2}[snapshot["overall_status"]]
+    except Exception as error:
+        print(json.dumps({"overall_status": "error", "error": str(error)}, ensure_ascii=True))
+        return 3
+
+
 _instance_socket = None
+
+def wait_for_process_exit(pid, timeout_seconds=300):
+    if not pid or pid <= 0 or pid == os.getpid():
+        return
+    try:
+        synchronize = 0x00100000
+        handle = ctypes.windll.kernel32.OpenProcess(synchronize, False, pid)
+        if not handle:
+            return
+        try:
+            ctypes.windll.kernel32.WaitForSingleObject(handle, int(timeout_seconds * 1000))
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+    except Exception:
+        time.sleep(3)
 
 def garantir_instancia_unica(silent=False):
     global _instance_socket
@@ -3980,7 +5181,15 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Gerenciador NVR Câmeras Farmácia")
     parser.add_argument("--silent", action="store_true", help="Inicia o sistema de gravação em segundo plano sem abrir a janela")
+    parser.add_argument("--health-check", action="store_true", help="Executa diagnostico nao invasivo sem iniciar cameras")
+    parser.add_argument("--wait-for-pid", type=int, default=0, help=argparse.SUPPRESS)
     args_cli = parser.parse_args()
+
+    if args_cli.health_check:
+        sys.exit(run_standalone_health_check())
+
+    if args_cli.wait_for_pid:
+        wait_for_process_exit(args_cli.wait_for_pid)
     
     if not garantir_instancia_unica(args_cli.silent):
         if not args_cli.silent:

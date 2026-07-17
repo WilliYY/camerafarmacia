@@ -1,13 +1,16 @@
 # Arquivos temporários e locais
 sistema/diagnostico.txt
 *.tmp
+*.old
 *.log
 *.lock
 sistema/gravando_temp/
 sistema/go2rtc/ffmpeg.exe
 sistema/config.json
+sistema/config.json.bak
 sistema/logs/
 sistema/backup_gravacoes/
+sistema/quarentena_corrompidos/
 .firewall_configured
 
 # Cache do Python

@@ -1,0 +1,85 @@
+# Regras do Projeto NVR Camera Farmacia
+
+## Missao
+
+Este projeto e um NVR Windows destinado a operacao continua. A prioridade e
+preservar gravacoes, evitar preencher ou desgastar discos desnecessariamente e
+encerrar processos de forma previsivel. Melhorias devem ser incrementais e
+compativeis com o fluxo atual de Python, Tkinter, go2rtc e FFmpeg.
+
+## Enriquecimento dos pedidos
+
+O usuario pode escrever pedidos curtos ou informais. Antes de agir, transforme
+internamente o pedido em um briefing com:
+
+1. Objetivo real e resultado esperado.
+2. Contexto do projeto e componentes afetados.
+3. Riscos para gravacoes, discos, Windows e atualizacao.
+4. Restricoes, principalmente "sem quebrar nada".
+5. Criterios de aceite e validacoes executaveis.
+
+Nao exija que o usuario conheca termos tecnicos. Descubra no repositorio tudo o
+que puder e pergunte apenas quando a resposta nao puder ser inferida com
+seguranca. Quando houver ambiguidade relevante, informe em uma frase qual foi o
+pedido interpretado antes de editar.
+
+## Fluxo obrigatorio
+
+1. Leia este arquivo, `README.md`, `git status` e os trechos afetados.
+2. Preserve mudancas existentes e nunca reverta trabalho alheio.
+3. Mapeie produtores, consumidores, threads e arquivos antes de editar estado
+   compartilhado.
+4. Prefira mudancas pequenas dentro das funcoes existentes.
+5. Valide sintaxe, testes isolados e `git diff --check`.
+6. Nao inicie cameras, go2rtc, FFmpeg real ou gravacao real sem necessidade e
+   sem avisar o usuario.
+7. Relate o que foi validado e o que ainda depende de teste real prolongado.
+8. Depois da validacao, crie um commit contendo somente os arquivos da tarefa,
+   salvo quando o usuario pedir explicitamente para nao commitar.
+
+## Regras de seguranca das gravacoes
+
+- Nunca apague video nao vazio que ainda nao tenha uma copia validada.
+- Nunca considere apenas o tamanho como prova de que dois videos sao iguais.
+- Publique arquivos por temporario no destino, `fsync` e troca atomica.
+- Preserve temporarios quando houver erro, timeout, desligamento ou destino
+  indisponivel.
+- Nao sobrescreva arquivos de mesmo nome com conteudo diferente; gere um nome
+  alternativo.
+- Fallback local deve respeitar reserva minima de espaco e nunca excluir
+  material pendente para cumprir um limite arbitrario.
+- Scanner deve ser serial, incremental e limitado. Timeout e inconclusivo, nao
+  prova de corrupcao. Quarentena exige confirmacao e fica no mesmo disco.
+- Encerramento deve parar novas tarefas, fechar conexoes, aguardar gravadores e
+  somente depois encerrar go2rtc e Tkinter.
+- Nunca escolha uma unidade apenas por ser `D:`. Use configuracao explicita,
+  pasta existente ou identidade validada do volume.
+- Testes de armazenamento usam somente diretorios temporarios. Nunca testam
+  exclusao, rotacao ou quarentena sobre gravacoes reais.
+
+## Acoes que exigem cuidado adicional
+
+- Exclusao ou mudanca da retencao de videos.
+- Alteracao do Windows, energia USB, tarefas agendadas ou firewall.
+- Instalacao ou atualizacao de executaveis e dependencias.
+- Execucao de `taskkill`, desligamento, gravacao ou scanner sobre o acervo real.
+- Mudanca de credenciais ou identificadores das cameras. Nao exponha segredos
+  em logs, testes, respostas ou commits.
+
+## Contexto operacional conhecido
+
+- O aplicativo e usado principalmente em modo silencioso e deve operar 24h.
+- Ha historico de `LiveKernelEvent 144` ligado a `USBXHCI`; isso pode indicar
+  controlador, driver, cabo, energia ou dispositivo USB, e nao apenas o Python.
+- O arquivo principal e grande e concentra GUI, gravacao, sincronizacao,
+  manutencao e atualizacao. Refatoracoes devem ser graduais e protegidas por
+  testes antes de separar modulos.
+- O fluxo direto `/api/stream.ts?src=NOME` deve ser preservado, sem adicionar
+  transcodificacao continua ou dependencias pesadas.
+
+## Definicao de pronto
+
+Uma mudanca so esta pronta quando preserva a origem em todas as falhas
+simuladas, nao usa o HD real nos testes, passa pela compilacao Python, pelos
+testes de regressao e pela revisao final do diff. Para operacao 24h, deixe claro
+quando ainda falta teste real de duracao, queda de energia ou desconexao USB.

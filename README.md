@@ -1,4 +1,4 @@
-# 🎥 NVR Inteligente Câmeras Farmácia — Versão 4.9
+# 🎥 NVR Inteligente Câmeras Farmácia — Versão 4.10
 
 Este projeto é uma solução completa de NVR (Network Video Recorder) local e híbrida de baixíssimo consumo de hardware. Ele foi projetado para capturar, gravar, monitorar e gerenciar câmeras inteligentes compatíveis com o ecossistema Tuya, Smart Life e Positivo, com foco em segurança, portabilidade e tolerância a falhas.
 
@@ -26,9 +26,9 @@ As gravações são organizadas automaticamente em pastas diárias (`AAAA-MM-DD`
 
 ### 2. Sincronização e Contingência Offline Inteligente
 
-- **Destino primário:** Google Drive espelhado em `G:\Meu Drive\CAMERAS`.
-- **Backup local automático:** se o Drive estiver offline, sem espaço ou inacessível, as gravações são desviadas para `backup_gravacoes`.
-- **Sincronizador em background:** uma thread monitora a disponibilidade do Drive. Quando a conexão volta, os arquivos locais são enviados para o destino correto e removidos do HD local para poupar espaço.
+- **Destino primário:** HD configurado pelo aplicativo, identificado preferencialmente pelo volume `FARMACIA`.
+- **Backup local automático:** se o HD estiver offline, sem espaço ou inacessível, as gravações são desviadas para `backup_gravacoes`.
+- **Sincronizador em background:** uma thread monitora a disponibilidade do HD. Quando a conexão volta, os arquivos locais são enviados para o destino correto e removidos do backup somente após validação.
 
 ### 3. Visualização ao Vivo de Baixíssima Latência (MJPEG Stream)
 
@@ -52,7 +52,7 @@ O grid é responsivo e preserva a proporção original de 16:9:
 ### 5. Prevenção de Duplicidade de Rede & Limpeza
 
 - **Heartbeat JSON:** a cada 30 segundos, o gravador envia batimentos cardíacos para a pasta de destino. Se outro PC tentar gravar a mesma câmera no mesmo diretório, o conflito é detectado e o segundo processo encerra a gravação automaticamente.
-- **Auto-escaneamento:** a cada 3 horas, o sistema varre os diretórios e remove vídeos corrompidos ou zerados.
+- **Auto-escaneamento:** a cada 3 horas, o sistema verifica apenas arquivos novos ou alterados. A quarentena exige duas falhas e permanece no mesmo disco.
 - **Auto-diagnóstico:** a cada 6 horas, gera um relatório de integridade em `diagnostico.txt`.
 - **Logs coloridos:** o painel mostra mensagens por tipo: informação, sucesso, aviso e erro, com limpeza automática limitada a 200 linhas.
 - **Feedback de voz:** avisos como "Gravando" e "Gravação parada" são disparados em segundo plano.
@@ -104,10 +104,10 @@ O gerenciador detecta os streams configurados e monta a interface automaticament
 
 ### 3. Configurar o destino das gravações
 
-Por padrão, o destino é:
+Na instalação atual, o destino configurado é:
 
 ```text
-G:\Meu Drive\CAMERAS
+D:\farmacia camera
 ```
 
 Esse caminho também pode ser ajustado pela interface gráfica ou pelo arquivo local `config.json`.
@@ -137,3 +137,29 @@ pythonw.exe gerenciador.pyw --silent
 5. **Não quebre as pastas diárias.** Gravações e sincronização devem respeitar subpastas `AAAA-MM-DD`.
 6. **Proteja contra duplicidade.** O heartbeat JSON é parte crítica da segurança de gravação em rede.
 7. **Evite dependências pesadas.** O projeto foi desenhado para rodar com baixo consumo em máquinas simples.
+
+---
+
+## Diagnostico de Saude
+
+O NVR v4.10 possui um avaliador automatico executado em segundo plano. Ele
+correlaciona espaco local, disponibilidade do HD, backups pendentes, threads de
+gravacao, reconexoes, memoria, energia, SMART informado pelo Windows e
+relatorios `Kernel_144`.
+
+O ultimo estado e publicado atomicamente em:
+
+```text
+sistema\logs\health_status.json
+```
+
+Tambem e possivel executar uma coleta sem abrir a interface, iniciar cameras ou
+alterar gravacoes:
+
+```powershell
+python gerenciador.pyw --health-check
+```
+
+Codigos de saida: `0` saudavel, `1` aviso, `2` critico e `3` falha do proprio
+diagnostico. O status SMART generico do Windows nao substitui a ferramenta do
+fabricante do disco.
