@@ -12,6 +12,7 @@
 - Avaliador central de saude com relatorio JSON atomico e alertas por transicao.
 - Logs locais persistentes, limitados e espelhados no HD por thread isolada.
 - Autodiagnostico `--health-check` sem iniciar cameras ou go2rtc.
+- Ensaio real limitado por tempo e interrupcao local com `--safe-stop`.
 
 ## Prioridade alta
 
@@ -25,9 +26,10 @@
    pelo aplicativo e testada sem criar um ciclo infinito de reinicializacao.
 
 3. **Teste prolongado controlado**
-   Executar primeiro com streams simulados por 24 horas e depois com uma camera
-   real em janela supervisionada. Medir memoria, CPU, crescimento de logs,
-   temporarios, reconexoes e espaco nos discos.
+   O ensaio real curto agora possui encerramento automatico. Ainda falta
+   executar streams simulados por 24 horas e depois cameras reais em janela
+   supervisionada, medindo memoria, CPU, logs, temporarios, reconexoes, espaco
+   e novos eventos USB.
 
 ## Prioridade media
 

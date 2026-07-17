@@ -140,6 +140,46 @@ class StorageSafetyTests(unittest.TestCase):
         self.assertEqual(status.ACLineStatus, 255)
         self.assertEqual(status.BatteryLifePercent, 255)
 
+    def test_smoke_test_duration_is_bounded(self):
+        self.assertEqual(self.module.normalize_smoke_test_seconds(0), 0)
+        self.assertEqual(self.module.normalize_smoke_test_seconds(30), 30)
+        self.assertEqual(self.module.normalize_smoke_test_seconds(1800), 1800)
+        with self.assertRaises(ValueError):
+            self.module.normalize_smoke_test_seconds(29)
+        with self.assertRaises(ValueError):
+            self.module.normalize_smoke_test_seconds(1801)
+
+    def test_safe_shutdown_request_runs_only_once(self):
+        app = self.new_app()
+        app._shutdown_request_lock = threading.Lock()
+        app._shutdown_requested = False
+        messages = []
+        completed = threading.Event()
+        app.add_log = messages.append
+        app.graceful_shutdown = completed.set
+
+        app.request_safe_shutdown("teste")
+        app.request_safe_shutdown("teste repetido")
+
+        self.assertTrue(completed.wait(1.0))
+        self.assertEqual(messages, ["Encerramento seguro solicitado: teste."])
+
+    def test_start_sequence_does_not_restart_after_shutdown(self):
+        app = self.new_app()
+        app._shutdown_executed = True
+        app.running_monitor = False
+        app.run_stop_sequence = lambda: None
+        start_attempted = []
+        app.iniciar_go2rtc = lambda: start_attempted.append(True)
+        original_sleep = self.module.time.sleep
+        self.module.time.sleep = lambda _seconds: None
+        try:
+            app.run_start_sequence()
+        finally:
+            self.module.time.sleep = original_sleep
+
+        self.assertEqual(start_attempted, [])
+
     def test_silent_logs_are_persistent_and_memory_bounded(self):
         app = self.new_app()
         app.silent = True
@@ -314,6 +354,8 @@ class StorageSafetyTests(unittest.TestCase):
         app.recording_threads = {"cam": FakeAliveThread(True)}
         app.recording_destinations = {"cam": "hd"}
         app.recording_started_at = {"cam": time.time() - 3600}
+        app.stream_bytes_written = {"cam": 1024}
+        app.stream_last_data_at = {"cam": time.time()}
         app.reconnect_failures = {"cam": 0}
         app._last_go2rtc_ok = True
         app.go2rtc_restart_count = 0
@@ -335,6 +377,13 @@ class StorageSafetyTests(unittest.TestCase):
 
         healthy = app.collect_health_snapshot()
         self.assertEqual(healthy["overall_status"], "healthy")
+        self.assertEqual(healthy["metrics"]["stream_data"]["cam"]["bytes_written_session"], 1024)
+
+        app.stream_last_data_at["cam"] = time.time() - 120
+        no_data = app.collect_health_snapshot()
+        no_data_codes = {issue["code"] for issue in no_data["issues"]}
+        self.assertIn("STREAM_NO_DATA", no_data_codes)
+        app.stream_last_data_at["cam"] = time.time()
 
         app.recording_threads["cam"] = FakeAliveThread(False)
         app.reconnect_failures["cam"] = 7

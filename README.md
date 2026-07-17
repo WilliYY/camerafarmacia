@@ -1,4 +1,4 @@
-# 🎥 NVR Inteligente Câmeras Farmácia — Versão 4.10
+# 🎥 NVR Inteligente Câmeras Farmácia — Versão 4.11
 
 Este projeto é uma solução completa de NVR (Network Video Recorder) local e híbrida de baixíssimo consumo de hardware. Ele foi projetado para capturar, gravar, monitorar e gerenciar câmeras inteligentes compatíveis com o ecossistema Tuya, Smart Life e Positivo, com foco em segurança, portabilidade e tolerância a falhas.
 
@@ -142,10 +142,10 @@ pythonw.exe gerenciador.pyw --silent
 
 ## Diagnostico de Saude
 
-O NVR v4.10 possui um avaliador automatico executado em segundo plano. Ele
+O NVR v4.11 possui um avaliador automatico executado em segundo plano. Ele
 correlaciona espaco local, disponibilidade do HD, backups pendentes, threads de
-gravacao, reconexoes, memoria, energia, SMART informado pelo Windows e
-relatorios `Kernel_144`.
+gravacao, ultimo byte recebido por camera, reconexoes, memoria, energia, SMART
+informado pelo Windows e relatorios `Kernel_144`.
 
 O ultimo estado e publicado atomicamente em:
 
@@ -163,3 +163,25 @@ python gerenciador.pyw --health-check
 Codigos de saida: `0` saudavel, `1` aviso, `2` critico e `3` falha do proprio
 diagnostico. O status SMART generico do Windows nao substitui a ferramenta do
 fabricante do disco.
+
+## Ensaio Real Controlado
+
+Mudancas que afetam gravacao, go2rtc, encerramento ou armazenamento podem ser
+validadas por um ensaio real com limite de 30 a 1800 segundos. O modo e
+silencioso, inicia as cameras configuradas e usa o mesmo encerramento seguro do
+uso normal ao atingir o limite:
+
+```powershell
+python gerenciador.pyw --smoke-test-seconds 180
+```
+
+Para interromper antecipadamente sem usar `taskkill`:
+
+```powershell
+python gerenciador.pyw --safe-stop
+```
+
+O comando de parada aceita conexao somente na interface local `127.0.0.1`. Um
+ensaio deve ser precedido por `--health-check` e seguido pela verificacao de
+processos, temporarios, arquivos publicados, espaco livre e novos relatorios
+`Kernel_144`.

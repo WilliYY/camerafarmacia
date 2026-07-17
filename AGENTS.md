@@ -37,6 +37,30 @@ pedido interpretado antes de editar.
 8. Depois da validacao, crie um commit contendo somente os arquivos da tarefa,
    salvo quando o usuario pedir explicitamente para nao commitar.
 
+## Protocolo de teste real
+
+Quando a mudanca afetar gravacao, streams, go2rtc, encerramento, energia ou
+armazenamento, prefira um ensaio real controlado depois dos testes isolados:
+
+1. Execute `--health-check` e registre espaco de C e do HD, processos e total de
+   relatorios `Kernel_144` nas ultimas 24 horas.
+2. Confirme que nao existe outra instancia do NVR antes do ensaio.
+3. Use `--smoke-test-seconds 180`, ou outro limite entre 30 e 1800 segundos.
+4. Durante o ensaio, confirme os nomes dos streams sem expor URLs ou
+   credenciais, crescimento dos temporarios, CPU, memoria e threads.
+5. Interrompa com `--safe-stop` se o HD desconectar, surgir novo `Kernel_144`,
+   a memoria do processo passar de 750 MB ou a gravacao parar de crescer.
+6. Ao final, confirme que nao sobraram processos do ensaio, arquivos de trava
+   ou artefatos `.finalizing`, `.syncing` e `.recovering`.
+7. Valide os arquivos novos sem mover, apagar, colocar em quarentena ou rodar o
+   scanner sobre o acervo real.
+8. Compare o diagnostico final com a linha de base e relate qualquer piora.
+
+Nao use um ensaio real para substituir testes isolados. Para mudancas apenas em
+documentacao ou funcoes puras, ele nao e necessario. Teste de 24 horas exige
+janela supervisionada e nao deve comecar enquanto os eventos USBXHCI ainda
+estiverem aumentando.
+
 ## Regras de seguranca das gravacoes
 
 - Nunca apague video nao vazio que ainda nao tenha uma copia validada.

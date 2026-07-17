@@ -345,7 +345,7 @@ class SYSTEM_POWER_STATUS(ctypes.Structure):
     ]
 
 # Versão do Sistema (usada para o auto-update)
-VERSION = "4.10"
+VERSION = "4.11"
 
 # Configurações do Projeto
 PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1075,9 +1075,10 @@ class LiveCameraWidget(tk.Frame):
         self.start_stream()
 
 class CameraManagerApp:
-    def __init__(self, root, silent=False):
+    def __init__(self, root, silent=False, smoke_test_seconds=0):
         self.root = root
         self.silent = silent
+        self.smoke_test_seconds = smoke_test_seconds
         
         # Registra gancho de encerramento seguro via atexit
         import atexit
@@ -1098,6 +1099,7 @@ class CameraManagerApp:
         self._ui_log_queue = queue.Queue(maxsize=1000)
         self._external_log_queue = queue.Queue(maxsize=500)
         self._stop_lock = threading.Lock()
+        self._shutdown_request_lock = threading.Lock()
         self._scan_lock = threading.Lock()
         self._scan_state_path = os.path.join(LOGS_DIR, "integrity_scan_state.json")
         self._health_lock = threading.Lock()
@@ -1111,6 +1113,8 @@ class CameraManagerApp:
         self._power_snapshot = {"status": "unknown", "battery_percent": None}
         self.go2rtc_restart_count = 0
         self.recording_started_at = {}
+        self.stream_bytes_written = {}
+        self.stream_last_data_at = {}
         self.alerted_duplicates = {} # Evita exibir alerta popup repetidamente
         
         # Cache de performance para evitar chamadas repetidas
@@ -1192,6 +1196,15 @@ class CameraManagerApp:
         # 5. Inicia o servidor de escuta de instância única
         self.iniciar_servidor_instancia()
 
+        if self.smoke_test_seconds:
+            self.add_log(
+                f"[SMOKE] Ensaio real controlado iniciado por {self.smoke_test_seconds} segundos."
+            )
+            self.root.after(
+                self.smoke_test_seconds * 1000,
+                lambda: self.request_safe_shutdown("fim do ensaio real controlado"),
+            )
+
     def iniciar_servidor_instancia(self):
         def server_loop():
             global _instance_socket
@@ -1199,14 +1212,30 @@ class CameraManagerApp:
                 return
             while True:
                 try:
-                    conn, addr = _instance_socket.accept()
-                    data = conn.recv(1024).decode('utf-8').strip()
-                    if data == "SHOW":
-                        self.root.after(0, self.restaurar_janela_oculta)
-                    conn.close()
+                    conn, _addr = _instance_socket.accept()
                 except Exception:
                     break
+                try:
+                    with conn:
+                        conn.settimeout(2.0)
+                        data = conn.recv(1024).decode("utf-8").strip()
+                        if data == "SHOW":
+                            self.root.after(0, self.restaurar_janela_oculta)
+                            conn.sendall(b"OK")
+                        elif data == "STOP_SAFE":
+                            conn.sendall(b"OK")
+                            self.request_safe_shutdown("comando local --safe-stop")
+                except Exception:
+                    continue
         threading.Thread(target=server_loop, daemon=True).start()
+
+    def request_safe_shutdown(self, reason):
+        with self._shutdown_request_lock:
+            if getattr(self, "_shutdown_requested", False):
+                return
+            self._shutdown_requested = True
+        self.add_log(f"Encerramento seguro solicitado: {reason}.")
+        threading.Thread(target=self.graceful_shutdown, daemon=False).start()
 
     def restaurar_janela_oculta(self):
         self.silent = False
@@ -2175,6 +2204,8 @@ class CameraManagerApp:
                             daemon=True
                         )
                         self.recording_started_at[stream] = time.time()
+                        self.stream_bytes_written[stream] = 0
+                        self.stream_last_data_at.pop(stream, None)
                         self.recording_threads[stream] = new_t
                         new_t.start()
             
@@ -2552,6 +2583,7 @@ class CameraManagerApp:
 
         block_minutes = CONFIG.get("bloco_minutos", 30)
         stale_after = max(20 * 60, (block_minutes * 60) + (15 * 60))
+        stream_data_metrics = {}
         for index, stream in enumerate(self.streams):
             if not self.recording_active.get(stream, False):
                 continue
@@ -2584,6 +2616,27 @@ class CameraManagerApp:
             latest_mtime = self.find_latest_video_mtime(storage_dirs)
             started_at = self.recording_started_at.get(stream, now)
             running_for = now - started_at
+            bytes_written = getattr(self, "stream_bytes_written", {}).get(stream, 0)
+            last_data_at = getattr(self, "stream_last_data_at", {}).get(stream)
+            last_data_age = now - last_data_at if last_data_at else None
+            stream_data_metrics[stream] = {
+                "bytes_written_session": bytes_written,
+                "last_data_age_seconds": round(last_data_age, 1) if last_data_age is not None else None,
+            }
+            if running_for >= 120 and (last_data_age is None or last_data_age >= 90):
+                evidence = (
+                    "nenhum byte recebido nesta sessao"
+                    if last_data_age is None
+                    else f"ultimo byte recebido ha {last_data_age:.0f} segundos"
+                )
+                issues.append(self.make_health_issue(
+                    "STREAM_NO_DATA",
+                    "critical" if last_data_age is None or last_data_age >= 300 else "warning",
+                    f"A camera {stream.upper()} esta ativa, mas parou de entregar dados.",
+                    evidence,
+                    "Verificar sinal, rede, energia da camera e produtor do go2rtc.",
+                    stream,
+                ))
             if running_for >= stale_after and (latest_mtime is None or now - latest_mtime >= stale_after):
                 evidence = "nenhum arquivo finalizado encontrado" if latest_mtime is None else f"ultimo arquivo finalizado ha {(now - latest_mtime) / 60:.0f} min"
                 issues.append(self.make_health_issue(
@@ -2695,6 +2748,7 @@ class CameraManagerApp:
                 "hd_free_gb": round(hd_free_gb, 2) if hd_free_gb is not None else None,
                 "pending_backup_count": pending_backup["count"],
                 "pending_backup_gb": round(pending_backup["size_bytes"] / (1024 ** 3), 3),
+                "stream_data": stream_data_metrics,
                 "go2rtc_restart_count": self.go2rtc_restart_count,
                 "kernel_144_reports_24h": kernel_reports.get("count_24h"),
             },
@@ -3833,6 +3887,10 @@ class CameraManagerApp:
                                     break
                                 out_file.write(chunk)
                                 last_read_time = time.time()
+                                self.stream_bytes_written[stream_name] = (
+                                    self.stream_bytes_written.get(stream_name, 0) + len(chunk)
+                                )
+                                self.stream_last_data_at[stream_name] = last_read_time
                             except (socket.timeout, TimeoutError):
                                 if time.time() - last_read_time > 15:
                                     break
@@ -4022,18 +4080,28 @@ class CameraManagerApp:
         # Encerra processos e threads anteriores
         self.run_stop_sequence()
         time.sleep(1.5)
+
+        if getattr(self, "_shutdown_executed", False) or not self.running_monitor:
+            return
         
         try:
             # 1. Liga a ponte RTSP go2rtc.exe se não estiver rodando
             if self.iniciar_go2rtc():
                 time.sleep(2.5)
+
+            if getattr(self, "_shutdown_executed", False) or not self.running_monitor:
+                return
                 
             # 2. Liga gravadores dinamicamente em threads separadas (NVR integrado)
             for idx, stream in enumerate(self.streams):
+                if getattr(self, "_shutdown_executed", False) or not self.running_monitor:
+                    break
                 if not self.silent:
                     self.add_log(f"Iniciando thread de gravacao da camera {stream.upper()}...")
                 self.recording_active[stream] = True
                 self.recording_started_at[stream] = time.time()
+                self.stream_bytes_written[stream] = 0
+                self.stream_last_data_at.pop(stream, None)
                 t = threading.Thread(
                     target=self.record_stream_thread, 
                     args=(stream, idx), 
@@ -5151,6 +5219,27 @@ def run_standalone_health_check():
 
 _instance_socket = None
 
+def normalize_smoke_test_seconds(value):
+    seconds = int(value)
+    if seconds == 0:
+        return 0
+    if not 30 <= seconds <= 1800:
+        raise ValueError("o ensaio deve durar entre 30 e 1800 segundos")
+    return seconds
+
+def send_instance_command(command, require_ack=False, timeout_seconds=2.0):
+    if command not in {"SHOW", "STOP_SAFE"}:
+        raise ValueError("comando de instancia invalido")
+    try:
+        with socket.create_connection(("127.0.0.1", 29999), timeout=timeout_seconds) as conn:
+            conn.settimeout(timeout_seconds)
+            conn.sendall(command.encode("ascii"))
+            if not require_ack:
+                return True
+            return conn.recv(16).strip() == b"OK"
+    except Exception:
+        return False
+
 def wait_for_process_exit(pid, timeout_seconds=300):
     if not pid or pid <= 0 or pid == os.getpid():
         return
@@ -5182,8 +5271,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Gerenciador NVR Câmeras Farmácia")
     parser.add_argument("--silent", action="store_true", help="Inicia o sistema de gravação em segundo plano sem abrir a janela")
     parser.add_argument("--health-check", action="store_true", help="Executa diagnostico nao invasivo sem iniciar cameras")
+    parser.add_argument("--smoke-test-seconds", type=int, default=0, help="Executa um ensaio real controlado de 30 a 1800 segundos")
+    parser.add_argument("--safe-stop", action="store_true", help="Solicita encerramento seguro da instancia local em execucao")
     parser.add_argument("--wait-for-pid", type=int, default=0, help=argparse.SUPPRESS)
     args_cli = parser.parse_args()
+
+    try:
+        args_cli.smoke_test_seconds = normalize_smoke_test_seconds(args_cli.smoke_test_seconds)
+    except ValueError as error:
+        parser.error(str(error))
+
+    if args_cli.safe_stop:
+        sys.exit(0 if send_instance_command("STOP_SAFE", require_ack=True) else 1)
 
     if args_cli.health_check:
         sys.exit(run_standalone_health_check())
@@ -5191,14 +5290,13 @@ if __name__ == "__main__":
     if args_cli.wait_for_pid:
         wait_for_process_exit(args_cli.wait_for_pid)
     
-    if not garantir_instancia_unica(args_cli.silent):
-        if not args_cli.silent:
+    effective_silent = args_cli.silent or args_cli.smoke_test_seconds > 0
+
+    if not garantir_instancia_unica(effective_silent):
+        if not effective_silent:
             try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(2.0)
-                s.connect(('127.0.0.1', 29999))
-                s.sendall(b"SHOW")
-                s.close()
+                if not send_instance_command("SHOW", require_ack=True):
+                    raise RuntimeError("instancia local nao respondeu")
             except Exception:
                 try:
                     import ctypes
@@ -5215,7 +5313,7 @@ if __name__ == "__main__":
         
     # Garante que as dependências binárias existam antes de inicializar o painel
     PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
-    verificar_e_baixar_dependencias(PROJ_DIR, silent=args_cli.silent)
+    verificar_e_baixar_dependencias(PROJ_DIR, silent=effective_silent)
     
     try:
         from ctypes import windll
@@ -5224,9 +5322,13 @@ if __name__ == "__main__":
         pass
         
     root = tk.Tk()
-    if args_cli.silent:
+    if effective_silent:
         root.withdraw() # Esconde a janela principal!
-        app = CameraManagerApp(root, silent=True)
+        app = CameraManagerApp(
+            root,
+            silent=True,
+            smoke_test_seconds=args_cli.smoke_test_seconds,
+        )
     else:
         app = CameraManagerApp(root, silent=False)
         
