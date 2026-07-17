@@ -140,7 +140,7 @@ def get_short_path(long_path):
 def atualizar_go2rtc_yaml(proj_dir):
     yaml_path = os.path.join(proj_dir, "sistema", "go2rtc", "go2rtc.yaml")
     ffmpeg_exe = os.path.join(proj_dir, "sistema", "go2rtc", "ffmpeg.exe")
-    short_ffmpeg = get_short_path(ffmpeg_exe).replace("\\", "\\\\")
+    ffmpeg_path = get_short_path(ffmpeg_exe)
 
     global CONFIG
     streams_dict = normalize_streams_config((globals().get("CONFIG") or {}).get("streams"))
@@ -152,7 +152,10 @@ def atualizar_go2rtc_yaml(proj_dir):
     for name, url in streams_dict.items():
         streams_lines.append(f"  {json.dumps(name)}: {json.dumps(url)}")
         live_lines.append(f"  {json.dumps(name + '_live')}: {json.dumps(f'ffmpeg:{name}#video=h264#hardware')}")
-        mjpeg_lines.append(f"  {json.dumps(name + '_mjpeg')}: {json.dumps(f'ffmpeg:{name}#video=mjpeg#hardware')}")
+        # Nem todo driver de video oferece codificador MJPEG por hardware.
+        # O painel usa este fluxo apenas sob demanda, portanto o encoder de
+        # software preserva a gravacao bruta e evita o loop de reconexao.
+        mjpeg_lines.append(f"  {json.dumps(name + '_mjpeg')}: {json.dumps(f'ffmpeg:{name}#video=mjpeg')}")
 
     streams_block = "\n".join(streams_lines)
     live_block = "\n".join(live_lines)
@@ -166,7 +169,7 @@ def atualizar_go2rtc_yaml(proj_dir):
   static_dir: "../web"
 
 exec:
-  allow_paths: [ffmpeg]
+  allow_paths: [{json.dumps(ffmpeg_path)}]
 
 rtsp:
   listen: ":8554"
@@ -174,7 +177,7 @@ rtsp:
   password: {json.dumps(web_auth["password"])}
 
 ffmpeg:
-  bin: "{short_ffmpeg}"
+  bin: {json.dumps(ffmpeg_path)}
 
 streams:
   # Câmeras originais (H.265 bruto - Usadas para as gravações em 0% CPU)

@@ -405,6 +405,10 @@ class StorageSafetyTests(unittest.TestCase):
         self.assertIn('static_dir: "../web"', yaml_text)
         self.assertIn('username: "viewer"', yaml_text)
         self.assertIn('password: "senha-segura-123456"', yaml_text)
+        self.assertIn('ffmpeg:farmacia#video=mjpeg', yaml_text)
+        self.assertNotIn('ffmpeg:farmacia#video=mjpeg#hardware', yaml_text)
+        self.assertIn('allow_paths: ["', yaml_text)
+        self.assertNotIn('allow_paths: [ffmpeg]', yaml_text)
         self.assertEqual(public_viewer.read_text(encoding="utf-8"), "<html>viewer</html>")
 
     def test_stream_parser_uses_validated_config_without_yaml_quotes(self):
