@@ -140,6 +140,216 @@ class StorageSafetyTests(unittest.TestCase):
         self.assertEqual(status.ACLineStatus, 255)
         self.assertEqual(status.BatteryLifePercent, 255)
 
+    def test_intelligence_correlates_new_usb_failure_with_missing_hd(self):
+        snapshot = {
+            "issues": [
+                {"code": "KERNEL_144_NEW_SESSION", "severity": "critical"},
+                {"code": "HD_UNAVAILABLE", "severity": "warning"},
+            ],
+            "metrics": {"active_streams": ["cam"]},
+        }
+
+        result = self.module.build_operational_intelligence(snapshot)
+
+        self.assertEqual(result["status"], "critical")
+        self.assertEqual(result["root_cause"], "usb_storage_instability")
+        self.assertFalse(result["hardware_protection"]["heavy_maintenance_allowed"])
+        self.assertEqual(result["hardware_protection"]["recording_recommendation"], "safe_stop")
+
+    def test_intelligence_distinguishes_usb_history_from_new_failure(self):
+        snapshot = {
+            "issues": [{"code": "KERNEL_144_REPORTS", "severity": "critical"}],
+            "metrics": {"active_streams": ["cam"]},
+        }
+
+        result = self.module.build_operational_intelligence(snapshot)
+
+        self.assertEqual(result["status"], "attention")
+        self.assertEqual(result["root_cause"], "usb_history")
+        self.assertIn("sem falha nova", result["headline"].lower())
+
+    def test_kernel_baseline_waits_for_first_reliable_scan(self):
+        app = self.new_app()
+        app._kernel_144_session_baseline = None
+
+        unknown = app.add_kernel_session_context({
+            "status": "unknown",
+            "count_24h": 0,
+            "latest": None,
+        })
+        first_reliable = app.add_kernel_session_context({
+            "status": "ok",
+            "count_24h": 5,
+            "latest": "2026-07-17T09:34:21",
+        })
+        later_failure = app.add_kernel_session_context({
+            "status": "ok",
+            "count_24h": 6,
+            "latest": "2026-07-17T13:00:00",
+        })
+
+        self.assertEqual(unknown["new_in_session"], 0)
+        self.assertEqual(first_reliable["new_in_session"], 0)
+        self.assertEqual(later_failure["new_in_session"], 1)
+
+    def test_intelligence_localizes_single_camera_without_data(self):
+        snapshot = {
+            "issues": [
+                {"code": "STREAM_NO_DATA", "severity": "warning", "stream": "cam1"},
+            ],
+            "metrics": {"active_streams": ["cam1", "cam2"]},
+        }
+
+        result = self.module.build_operational_intelligence(snapshot)
+
+        self.assertEqual(result["root_cause"], "single_camera_path")
+        self.assertEqual(result["affected_streams"], ["cam1"])
+        self.assertTrue(result["hardware_protection"]["heavy_maintenance_allowed"])
+
+    def test_intelligence_correlates_go2rtc_failure_with_all_missing_data(self):
+        snapshot = {
+            "issues": [
+                {"code": "GO2RTC_UNAVAILABLE", "severity": "critical"},
+                {"code": "STREAM_NO_DATA", "severity": "critical", "stream": "cam1"},
+                {"code": "STREAM_NO_DATA", "severity": "critical", "stream": "cam2"},
+            ],
+            "metrics": {"active_streams": ["cam1", "cam2"]},
+        }
+
+        result = self.module.build_operational_intelligence(snapshot)
+
+        self.assertEqual(result["root_cause"], "video_bridge_failure")
+        self.assertEqual(result["status"], "critical")
+
+    def test_intelligence_recognizes_upstream_outage_when_bridge_is_available(self):
+        snapshot = {
+            "issues": [
+                {"code": "STREAM_NO_DATA", "severity": "critical", "stream": "cam1"},
+                {"code": "STREAM_NO_DATA", "severity": "critical", "stream": "cam2"},
+            ],
+            "metrics": {"active_streams": ["cam1", "cam2"]},
+        }
+
+        result = self.module.build_operational_intelligence(snapshot)
+
+        self.assertEqual(result["root_cause"], "upstream_video_outage")
+        self.assertEqual(result["affected_streams"], ["cam1", "cam2"])
+
+    def test_intelligence_prioritizes_dead_recorder_over_missing_data(self):
+        snapshot = {
+            "issues": [
+                {"code": "RECORDING_THREAD_DEAD", "severity": "critical", "stream": "cam1"},
+                {"code": "STREAM_NO_DATA", "severity": "critical", "stream": "cam1"},
+            ],
+            "metrics": {"active_streams": ["cam1", "cam2"]},
+        }
+
+        result = self.module.build_operational_intelligence(snapshot)
+
+        self.assertEqual(result["root_cause"], "recording_worker_failure")
+        self.assertEqual(result["status"], "critical")
+
+    def test_intelligence_prioritizes_local_fallback_pressure(self):
+        snapshot = {
+            "issues": [
+                {"code": "HD_UNAVAILABLE", "severity": "warning"},
+                {"code": "LOCAL_SPACE_CRITICAL", "severity": "critical"},
+                {"code": "BACKUP_PENDING", "severity": "warning"},
+            ],
+            "metrics": {"active_streams": ["cam"]},
+        }
+
+        result = self.module.build_operational_intelligence(snapshot)
+
+        self.assertEqual(result["root_cause"], "local_fallback_pressure")
+        self.assertEqual(result["status"], "critical")
+        self.assertEqual(result["hardware_protection"]["recording_recommendation"], "safe_stop")
+
+    def test_intelligence_does_not_let_video_symptom_override_disk_protection(self):
+        snapshot = {
+            "issues": [
+                {"code": "STREAM_NO_DATA", "severity": "warning", "stream": "cam1"},
+                {"code": "LOCAL_SPACE_CRITICAL", "severity": "critical"},
+                {"code": "BACKUP_PENDING", "severity": "warning"},
+            ],
+            "metrics": {"active_streams": ["cam1", "cam2"]},
+        }
+
+        result = self.module.build_operational_intelligence(snapshot)
+
+        self.assertEqual(result["root_cause"], "local_fallback_pressure")
+        self.assertFalse(result["hardware_protection"]["heavy_maintenance_allowed"])
+
+    def test_intelligence_applies_direct_smart_and_power_protection(self):
+        cases = [
+            ("SMART_DEGRADED", "critical", "physical_disk_degradation", "safe_stop"),
+            ("POWER_ON_BATTERY", "critical", "power_instability", "safe_stop"),
+        ]
+        for code, severity, expected_cause, expected_recommendation in cases:
+            with self.subTest(code=code):
+                result = self.module.build_operational_intelligence({
+                    "issues": [{"code": code, "severity": severity}],
+                    "metrics": {"active_streams": ["cam"]},
+                })
+
+                self.assertEqual(result["root_cause"], expected_cause)
+                self.assertFalse(result["hardware_protection"]["heavy_maintenance_allowed"])
+                self.assertEqual(
+                    result["hardware_protection"]["recording_recommendation"],
+                    expected_recommendation,
+                )
+
+    def test_intelligence_does_not_hide_active_issue_behind_usb_history(self):
+        snapshot = {
+            "issues": [
+                {"code": "KERNEL_144_REPORTS", "severity": "critical"},
+                {
+                    "code": "BACKUP_PENDING",
+                    "severity": "warning",
+                    "summary": "Backups aguardando sincronizacao.",
+                    "evidence": "2 arquivos.",
+                    "action": "Restabelecer o HD.",
+                },
+            ],
+            "metrics": {"active_streams": ["cam"]},
+        }
+
+        result = self.module.build_operational_intelligence(snapshot)
+
+        self.assertEqual(result["root_cause"], "backup_pending")
+        self.assertEqual(result["status"], "attention")
+        self.assertFalse(result["hardware_protection"]["heavy_maintenance_allowed"])
+
+    def test_intelligence_blocks_heavy_scan_for_critical_memory(self):
+        snapshot = {
+            "issues": [{"code": "PROCESS_MEMORY_HIGH", "severity": "critical"}],
+            "metrics": {"active_streams": ["cam"]},
+        }
+
+        result = self.module.build_operational_intelligence(snapshot)
+
+        self.assertEqual(result["root_cause"], "process_resource_growth")
+        self.assertEqual(result["status"], "critical")
+        self.assertFalse(result["hardware_protection"]["heavy_maintenance_allowed"])
+
+    def test_resource_trend_detects_growth_without_unbounded_history(self):
+        app = self.new_app()
+        now = time.time()
+        app._resource_samples = [
+            {
+                "timestamp": now - 3600 + (index * 20),
+                "memory_mb": 100.0 + index,
+                "thread_count": 10,
+            }
+            for index in range(150)
+        ]
+
+        trend = app.update_resource_trend(now, 350.0, 20)
+
+        self.assertGreater(trend["memory_growth_mb"], 100.0)
+        self.assertEqual(trend["thread_growth"], 10)
+        self.assertEqual(len(app._resource_samples), 120)
+
     def test_smoke_test_duration_is_bounded(self):
         self.assertEqual(self.module.normalize_smoke_test_seconds(0), 0)
         self.assertEqual(self.module.normalize_smoke_test_seconds(30), 30)
@@ -377,6 +587,8 @@ class StorageSafetyTests(unittest.TestCase):
 
         healthy = app.collect_health_snapshot()
         self.assertEqual(healthy["overall_status"], "healthy")
+        self.assertEqual(healthy["intelligence"]["status"], "stable")
+        self.assertEqual(healthy["intelligence"]["root_cause"], "no_active_risk")
         self.assertEqual(healthy["metrics"]["stream_data"]["cam"]["bytes_written_session"], 1024)
 
         app.stream_last_data_at["cam"] = time.time() - 120

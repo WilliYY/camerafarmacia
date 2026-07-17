@@ -81,6 +81,21 @@ estiverem aumentando.
 - Testes de armazenamento usam somente diretorios temporarios. Nunca testam
   exclusao, rotacao ou quarentena sobre gravacoes reais.
 
+## Regras da inteligencia operacional
+
+- A inteligencia e local e deterministica. Nao enviar imagens, credenciais,
+  URLs de camera ou logs para servicos externos.
+- Separar sintoma, correlacao e causa provavel. Uma inferencia nunca deve ser
+  apresentada como certeza sem sinais diretos.
+- Historico `Kernel_144` e falha nova na sessao sao situacoes diferentes.
+- Toda nova regra exige teste de cenario positivo e teste contra falso alerta.
+- A inteligencia pode adiar manutencao automatica pesada, mas nao pode apagar
+  videos, mudar retencao ou desligar gravacoes apenas por inferencia.
+- Logs de inteligencia devem ocorrer por transicao de conclusao, nao em cada
+  coleta. Tendencias em memoria devem ter janela e quantidade limitadas.
+- O snapshot JSON continua sendo a fonte de evidencia; a interface apenas
+  apresenta a mesma conclusao de forma resumida.
+
 ## Acoes que exigem cuidado adicional
 
 - Exclusao ou mudanca da retencao de videos.

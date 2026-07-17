@@ -1,4 +1,4 @@
-# 🎥 NVR Inteligente Câmeras Farmácia — Versão 4.11
+# 🎥 NVR Inteligente Câmeras Farmácia — Versão 4.12
 
 Este projeto é uma solução completa de NVR (Network Video Recorder) local e híbrida de baixíssimo consumo de hardware. Ele foi projetado para capturar, gravar, monitorar e gerenciar câmeras inteligentes compatíveis com o ecossistema Tuya, Smart Life e Positivo, com foco em segurança, portabilidade e tolerância a falhas.
 
@@ -20,7 +20,7 @@ Este projeto é uma solução completa de NVR (Network Video Recorder) local e h
 
 ### 1. Gravação com Baixo Consumo (0% CPU de Transcodificação)
 
-O gravador consome o fluxo de vídeo direto da ponte go2rtc em formato bruto, usando cópia binária direta para arquivos `.mp4`. Não há re-encode local durante a gravação, mantendo o uso de CPU praticamente em zero.
+O gravador consome o fluxo de vídeo direto da ponte go2rtc em formato bruto, usando cópia binária direta para arquivos `.ts`. Não há re-encode local durante a gravação, mantendo baixo uso de CPU.
 
 As gravações são organizadas automaticamente em pastas diárias (`AAAA-MM-DD`) dentro do destino final de cada câmera.
 
@@ -130,7 +130,7 @@ pythonw.exe gerenciador.pyw --silent
 
 ## 🤖 Diretrizes para Manutenção por IA ou Desenvolvedores
 
-1. **Preserve a gravação direta.** A gravação deve consumir `/api/stream.mp4?src=NOME` via `urllib.request`, sem OpenCV, decode local ou re-encode contínuo.
+1. **Preserve a gravação direta.** A gravação deve consumir `/api/stream.ts?src=NOME` via `urllib.request`, sem OpenCV, decode local ou re-encode contínuo.
 2. **Use `127.0.0.1` para a API local.** Evite `localhost` para não depender de resolução IPv6 do Windows.
 3. **Mantenha o MJPEG em thread separada.** A GUI Tkinter não deve bloquear enquanto lê frames.
 4. **Feche streams recolhidos.** Ao recolher uma câmera ou fechar a janela, encerre conexões HTTP e loops de leitura.
@@ -142,10 +142,24 @@ pythonw.exe gerenciador.pyw --silent
 
 ## Diagnostico de Saude
 
-O NVR v4.11 possui um avaliador automatico executado em segundo plano. Ele
+O NVR v4.12 possui um avaliador automatico executado em segundo plano. Ele
 correlaciona espaco local, disponibilidade do HD, backups pendentes, threads de
 gravacao, ultimo byte recebido por camera, reconexoes, memoria, energia, SMART
 informado pelo Windows e relatorios `Kernel_144`.
+
+Sobre esses sinais existe uma inteligencia operacional local. Ela nao usa API
+externa e nao envia imagens, credenciais ou logs para a internet. A cada coleta,
+ela correlaciona sintomas e informa:
+
+- causa provavel e nivel de confianca heuristico, baseado na regra acionada;
+- explicacao da correlacao encontrada;
+- ate tres acoes em ordem de prioridade;
+- recomendacao de continuar monitorando ou encerrar com seguranca;
+- permissao para o scanner automatico executar manutencao pesada.
+
+O painel mostra a conclusao em `Analise Inteligente`. O JSON inclui a secao
+`intelligence`. Logs `[INTELLIGENCE]` sao gravados somente quando a conclusao
+muda, evitando escrita repetitiva no disco.
 
 O ultimo estado e publicado atomicamente em:
 

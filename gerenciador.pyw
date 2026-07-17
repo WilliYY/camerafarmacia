@@ -345,7 +345,7 @@ class SYSTEM_POWER_STATUS(ctypes.Structure):
     ]
 
 # Versão do Sistema (usada para o auto-update)
-VERSION = "4.11"
+VERSION = "4.12"
 
 # Configurações do Projeto
 PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -534,8 +534,257 @@ GDRIVE_ROOT = CONFIG.get("gdrive_root") or ""
 
 LOCAL_STORAGE_RESERVE_BYTES = 5 * 1024 * 1024 * 1024
 HEALTH_CHECK_INTERVAL_SECONDS = 60
-HEALTH_HARDWARE_CACHE_SECONDS = 30 * 60
+KERNEL_REPORT_CACHE_SECONDS = 5 * 60
 STARTUP_LOG_LIMIT = 500
+
+
+def build_operational_intelligence(snapshot):
+    issues = snapshot.get("issues") or []
+    metrics = snapshot.get("metrics") or {}
+    codes = {issue.get("code") for issue in issues}
+    active_streams = set(metrics.get("active_streams") or [])
+    no_data_streams = {
+        issue.get("stream") for issue in issues
+        if issue.get("code") == "STREAM_NO_DATA" and issue.get("stream")
+    }
+
+    status = "attention"
+    root_cause = "health_issue"
+    confidence_score = 70
+    headline = "O sistema detectou uma situacao que precisa de revisao."
+    explanation = "Os sinais atuais ainda nao formam uma causa unica."
+    actions = []
+    correlations = []
+    heavy_maintenance_allowed = True
+    protection_reason = "Nenhum bloqueio de manutencao pesada nesta coleta."
+    recording_recommendation = "continue_monitoring"
+
+    if not issues:
+        status = "stable"
+        root_cause = "no_active_risk"
+        confidence_score = 95
+        headline = "Sistema estavel nesta coleta."
+        explanation = "Gravacao, armazenamento e recursos nao apresentaram alertas ativos."
+        actions = ["Manter o monitoramento automatico e a rotina normal de gravacao."]
+    elif "SMART_DEGRADED" in codes:
+        status = "critical"
+        root_cause = "physical_disk_degradation"
+        confidence_score = 98
+        headline = "Possivel degradacao fisica de disco."
+        explanation = "O Windows reportou um disco fora do estado normal."
+        actions = [
+            "Interromper manutencoes pesadas e preparar copia dos dados importantes.",
+            "Executar o diagnostico oficial do fabricante do disco.",
+        ]
+        correlations = ["SMART_DEGRADED"]
+        heavy_maintenance_allowed = False
+        protection_reason = "SMART reportou degradacao."
+        recording_recommendation = "safe_stop"
+    elif "KERNEL_144_NEW_SESSION" in codes and "HD_UNAVAILABLE" in codes:
+        status = "critical"
+        root_cause = "usb_storage_instability"
+        confidence_score = 96
+        headline = "Falha USB nova coincidiu com indisponibilidade do HD."
+        explanation = "A correlacao aponta primeiro para controlador, cabo, porta ou energia do HD."
+        actions = [
+            "Encerrar a gravacao com seguranca se o HD nao retornar.",
+            "Trocar cabo ou porta USB e revisar a alimentacao do disco.",
+            "Nao executar scanner, rotacao manual ou copia pesada ate estabilizar.",
+        ]
+        correlations = ["KERNEL_144_NEW_SESSION + HD_UNAVAILABLE"]
+        heavy_maintenance_allowed = False
+        protection_reason = "Falha USB nova e HD indisponivel na mesma sessao."
+        recording_recommendation = "safe_stop"
+    elif "KERNEL_144_NEW_SESSION" in codes:
+        status = "critical"
+        root_cause = "usb_controller_instability"
+        confidence_score = 92
+        headline = "O Windows registrou uma nova falha USB nesta sessao."
+        explanation = "Mesmo com o HD acessivel, o controlador ou outro dispositivo USB ficou instavel."
+        actions = [
+            "Evitar manutencao pesada e acompanhar se o HD permanece acessivel.",
+            "Revisar cabo, porta, energia e driver USB antes do teste de 24 horas.",
+        ]
+        correlations = ["KERNEL_144_NEW_SESSION"]
+        heavy_maintenance_allowed = False
+        protection_reason = "Novo Kernel_144 detectado nesta sessao."
+    elif "POWER_ON_BATTERY" in codes:
+        status = "critical" if any(
+            issue.get("code") == "POWER_ON_BATTERY" and issue.get("severity") == "critical"
+            for issue in issues
+        ) else "attention"
+        root_cause = "power_instability"
+        confidence_score = 95
+        headline = "O computador esta operando sem energia AC confirmada."
+        explanation = "A gravacao depende da autonomia restante e do encerramento seguro."
+        actions = ["Restabelecer a energia e preservar margem para o encerramento seguro."]
+        correlations = ["POWER_ON_BATTERY"]
+        heavy_maintenance_allowed = False
+        protection_reason = "Energia AC indisponivel."
+        recording_recommendation = "safe_stop" if status == "critical" else "continue_monitoring"
+    elif "LOCAL_SPACE_CRITICAL" in codes and ("BACKUP_PENDING" in codes or "CAMERA_ON_FALLBACK" in codes):
+        status = "critical"
+        root_cause = "local_fallback_pressure"
+        confidence_score = 96
+        headline = "O fallback local esta pressionando o disco do Windows."
+        explanation = "Backups pendentes e pouco espaco local podem afetar o computador."
+        actions = [
+            "Restabelecer o HD para sincronizar os backups pendentes.",
+            "Nao apagar videos pendentes; liberar apenas arquivos externos ao NVR.",
+        ]
+        correlations = ["LOCAL_SPACE_CRITICAL + BACKUP_PENDING/FALLBACK"]
+        heavy_maintenance_allowed = False
+        protection_reason = "Espaco local critico com gravacoes pendentes."
+        recording_recommendation = "safe_stop"
+    elif "HD_UNAVAILABLE" in codes:
+        status = "attention"
+        root_cause = "storage_unavailable"
+        confidence_score = 92
+        headline = "O HD principal esta indisponivel."
+        explanation = "O NVR depende do fallback local enquanto o volume nao retorna."
+        actions = [
+            "Verificar cabo, porta, energia e montagem do volume FARMACIA.",
+            "Confirmar que a fila de backup local nao cresce ate o limite do Windows.",
+        ]
+        correlations = ["HD_UNAVAILABLE"]
+        heavy_maintenance_allowed = False
+        protection_reason = "HD principal indisponivel."
+    elif "GO2RTC_UNAVAILABLE" in codes and no_data_streams:
+        status = "critical"
+        root_cause = "video_bridge_failure"
+        confidence_score = 94
+        headline = "A ponte de video parou e as cameras deixaram de entregar dados."
+        explanation = "A falha comum esta no go2rtc ou no caminho de rede anterior aos gravadores."
+        actions = [
+            "Aguardar uma tentativa do watchdog e conferir o log do go2rtc.",
+            "Se repetir, verificar rede e acesso das cameras antes de reiniciar o PC.",
+        ]
+        correlations = ["GO2RTC_UNAVAILABLE + STREAM_NO_DATA"]
+    elif "RECORDING_THREAD_DEAD" in codes:
+        status = "critical"
+        root_cause = "recording_worker_failure"
+        confidence_score = 94
+        headline = "Uma thread de gravacao parou inesperadamente."
+        explanation = "O watchdog deve tentar recuperar, mas a causa precisa ser confirmada no log."
+        actions = ["Confirmar a recuperacao da thread e a chegada de novos bytes."]
+        correlations = ["RECORDING_THREAD_DEAD"]
+    elif active_streams and no_data_streams == active_streams:
+        status = "critical"
+        root_cause = "upstream_video_outage"
+        confidence_score = 86
+        headline = "Todas as cameras ativas pararam de entregar dados."
+        explanation = "Como a ponte ainda responde, a causa provavel esta na rede, nuvem ou alimentacao das cameras."
+        actions = [
+            "Verificar internet, roteador e energia das cameras.",
+            "Comparar o horario da falha entre as cameras antes de reiniciar servicos.",
+        ]
+        correlations = ["STREAM_NO_DATA em todas as cameras"]
+    elif no_data_streams:
+        status = "attention"
+        root_cause = "single_camera_path"
+        confidence_score = 88
+        names = ", ".join(sorted(stream.upper() for stream in no_data_streams))
+        headline = f"A camera {names} esta ativa, mas sem dados recentes."
+        explanation = "As outras cameras nao compartilham o sintoma, reduzindo a suspeita sobre o PC e o HD."
+        actions = ["Verificar sinal, rede e alimentacao da camera afetada."]
+        correlations = ["STREAM_NO_DATA isolado"]
+    elif "MEMORY_GROWTH_SUSPECT" in codes or "PROCESS_MEMORY_HIGH" in codes:
+        resource_is_critical = any(
+            issue.get("severity") == "critical"
+            and issue.get("code") in {"MEMORY_GROWTH_SUSPECT", "PROCESS_MEMORY_HIGH"}
+            for issue in issues
+        )
+        status = "critical" if resource_is_critical else "attention"
+        root_cause = "process_resource_growth"
+        confidence_score = 84
+        headline = "A memoria do NVR aumentou acima do esperado na janela observada."
+        explanation = "A variacao sugere acumulacao de recursos, streams ou filas na sessao atual."
+        actions = ["Acompanhar a tendencia por mais coletas e revisar streams, imagens e filas."]
+        correlations = ["MEMORY_GROWTH_SUSPECT/PROCESS_MEMORY_HIGH"]
+    elif codes == {"KERNEL_144_REPORTS"}:
+        status = "attention"
+        root_cause = "usb_history"
+        confidence_score = 95
+        headline = "Ha historico USB recente, sem falha nova nesta sessao."
+        explanation = "O alerta atual descreve eventos anteriores e nao prova piora causada pelo NVR agora."
+        actions = [
+            "Manter observacao e resolver USBXHCI antes do teste continuo de 24 horas."
+        ]
+        correlations = ["KERNEL_144_REPORTS historico"]
+        heavy_maintenance_allowed = False
+        protection_reason = "Historico USB recente ainda nao investigado."
+    else:
+        candidates = [issue for issue in issues if issue.get("code") != "KERNEL_144_REPORTS"]
+        if not candidates:
+            candidates = issues
+        ranked = sorted(
+            candidates,
+            key=lambda item: 1 if item.get("severity") == "critical" else 0,
+            reverse=True,
+        )
+        primary = ranked[0]
+        status = "critical" if primary.get("severity") == "critical" else "attention"
+        root_cause = primary.get("code", "health_issue").lower()
+        confidence_score = 72
+        headline = primary.get("summary") or headline
+        explanation = primary.get("evidence") or explanation
+        actions = [primary.get("action")] if primary.get("action") else []
+        correlations = sorted(code for code in codes if code)
+
+    if not actions:
+        actions = ["Revisar o diagnostico detalhado antes de executar qualquer acao corretiva."]
+
+    critical_resource = any(
+        issue.get("severity") == "critical"
+        and issue.get("code") in {"MEMORY_GROWTH_SUSPECT", "PROCESS_MEMORY_HIGH"}
+        for issue in issues
+    )
+    if "SMART_DEGRADED" in codes:
+        heavy_maintenance_allowed = False
+        protection_reason = "SMART reportou degradacao."
+        recording_recommendation = "safe_stop"
+    elif "KERNEL_144_NEW_SESSION" in codes:
+        heavy_maintenance_allowed = False
+        protection_reason = "Novo Kernel_144 detectado nesta sessao."
+        if "HD_UNAVAILABLE" in codes:
+            recording_recommendation = "safe_stop"
+    elif "POWER_ON_BATTERY" in codes:
+        heavy_maintenance_allowed = False
+        protection_reason = "Energia AC indisponivel."
+    elif "LOCAL_SPACE_CRITICAL" in codes:
+        heavy_maintenance_allowed = False
+        protection_reason = "Espaco local critico."
+        if "BACKUP_PENDING" in codes or "CAMERA_ON_FALLBACK" in codes:
+            recording_recommendation = "safe_stop"
+    elif "HD_UNAVAILABLE" in codes:
+        heavy_maintenance_allowed = False
+        protection_reason = "HD principal indisponivel."
+    elif critical_resource:
+        heavy_maintenance_allowed = False
+        protection_reason = "Recursos do processo em nivel critico."
+    elif "KERNEL_144_REPORTS" in codes:
+        heavy_maintenance_allowed = False
+        protection_reason = "Historico USB recente ainda nao investigado."
+
+    confidence = "high" if confidence_score >= 85 else ("medium" if confidence_score >= 65 else "low")
+    return {
+        "schema_version": 1,
+        "status": status,
+        "root_cause": root_cause,
+        "confidence": confidence,
+        "confidence_score": confidence_score,
+        "headline": headline,
+        "explanation": explanation,
+        "priority_actions": actions[:3],
+        "correlations": correlations,
+        "evidence_codes": sorted(code for code in codes if code),
+        "affected_streams": sorted(stream for stream in no_data_streams if stream),
+        "hardware_protection": {
+            "heavy_maintenance_allowed": heavy_maintenance_allowed,
+            "reason": protection_reason,
+            "recording_recommendation": recording_recommendation,
+        },
+    }
 
 
 def garantir_limite_backup_local(backup_dir, min_free_bytes=LOCAL_STORAGE_RESERVE_BYTES):
@@ -1105,10 +1354,13 @@ class CameraManagerApp:
         self._health_lock = threading.Lock()
         self._health_snapshot = None
         self._health_issue_keys = set()
+        self._intelligence_key = None
         self._last_health_check = 0.0
         self._last_go2rtc_ok = False
         self._usb_report_cache = None
         self._usb_report_cache_time = 0.0
+        self._kernel_144_session_baseline = None
+        self._resource_samples = []
         self._smart_snapshot = {"status": "pending", "drives": [], "error": None}
         self._power_snapshot = {"status": "unknown", "battery_percent": None}
         self.go2rtc_restart_count = 0
@@ -1560,6 +1812,17 @@ class CameraManagerApp:
         )
         self.hdr_pill_power.pack(side="left", padx=6)
 
+        self.hdr_pill_brain = tk.Label(
+            self.top_status_bar,
+            text="  ANALISE: COLETANDO  ",
+            font=("Segoe UI", 8, "bold"),
+            fg=ORANGE_COLOR,
+            bg="#78350F",
+            relief="flat",
+            bd=0,
+        )
+        self.hdr_pill_brain.pack(side="right", padx=(6, 0))
+
         # Container principal dividido em duas colunas (Esquerda e Direita)
         split_container = tk.Frame(self.root, bg=BG_COLOR)
         split_container.pack(fill="both", expand=True, padx=10, pady=5)
@@ -1927,6 +2190,56 @@ class CameraManagerApp:
             self.camera_widgets[stream] = cam_widget
 
         # Divisor horizontal sutil entre Câmeras e Logs
+        self.intelligence_band = tk.Frame(
+            right_col,
+            bg="#161822",
+            highlightbackground="#1F2232",
+            highlightthickness=1,
+            padx=12,
+            pady=7,
+        )
+        self.intelligence_band.pack(fill="x", padx=15, pady=(4, 6))
+
+        intelligence_header = tk.Frame(self.intelligence_band, bg="#161822")
+        intelligence_header.pack(fill="x")
+        tk.Label(
+            intelligence_header,
+            text="Analise Inteligente",
+            font=("Segoe UI", 9, "bold"),
+            fg=TEXT_COLOR,
+            bg="#161822",
+        ).pack(side="left")
+        self.lbl_intelligence_confidence = tk.Label(
+            intelligence_header,
+            text="coletando sinais",
+            font=("Segoe UI", 8, "bold"),
+            fg=ORANGE_COLOR,
+            bg="#161822",
+        )
+        self.lbl_intelligence_confidence.pack(side="right")
+        self.lbl_intelligence_summary = tk.Label(
+            self.intelligence_band,
+            text="Aguardando a primeira coleta de saude.",
+            font=("Segoe UI", 9, "bold"),
+            fg=TEXT_COLOR,
+            bg="#161822",
+            justify="left",
+            anchor="w",
+            wraplength=780,
+        )
+        self.lbl_intelligence_summary.pack(fill="x", pady=(3, 1))
+        self.lbl_intelligence_action = tk.Label(
+            self.intelligence_band,
+            text="Acao: nenhuma antes da coleta inicial.",
+            font=("Segoe UI", 8),
+            fg=TEXT_MUTED,
+            bg="#161822",
+            justify="left",
+            anchor="w",
+            wraplength=780,
+        )
+        self.lbl_intelligence_action.pack(fill="x")
+
         cams_logs_sep = tk.Frame(right_col, bg="#1F2232", height=1)
         cams_logs_sep.pack(fill="x", padx=15, pady=(8, 4))
 
@@ -2394,7 +2707,7 @@ class CameraManagerApp:
 
     def scan_recent_kernel_144_reports(self, hours=24):
         now = time.time()
-        if self._usb_report_cache is not None and now - self._usb_report_cache_time < HEALTH_HARDWARE_CACHE_SECONDS:
+        if self._usb_report_cache is not None and now - self._usb_report_cache_time < KERNEL_REPORT_CACHE_SECONDS:
             return self._usb_report_cache
 
         program_data = os.environ.get("ProgramData", r"C:\ProgramData")
@@ -2433,6 +2746,38 @@ class CameraManagerApp:
         }
         self._usb_report_cache = result
         self._usb_report_cache_time = now
+        return result
+
+    def add_kernel_session_context(self, reports):
+        result = dict(reports)
+        current_count = result.get("count_24h", 0)
+        current_latest = result.get("latest")
+        baseline = getattr(self, "_kernel_144_session_baseline", None)
+        reliable = result.get("status") == "ok"
+        if baseline is None and reliable:
+            baseline = {"count": current_count, "latest": current_latest}
+            self._kernel_144_session_baseline = baseline
+
+        comparison_baseline = baseline or {
+            "count": current_count,
+            "latest": current_latest,
+        }
+        baseline_count = comparison_baseline.get("count", 0)
+        baseline_latest = comparison_baseline.get("latest")
+        new_session_reports = 0
+        if reliable and baseline is not None:
+            latest_is_new = bool(
+                current_latest
+                and current_latest != baseline_latest
+                and (baseline_latest is None or current_latest > baseline_latest)
+            )
+            new_session_reports = max(0, current_count - baseline_count)
+            if latest_is_new and new_session_reports == 0:
+                new_session_reports = 1
+
+        result["session_baseline_count"] = baseline_count
+        result["session_baseline_latest"] = baseline_latest
+        result["new_in_session"] = new_session_reports
         return result
 
     def get_process_memory_mb(self):
@@ -2476,6 +2821,34 @@ class CameraManagerApp:
             return round(counters.WorkingSetSize / (1024 ** 2), 2)
         except Exception:
             return None
+
+    def update_resource_trend(self, now, process_memory_mb, thread_count):
+        samples = list(getattr(self, "_resource_samples", []))
+        if process_memory_mb is not None:
+            samples.append({
+                "timestamp": now,
+                "memory_mb": process_memory_mb,
+                "thread_count": thread_count,
+            })
+        cutoff = now - (2 * 60 * 60)
+        samples = [sample for sample in samples if sample["timestamp"] >= cutoff][-120:]
+        self._resource_samples = samples
+
+        result = {
+            "sample_count": len(samples),
+            "window_minutes": 0.0,
+            "memory_growth_mb": 0.0,
+            "thread_growth": 0,
+        }
+        if len(samples) < 2:
+            return result
+
+        first = samples[0]
+        last = samples[-1]
+        result["window_minutes"] = round((last["timestamp"] - first["timestamp"]) / 60, 1)
+        result["memory_growth_mb"] = round(last["memory_mb"] - first["memory_mb"], 2)
+        result["thread_growth"] = last["thread_count"] - first["thread_count"]
+        return result
 
     def collect_health_snapshot(self):
         now = time.time()
@@ -2579,6 +2952,22 @@ class CameraManagerApp:
                 "O NVR possui uma quantidade elevada de threads ativas.",
                 f"{active_thread_count} threads no processo.",
                 "Verificar scanners, diagnosticos ou reconexoes iniciados repetidamente.",
+            ))
+
+        resource_trend = self.update_resource_trend(now, process_memory_mb, active_thread_count)
+        if (
+            resource_trend["window_minutes"] >= 30
+            and resource_trend["memory_growth_mb"] >= 200
+            and process_memory_mb is not None
+            and process_memory_mb >= 300
+        ):
+            growth = resource_trend["memory_growth_mb"]
+            issues.append(self.make_health_issue(
+                "MEMORY_GROWTH_SUSPECT",
+                "critical" if growth >= 500 else "warning",
+                "A memoria do NVR aumentou na janela observada.",
+                f"Aumento de {growth:.2f} MB em {resource_trend['window_minutes']:.0f} minutos.",
+                "Observar a tendencia e revisar streams, imagens e filas antes de reiniciar o PC.",
             ))
 
         block_minutes = CONFIG.get("bloco_minutos", 30)
@@ -2699,7 +3088,20 @@ class CameraManagerApp:
                 "Confirmar a energia e manter margem para o encerramento seguro.",
             ))
 
-        kernel_reports = self.scan_recent_kernel_144_reports()
+        kernel_reports = self.add_kernel_session_context(
+            self.scan_recent_kernel_144_reports()
+        )
+        current_latest = kernel_reports.get("latest")
+        new_session_reports = kernel_reports["new_in_session"]
+
+        if new_session_reports:
+            issues.append(self.make_health_issue(
+                "KERNEL_144_NEW_SESSION",
+                "critical",
+                "O Windows registrou nova falha de controlador/dispositivo nesta sessao.",
+                f"{new_session_reports} novo(s) Kernel_144; ultimo em {current_latest}.",
+                "Evitar manutencao pesada e verificar USB, cabo, porta, energia e drivers.",
+            ))
         if kernel_reports.get("status") == "ok" and kernel_reports.get("count_24h", 0):
             report_count = kernel_reports["count_24h"]
             issues.append(self.make_health_issue(
@@ -2733,7 +3135,7 @@ class CameraManagerApp:
             if severity_rank[issue["severity"]] > severity_rank[overall_status]:
                 overall_status = issue["severity"]
 
-        return {
+        snapshot = {
             "schema_version": 1,
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "hostname": socket.gethostname(),
@@ -2749,6 +3151,7 @@ class CameraManagerApp:
                 "pending_backup_count": pending_backup["count"],
                 "pending_backup_gb": round(pending_backup["size_bytes"] / (1024 ** 3), 3),
                 "stream_data": stream_data_metrics,
+                "resource_trend": resource_trend,
                 "go2rtc_restart_count": self.go2rtc_restart_count,
                 "kernel_144_reports_24h": kernel_reports.get("count_24h"),
             },
@@ -2758,6 +3161,8 @@ class CameraManagerApp:
                 "power": power_snapshot,
             },
         }
+        snapshot["intelligence"] = build_operational_intelligence(snapshot)
+        return snapshot
 
     def persist_health_snapshot(self, snapshot):
         health_path = os.path.join(LOGS_DIR, "health_status.json")
@@ -2785,6 +3190,23 @@ class CameraManagerApp:
             self.add_log(f"[HEALTH][RESOLVED] Situacao normalizada: {key}.", "tag_ok")
         self._health_issue_keys = current_keys
 
+        intelligence = snapshot.get("intelligence") or {}
+        intelligence_key = (
+            intelligence.get("status"),
+            intelligence.get("root_cause"),
+            tuple(intelligence.get("priority_actions") or []),
+        )
+        if intelligence_key != getattr(self, "_intelligence_key", None):
+            status = intelligence.get("status", "attention")
+            self.add_log(
+                f"[INTELLIGENCE][{status.upper()}][{intelligence.get('root_cause', 'unknown')}] "
+                f"{intelligence.get('headline', 'Analise atualizada.')} "
+                f"Confianca: {intelligence.get('confidence_score', 0)}%. "
+                f"Acao: {(intelligence.get('priority_actions') or ['Revisar diagnostico.'])[0]}",
+                "tag_erro" if status == "critical" else ("tag_warn" if status == "attention" else "tag_ok"),
+            )
+            self._intelligence_key = intelligence_key
+
     def run_health_assessment(self):
         if not self._health_lock.acquire(blocking=False):
             return
@@ -2793,6 +3215,8 @@ class CameraManagerApp:
             self.persist_health_snapshot(snapshot)
             self.report_health_transitions(snapshot)
             self._health_snapshot = snapshot
+            if not self.silent:
+                self.root.after(0, self.update_intelligence_ui, snapshot.get("intelligence") or {})
         except Exception as error:
             self.add_log(f"[HEALTH][WARNING][ASSESSMENT_FAILED] Falha no avaliador de saude: {str(error)}", "tag_warn")
         finally:
@@ -2816,6 +3240,15 @@ class CameraManagerApp:
                 return [f" - Avaliador indisponivel: {str(error)}"]
 
         lines = [f" - Estado geral: {snapshot['overall_status'].upper()}"]
+        intelligence = snapshot.get("intelligence") or {}
+        if intelligence:
+            lines.append(
+                f" - Analise: {intelligence.get('headline')} "
+                f"(causa: {intelligence.get('root_cause')}, confianca: {intelligence.get('confidence_score')}%)"
+            )
+            lines.append(f"   Explicacao: {intelligence.get('explanation')}")
+            for action in intelligence.get("priority_actions") or []:
+                lines.append(f"   Prioridade: {action}")
         if not snapshot["issues"]:
             lines.append(" - Nenhuma situacao de risco detectada nesta coleta.")
             return lines
@@ -3255,6 +3688,35 @@ class CameraManagerApp:
         return viewers
 
     # ================= ATUALIZAÇÃO DA GUI =================
+    def update_intelligence_ui(self, intelligence):
+        if self.silent or not hasattr(self, "lbl_intelligence_summary"):
+            return
+        status = intelligence.get("status", "attention")
+        colors = {
+            "stable": GREEN_COLOR,
+            "attention": ORANGE_COLOR,
+            "critical": RED_COLOR,
+        }
+        labels = {
+            "stable": "ESTAVEL",
+            "attention": "ATENCAO",
+            "critical": "CRITICO",
+        }
+        color = colors.get(status, ORANGE_COLOR)
+        label = labels.get(status, "ANALISANDO")
+        self.configure_badge_label(self.hdr_pill_brain, f"ANALISE: {label}", color)
+        self.lbl_intelligence_confidence.configure(
+            text=f"confianca {intelligence.get('confidence_score', 0)}%",
+            fg=color,
+        )
+        self.lbl_intelligence_summary.configure(
+            text=intelligence.get("headline", "Analise indisponivel."),
+            fg=color if status != "stable" else TEXT_COLOR,
+        )
+        actions = intelligence.get("priority_actions") or []
+        action = actions[0] if actions else "Revisar o diagnostico detalhado."
+        self.lbl_intelligence_action.configure(text=f"Acao: {action}")
+
     def update_ui_states(self, go2rtc_ok, gdrive_ok, live_viewers, cam_states, backup_count, backup_size):
         with self.status_lock:
             if self.silent:
@@ -4579,6 +5041,15 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         self.root.after(1500, lambda: button.configure(text=old_text, bg=old_bg))
 
     def trigger_periodic_scan(self):
+        intelligence = (getattr(self, "_health_snapshot", None) or {}).get("intelligence") or {}
+        protection = intelligence.get("hardware_protection") or {}
+        if protection and not protection.get("heavy_maintenance_allowed", True):
+            self.add_log(
+                f"[INTELLIGENCE][PROTECTION] Scanner automatico adiado: {protection.get('reason')}",
+                "tag_warn",
+            )
+            self.root.after(10800000, self.trigger_periodic_scan)
+            return
         self.click_escanear_corrompidos(show_popup=False)
         self.root.after(10800000, self.trigger_periodic_scan)
 

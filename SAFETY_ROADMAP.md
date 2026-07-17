@@ -13,6 +13,10 @@
 - Logs locais persistentes, limitados e espelhados no HD por thread isolada.
 - Autodiagnostico `--health-check` sem iniciar cameras ou go2rtc.
 - Ensaio real limitado por tempo e interrupcao local com `--safe-stop`.
+- Inteligencia local com causa provavel, confianca, acoes e protecao contra
+  scanner automatico pesado durante risco de hardware.
+- Deteccao de novo `Kernel_144` na sessao separada do historico de 24 horas.
+- Tendencia de memoria limitada a duas horas e mantida apenas em RAM.
 
 ## Prioridade alta
 
@@ -30,6 +34,11 @@
    executar streams simulados por 24 horas e depois cameras reais em janela
    supervisionada, medindo memoria, CPU, logs, temporarios, reconexoes, espaco
    e novos eventos USB.
+
+4. **Expandir cenarios somente com evidencia real**
+   Registrar falsos positivos e situacoes nao classificadas durante o teste de
+   24 horas. Adicionar regras novas apenas quando houver sinais reproduziveis,
+   sem transformar inferencias em comandos destrutivos.
 
 ## Prioridade media
 
