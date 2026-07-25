@@ -1572,7 +1572,11 @@ class LiveCameraWidget(tk.Frame):
         last_frame_received_time = 0
         
         while self.running:
-            if not self.app.check_process_go2rtc():
+            bridge_available = (
+                self.app.managed_go2rtc_running()
+                or getattr(self.app, "_last_go2rtc_ok", False)
+            )
+            if not bridge_available:
                 self.show_error_message("Ponte RTSP offline")
                 time.sleep(1.0)
                 continue
@@ -1806,6 +1810,8 @@ class CameraManagerApp:
         self._log_lock = threading.Lock()
         self._ui_log_queue = queue.Queue(maxsize=1000)
         self._external_log_queue = queue.Queue(maxsize=500)
+        self._lifecycle_lock = threading.RLock()
+        self._startup_ready = threading.Event()
         self._stop_lock = threading.Lock()
         self._shutdown_request_lock = threading.Lock()
         self._scan_lock = threading.Lock()
@@ -1826,6 +1832,7 @@ class CameraManagerApp:
         self._power_snapshot = {"status": "unknown", "battery_percent": None}
         self.go2rtc_restart_count = 0
         self._go2rtc_process = None
+        self._recorder_owner_token = secrets.token_hex(16)
         self.recording_started_at = {}
         self.stream_bytes_written = {}
         self.stream_last_data_at = {}
@@ -1890,7 +1897,9 @@ class CameraManagerApp:
         self.auto_provision_system()
         self.limpar_arquivos_temporarios_orfaos()
         self.verificar_saude_discos_smart()
-        self.limpar_processos_ffmpeg_zumbis()
+        self.limpar_processos_ffmpeg_zumbis(sync=True)
+        if not self.silent:
+            self._startup_ready.set()
 
         # 2. Inicia a thread de monitoramento em tempo real
         self.running_monitor = True
@@ -1984,7 +1993,7 @@ class CameraManagerApp:
                         file_path = os.path.join(root_dir, f)
                         try:
                             file_size = os.path.getsize(file_path)
-                            if file_size == 0 or f.endswith(".tmp"):
+                            if file_size == 0:
                                 size += file_size
                                 os.remove(file_path)
                                 count += 1
@@ -2942,6 +2951,9 @@ class CameraManagerApp:
     def monitor_loop(self):
         global GDRIVE_ROOT
         while self.running_monitor:
+            startup_ready = getattr(self, "_startup_ready", None)
+            if startup_ready is not None and not startup_ready.wait(timeout=1.0):
+                continue
             # 0. Verifica quedas de energia / status da bateria do PC/Nobreak
             self.check_power_status()
             
@@ -3902,8 +3914,11 @@ class CameraManagerApp:
             
             if enable:
                 # Informa ao Windows para manter o sistema ativo
+                required_state = ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+                if not self.silent:
+                    required_state |= ES_DISPLAY_REQUIRED
                 ctypes.windll.kernel32.SetThreadExecutionState(
-                    ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
+                    required_state
                 )
                 if not self.silent:
                     self.add_log("🖥️ Suspensão do PC impedida automaticamente.")
@@ -3972,6 +3987,13 @@ class CameraManagerApp:
         # 4. Encerra o aplicativo
         self.request_tk_shutdown()
 
+    def get_lifecycle_lock(self):
+        lock = getattr(self, "_lifecycle_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._lifecycle_lock = lock
+        return lock
+
     def managed_go2rtc_running(self):
         process = getattr(self, "_go2rtc_process", None)
         try:
@@ -3980,6 +4002,10 @@ class CameraManagerApp:
             return False
 
     def stop_managed_go2rtc(self):
+        with self.get_lifecycle_lock():
+            self._stop_managed_go2rtc_locked()
+
+    def _stop_managed_go2rtc_locked(self):
         """Encerra somente a ponte criada por esta instância do NVR."""
         process = getattr(self, "_go2rtc_process", None)
         if process is None:
@@ -3999,11 +4025,7 @@ class CameraManagerApp:
             self.go2rtc_api_fails = 0
 
     def check_process_go2rtc(self):
-        if not self.managed_go2rtc_running():
-            self.go2rtc_api_fails = 0
-            return False
-
-        # Watchdog de resposta HTTP da API do go2rtc (detecção de travamento zumbi).
+        managed_running = self.managed_go2rtc_running()
         try:
             req = urllib.request.Request("http://127.0.0.1:1984/api/streams")
             with urllib.request.urlopen(req, timeout=2) as response:
@@ -4012,12 +4034,12 @@ class CameraManagerApp:
                     return True
         except Exception:
             self.go2rtc_api_fails = getattr(self, "go2rtc_api_fails", 0) + 1
-            if self.go2rtc_api_fails >= 3:
+            if self.go2rtc_api_fails >= 3 and managed_running:
                 self.add_log("[HEALTH][WARNING][GO2RTC_WATCHDOG] Ponte RTSP sem resposta; reiniciando.", "tag_warn")
                 self.stop_managed_go2rtc()
                 return False
 
-        return True
+        return managed_running and self.go2rtc_api_fails < 3
 
     def probe_go2rtc_api(self, timeout=2.0):
         try:
@@ -4030,8 +4052,13 @@ class CameraManagerApp:
             return {"ok": False, "streams": [], "error": str(error)}
 
     def iniciar_go2rtc(self):
-        try:
-            if not self.check_process_go2rtc():
+        with self.get_lifecycle_lock():
+            try:
+                if self.managed_go2rtc_running():
+                    return False
+                if self.probe_go2rtc_api(timeout=0.75)["ok"]:
+                    self.go2rtc_api_fails = 0
+                    return False
                 if not self.silent:
                     self.add_log("Ligando Ponte RTSP (go2rtc.exe)...")
                 go2rtc_dir = os.path.dirname(GO2RTC_EXE)
@@ -4045,9 +4072,9 @@ class CameraManagerApp:
                 )
                 self.go2rtc_restart_count += 1
                 return True
-        except Exception as e:
-            if not self.silent:
-                self.add_log(f"Erro ao iniciar go2rtc.exe: {str(e)}")
+            except Exception as e:
+                if not self.silent:
+                    self.add_log(f"Erro ao iniciar go2rtc.exe: {str(e)}")
         return False
 
     def is_pid_running_and_python(self, pid):
@@ -4077,6 +4104,33 @@ class CameraManagerApp:
             pass
         return False
 
+    def is_pid_owned_recorder(self, pid, lock_data=None):
+        if not self.is_pid_running_and_python(pid):
+            return False
+        try:
+            output = subprocess.check_output(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    (
+                        f"Get-CimInstance Win32_Process -Filter \"ProcessId = {int(pid)}\" "
+                        "| Select-Object ExecutablePath,CommandLine | ConvertTo-Json -Compress"
+                    ),
+                ],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            process_data = json.loads(output)
+            command_line = str(process_data.get("CommandLine") or "")
+            normalized_command = command_line.replace("/", "\\").casefold()
+            expected_script = os.path.abspath(__file__).replace("/", "\\").casefold()
+            return expected_script in normalized_command
+        except Exception:
+            return False
+
     def check_process_recorder(self, lock_filename, stream_name):
         if self.recording_active.get(stream_name, False):
             t = self.recording_threads.get(stream_name)
@@ -4087,16 +4141,20 @@ class CameraManagerApp:
         if not os.path.exists(lock_path):
             return False
         try:
-            with open(lock_path, "r") as f:
+            with open(lock_path, "r", encoding="utf-8") as f:
                 content = f.read().strip()
-            if not content.isdigit():
-                return False
-            pid = int(content)
+            if content.isdigit():
+                lock_data = {"pid": int(content), "legacy": True}
+            else:
+                lock_data = json.loads(content)
+                if not isinstance(lock_data, dict) or not isinstance(lock_data.get("pid"), int):
+                    return False
+            pid = lock_data["pid"]
             
             if pid == os.getpid():
                 return False
                 
-            return self.is_pid_running_and_python(pid)
+            return self.is_pid_owned_recorder(pid, lock_data)
         except Exception:
             try:
                 output = subprocess.check_output(
@@ -4429,6 +4487,22 @@ class CameraManagerApp:
         except Exception:
             return False
 
+    def file_starts_with_file(self, full_path, prefix_path):
+        try:
+            prefix_size = os.path.getsize(prefix_path)
+            if prefix_size > os.path.getsize(full_path):
+                return False
+            with open(full_path, "rb") as full_file, open(prefix_path, "rb") as prefix_file:
+                remaining = prefix_size
+                while remaining:
+                    chunk_size = min(1024 * 1024, remaining)
+                    if full_file.read(chunk_size) != prefix_file.read(chunk_size):
+                        return False
+                    remaining -= chunk_size
+            return True
+        except Exception:
+            return False
+
     def get_nonconflicting_destination(self, src, dst):
         if not os.path.exists(dst) or self.files_have_same_content(src, dst):
             return dst
@@ -4513,14 +4587,24 @@ class CameraManagerApp:
                     return True
                 raise Exception(f"Destino ja existe com conteudo diferente: {dst}")
 
+            resume_offset = 0
             if os.path.exists(tmp_dst):
-                try:
-                    os.remove(tmp_dst)
-                except Exception:
-                    pass
+                if self.file_starts_with_file(src, tmp_dst):
+                    resume_offset = os.path.getsize(tmp_dst)
+                else:
+                    preserved_path = (
+                        f"{tmp_dst}.preserved."
+                        f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.{os.getpid()}"
+                    )
+                    counter = 1
+                    while os.path.exists(preserved_path):
+                        preserved_path = f"{tmp_dst}.preserved.{os.getpid()}.{counter}"
+                        counter += 1
+                    os.replace(tmp_dst, preserved_path)
 
             with open(src, "rb") as f_src:
-                with open(tmp_dst, "wb") as f_dst:
+                f_src.seek(resume_offset)
+                with open(tmp_dst, "ab" if resume_offset else "wb") as f_dst:
                     while True:
                         chunk = f_src.read(1024 * 1024)
                         if not chunk:
@@ -4542,13 +4626,8 @@ class CameraManagerApp:
             shutil.copystat(src, tmp_dst)
             os.replace(tmp_dst, dst)
             return True
-        except Exception as e:
-            try:
-                if os.path.exists(tmp_dst):
-                    os.remove(tmp_dst)
-            except Exception:
-                pass
-            raise e
+        except Exception:
+            raise
 
     def safe_rate_limited_copy(self, src, dst):
         return self.safe_atomic_copy(
@@ -4650,8 +4729,14 @@ class CameraManagerApp:
         
         # Cria a trava local
         try:
-            with open(lock_path, "w") as f:
-                f.write(str(os.getpid()))
+            write_json_atomically(lock_path, {
+                "version": 1,
+                "pid": os.getpid(),
+                "owner_token": getattr(self, "_recorder_owner_token", ""),
+                "script_path": os.path.abspath(__file__),
+                "stream": stream_name,
+                "started_at": datetime.now().isoformat(timespec="seconds"),
+            })
         except Exception:
             pass
             
@@ -4744,7 +4829,12 @@ class CameraManagerApp:
         # Finalização e Limpeza
         if os.path.exists(lock_path):
             try:
-                os.remove(lock_path)
+                lock_data = load_json_file(lock_path)
+                if (
+                    lock_data.get("pid") == os.getpid()
+                    and lock_data.get("owner_token") == getattr(self, "_recorder_owner_token", "")
+                ):
+                    os.remove(lock_path)
             except Exception:
                 pass
                 
@@ -4754,7 +4844,7 @@ class CameraManagerApp:
                 if os.path.exists(net_lock_path):
                     with open(net_lock_path, "r", encoding="utf-8") as f:
                         data = json.load(f)
-                    if data.get("hostname") == socket.gethostname():
+                    if data.get("owner_token") == getattr(self, "_recorder_owner_token", ""):
                         os.remove(net_lock_path)
             except Exception:
                 pass
@@ -4770,51 +4860,65 @@ class CameraManagerApp:
             return None
             
         try:
+            current_time = time.time()
+            if current_time - os.path.getmtime(lock_path) > 120:
+                return None
             with open(lock_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            
-            last_heartbeat = data.get("timestamp", 0)
-            hostname = data.get("hostname", "")
-            ip = data.get("ip", "")
-            
-            current_time = time.time()
-            my_hostname = socket.gethostname()
-            
-            # Validação dupla: por JSON timestamp e por tempo de modificação do arquivo físico (previne desassociação de relógios locais)
-            file_mtime = os.path.getmtime(lock_path)
-            age_by_mtime = current_time - file_mtime
-            
-            if age_by_mtime > 120:
-                return None  # Trava expirada pelo sistema de arquivos
-                
-            if (current_time - last_heartbeat < 90) and (hostname != my_hostname):
-                return {"hostname": hostname, "ip": ip}
+            if not isinstance(data, dict):
+                raise ValueError("heartbeat nao e um objeto JSON")
+
+            owner_token = data.get("owner_token")
+            if owner_token and owner_token == getattr(self, "_recorder_owner_token", ""):
+                return None
+            if current_time - float(data.get("timestamp", 0)) < 90:
+                return {
+                    "hostname": data.get("hostname") or "desconhecido",
+                    "ip": data.get("ip") or "",
+                    "reason": "active_foreign_owner",
+                }
         except Exception:
-            pass
+            try:
+                if time.time() - os.path.getmtime(lock_path) > 120:
+                    return None
+            except Exception:
+                pass
+            return {
+                "hostname": "desconhecido",
+                "ip": "",
+                "reason": "unreadable_recent_lock",
+            }
         return None
 
     def atualizar_heartbeat_cam(self, gdrive_dir, stream_name):
         if not gdrive_dir:
-            return
+            return True
         if not os.path.exists(gdrive_dir):
             try:
                 os.makedirs(gdrive_dir, exist_ok=True)
             except Exception:
-                return
+                return False
                 
         lock_path = os.path.join(gdrive_dir, ".active_recorder.json")
+        if self.verificar_duplicidade_rede_cam(gdrive_dir, stream_name):
+            return False
         
         data = {
+            "version": 1,
             "timestamp": time.time(),
             "hostname": socket.gethostname(),
-            "ip": self.local_ip
+            "ip": self.local_ip,
+            "pid": os.getpid(),
+            "stream": stream_name,
+            "owner_token": getattr(self, "_recorder_owner_token", ""),
         }
         
         try:
-            with open(lock_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
+            write_json_atomically(lock_path, data)
+            observed = load_json_file(lock_path)
+            return observed.get("owner_token") == data["owner_token"]
         except Exception:
-            pass
+            return False
 
     def obter_faixa_horario(self, dt):
         global CONFIG
@@ -4853,7 +4957,9 @@ class CameraManagerApp:
         
         url = f"http://127.0.0.1:1984/api/stream.ts?src={stream_name}"
         
-        self.atualizar_heartbeat_cam(gdrive_dir, stream_name)
+        if not self.atualizar_heartbeat_cam(gdrive_dir, stream_name):
+            escrever_log_cam("[ERRO_DUPLICADO] Nao foi possivel adquirir a trava de gravacao no destino.")
+            return "duplicado"
         last_heartbeat_time = time.time()
         last_storage_check = 0.0
         
@@ -4876,7 +4982,10 @@ class CameraManagerApp:
                         status_ret = "duplicado"
                         break
                     
-                    self.atualizar_heartbeat_cam(gdrive_dir, stream_name)
+                    if not self.atualizar_heartbeat_cam(gdrive_dir, stream_name):
+                        escrever_log_cam("[ERRO_DUPLICADO] A trava de gravacao foi assumida por outro processo.")
+                        status_ret = "duplicado"
+                        break
                     last_heartbeat_time = time.time()
                     
                     try:
@@ -4894,7 +5003,10 @@ class CameraManagerApp:
                             # Atualiza batimento cardíaco a cada 30 segundos
                             agora_ts = time.time()
                             if agora_ts - last_heartbeat_time >= 30:
-                                self.atualizar_heartbeat_cam(gdrive_dir, stream_name)
+                                if not self.atualizar_heartbeat_cam(gdrive_dir, stream_name):
+                                    escrever_log_cam("[ERRO_DUPLICADO] Falha ao renovar a trava de gravacao.")
+                                    status_ret = "duplicado"
+                                    break
                                 last_heartbeat_time = agora_ts
 
                             if agora_ts - last_storage_check >= 30:
@@ -5107,6 +5219,15 @@ class CameraManagerApp:
         threading.Thread(target=self.run_start_sequence, daemon=True).start()
 
     def run_start_sequence(self):
+        with self.get_lifecycle_lock():
+            try:
+                self._run_start_sequence_locked()
+            finally:
+                startup_ready = getattr(self, "_startup_ready", None)
+                if startup_ready is not None:
+                    startup_ready.set()
+
+    def _run_start_sequence_locked(self):
         # Encerra processos e threads anteriores
         self.run_stop_sequence()
         time.sleep(1.5)
@@ -5163,6 +5284,10 @@ class CameraManagerApp:
             self.root.after(0, lambda: self.set_button_state("STOPPED"))
 
     def run_stop_sequence(self):
+        with self.get_lifecycle_lock():
+            self._run_stop_sequence_locked()
+
+    def _run_stop_sequence_locked(self):
         with self._stop_lock:
             # 1. Sinaliza parada e fecha as leituras para que cada thread possa
             # concluir flush, fsync e publicacao do bloco atual.
@@ -5175,7 +5300,7 @@ class CameraManagerApp:
                 except Exception:
                     pass
 
-            pids = {}
+            lock_records = {}
             lock_paths = {}
             for stream in self.streams:
                 lock_file = os.path.join(LOGS_DIR, f"gravando_{stream}.lock")
@@ -5185,7 +5310,14 @@ class CameraManagerApp:
                         with open(lock_file, "r") as f:
                             content = f.read().strip()
                         if content.isdigit():
-                            pids[stream] = int(content)
+                            lock_records[stream] = {
+                                "pid": int(content),
+                                "legacy": True,
+                            }
+                        else:
+                            lock_data = json.loads(content)
+                            if isinstance(lock_data, dict) and isinstance(lock_data.get("pid"), int):
+                                lock_records[stream] = lock_data
                     except Exception:
                         pass
 
@@ -5215,28 +5347,28 @@ class CameraManagerApp:
                     ),
                 )
 
-            # 2. Aguarda processos externos antigos, sem confundir as threads
-            # internas (que usam o PID do proprio painel).
+            # Processos externos nunca sao encerrados a partir de uma trava em
+            # disco. Uma trava antiga pode conter um PID que o Windows ja
+            # reutilizou para outro Python.
             my_pid = os.getpid()
-            for _ in range(15):
-                external_running = any(
-                    pid != my_pid and self.is_pid_running_and_python(pid)
-                    for pid in pids.values()
+            external_streams = {
+                stream
+                for stream, lock_data in lock_records.items()
+                if lock_data.get("pid") != my_pid
+                and self.is_pid_owned_recorder(lock_data.get("pid"), lock_data)
+            }
+            if external_streams and not self.silent:
+                cameras = ", ".join(sorted(stream.upper() for stream in external_streams))
+                self.root.after(
+                    0,
+                    lambda cams=cameras: self.add_log(
+                        f"AVISO: gravador externo preservado ({cams}); use a instancia proprietaria para encerra-lo."
+                    ),
                 )
-                if not external_running:
-                    break
-                time.sleep(0.2)
-
-            for stream, pid in pids.items():
-                if pid != my_pid and self.is_pid_running_and_python(pid):
-                    try:
-                        os.kill(pid, 9)
-                        if not self.silent:
-                            self.root.after(0, lambda s=stream: self.add_log(f"Processo do gravador {s.upper()} finalizado."))
-                    except Exception:
-                        pass
 
             for stream, lock_file in lock_paths.items():
+                if stream in external_streams:
+                    continue
                 local_thread = self.recording_threads.get(stream)
                 if local_thread is not None and local_thread.is_alive():
                     continue
@@ -6375,7 +6507,10 @@ def garantir_instancia_unica(silent=False):
     global _instance_socket
     try:
         _instance_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        _instance_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            _instance_socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            _instance_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         _instance_socket.bind(('127.0.0.1', 29999))
         _instance_socket.listen(1)
         return True

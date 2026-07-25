@@ -4,7 +4,9 @@ import ast
 import contextlib
 from datetime import datetime
 import hashlib
+import inspect
 import io
+import json
 import os
 from pathlib import Path
 import shutil
@@ -520,6 +522,165 @@ class StorageSafetyTests(unittest.TestCase):
         self.assertIsNone(app._go2rtc_process)
         self.assertEqual(app.go2rtc_api_fails, 0)
 
+    def test_concurrent_go2rtc_start_creates_only_one_managed_process(self):
+        app = self.new_app()
+        app.silent = True
+        app._lifecycle_lock = threading.RLock()
+        app._go2rtc_process = None
+        app.go2rtc_restart_count = 0
+        app.go2rtc_api_fails = 0
+        app.add_log = lambda *_args, **_kwargs: None
+        app.probe_go2rtc_api = lambda *_args, **_kwargs: {
+            "ok": False,
+            "streams": [],
+            "error": "offline",
+        }
+
+        class FakeProcess:
+            def poll(self):
+                return None
+
+        starts = []
+        original_popen = self.module.subprocess.Popen
+
+        def fake_popen(*_args, **_kwargs):
+            starts.append(True)
+            time.sleep(0.05)
+            return FakeProcess()
+
+        self.module.subprocess.Popen = fake_popen
+        try:
+            workers = [threading.Thread(target=app.iniciar_go2rtc) for _ in range(5)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join()
+        finally:
+            self.module.subprocess.Popen = original_popen
+
+        self.assertEqual(len(starts), 1)
+
+    def test_preview_loop_does_not_mutate_go2rtc_watchdog_state(self):
+        source = inspect.getsource(self.module.LiveCameraWidget.stream_loop)
+        self.assertNotIn("check_process_go2rtc", source)
+
+    def test_stop_sequence_never_kills_external_python_from_stale_lock(self):
+        app = self.new_app()
+        app.streams = ["cam"]
+        app.recording_active = {"cam": False}
+        app.recording_threads = {}
+        app.active_connections = {}
+        app._stop_lock = threading.Lock()
+        app._lifecycle_lock = threading.RLock()
+        app.silent = True
+        app.stop_managed_go2rtc = lambda: None
+        app.limpar_processos_ffmpeg_zumbis = lambda sync=False: None
+        app.is_pid_running_and_python = lambda _pid: True
+        app.is_pid_owned_recorder = lambda _pid, _lock_data=None: True
+        lock_path = Path(self.module.LOGS_DIR) / "gravando_cam.lock"
+        lock_path.write_text("4242", encoding="utf-8")
+
+        kill_calls = []
+        original_kill = self.module.os.kill
+        original_sleep = self.module.time.sleep
+        self.module.os.kill = lambda pid, signal: kill_calls.append((pid, signal))
+        self.module.time.sleep = lambda _seconds: None
+        try:
+            app.run_stop_sequence()
+        finally:
+            self.module.os.kill = original_kill
+            self.module.time.sleep = original_sleep
+
+        self.assertEqual(kill_calls, [])
+        self.assertTrue(lock_path.exists())
+
+    def test_network_heartbeat_is_atomic_owned_and_malformed_recent_lock_fails_closed(self):
+        app = self.new_app()
+        app._recorder_owner_token = "owner-token"
+        app.local_ip = "127.0.0.1"
+        heartbeat_dir = Path(self.temp_dir.name) / "heartbeat"
+        heartbeat_dir.mkdir(exist_ok=True)
+
+        self.assertTrue(app.atualizar_heartbeat_cam(str(heartbeat_dir), "cam"))
+        lock_path = heartbeat_dir / ".active_recorder.json"
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["owner_token"], "owner-token")
+        self.assertEqual(payload["stream"], "cam")
+        self.assertFalse(list(heartbeat_dir.glob("*.tmp")))
+
+        lock_path.write_text("{", encoding="utf-8")
+        conflict = app.verificar_duplicidade_rede_cam(str(heartbeat_dir), "cam")
+        self.assertIsNotNone(conflict)
+        self.assertEqual(conflict["reason"], "unreadable_recent_lock")
+
+    def test_atomic_copy_preserves_completed_temporary_when_publication_fails(self):
+        app = self.new_app()
+        work_dir = Path(self.temp_dir.name) / "copy-preserve"
+        work_dir.mkdir(exist_ok=True)
+        source = work_dir / "source.ts"
+        destination = work_dir / "destination.ts"
+        source.write_bytes(b"recoverable-video" * 1024)
+
+        original_replace = self.module.os.replace
+        self.module.os.replace = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("publication failed")
+        )
+        try:
+            with self.assertRaises(OSError):
+                app.safe_atomic_copy(str(source), str(destination))
+        finally:
+            self.module.os.replace = original_replace
+
+        temporary = Path(str(destination) + ".syncing")
+        self.assertTrue(temporary.exists())
+        self.assertEqual(temporary.read_bytes(), source.read_bytes())
+
+    def test_singleton_uses_exclusive_address_on_windows(self):
+        options = []
+
+        class FakeSocket:
+            def setsockopt(self, *args):
+                options.append(args)
+
+            def bind(self, _address):
+                return None
+
+            def listen(self, _backlog):
+                return None
+
+        original_socket = self.module.socket.socket
+        self.module.socket.socket = lambda *_args, **_kwargs: FakeSocket()
+        try:
+            self.assertTrue(self.module.garantir_instancia_unica())
+        finally:
+            self.module.socket.socket = original_socket
+
+        self.assertIn(
+            (
+                self.module.socket.SOL_SOCKET,
+                self.module.socket.SO_EXCLUSIVEADDRUSE,
+                1,
+            ),
+            options,
+        )
+
+    def test_silent_power_guard_keeps_system_awake_without_forcing_display(self):
+        app = self.new_app()
+        app.silent = True
+        requested_states = []
+        original_windll = self.module.ctypes.windll
+        self.module.ctypes.windll = types.SimpleNamespace(
+            kernel32=types.SimpleNamespace(
+                SetThreadExecutionState=requested_states.append,
+            )
+        )
+        try:
+            app.apply_prevent_sleep(True)
+        finally:
+            self.module.ctypes.windll = original_windll
+
+        self.assertEqual(requested_states, [0x80000000 | 0x00000001])
+
     def test_low_space_does_not_delete_recordings_without_explicit_policy(self):
         app = self.new_app()
         app.silent = True
@@ -626,13 +787,16 @@ class StorageSafetyTests(unittest.TestCase):
         temp_root.mkdir(parents=True, exist_ok=True)
         video = temp_root / "temp_camera_test.ts"
         empty = temp_root / "empty.tmp"
+        recoverable_tmp = temp_root / "recoverable.tmp"
         video.write_bytes(b"recoverable-video")
         empty.write_bytes(b"")
+        recoverable_tmp.write_bytes(b"recoverable-temporary")
 
         app.limpar_arquivos_temporarios_orfaos()
 
         self.assertEqual(video.read_bytes(), b"recoverable-video")
         self.assertFalse(empty.exists())
+        self.assertEqual(recoverable_tmp.read_bytes(), b"recoverable-temporary")
 
     def test_destination_switches_between_backup_and_hd(self):
         app = self.new_app()
