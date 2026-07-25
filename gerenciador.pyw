@@ -22,6 +22,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import os
 import socket
+import urllib.error
 import urllib.request
 import urllib.parse
 import json
@@ -349,7 +350,7 @@ def atualizar_go2rtc_yaml(proj_dir):
     mjpeg_block = "\n".join(mjpeg_lines)
 
     conteudo = f'''app:
-  modules: [api, rtsp, webrtc, exec, ffmpeg, mjpeg, mpeg, mp4, hls, tuya]
+  modules: [api, rtsp, webrtc, exec, ffmpeg, mjpeg, mpegts, mp4, hls, tuya]
 
 api:
   listen: ":1984"
@@ -4184,6 +4185,30 @@ class CameraManagerApp:
         except Exception as error:
             return {"ok": False, "streams": [], "error": str(error)}
 
+    def probe_go2rtc_recording_route(self, timeout=1.0):
+        probe_url = "http://127.0.0.1:1984/api/stream.ts?src=__nvr_route_probe__"
+        try:
+            with urllib.request.urlopen(probe_url, timeout=timeout) as response:
+                return response.status == 200
+        except urllib.error.HTTPError as error:
+            try:
+                body = error.read(128)
+            except Exception:
+                body = b""
+            return error.code == 404 and body.strip() == b"stream not found"
+        except Exception:
+            return False
+
+    def wait_for_go2rtc_recording_route(self, timeout_seconds=8.0):
+        deadline = time.monotonic() + max(0.5, float(timeout_seconds))
+        while time.monotonic() < deadline:
+            if self.probe_go2rtc_recording_route(timeout=1.0):
+                return True
+            if getattr(self, "_shutdown_executed", False) or not self.running_monitor:
+                return False
+            time.sleep(0.2)
+        return False
+
     def iniciar_go2rtc(self):
         with self.get_lifecycle_lock():
             try:
@@ -5370,8 +5395,14 @@ class CameraManagerApp:
         
         try:
             # 1. Liga a ponte RTSP go2rtc.exe se não estiver rodando
-            if self.iniciar_go2rtc():
-                time.sleep(2.5)
+            self.iniciar_go2rtc()
+            if not self.wait_for_go2rtc_recording_route():
+                self.add_log(
+                    "[STARTUP][ERROR] A rota MPEG-TS do go2rtc nao ficou pronta; "
+                    "gravadores nao foram iniciados.",
+                    "tag_erro",
+                )
+                return
 
             if getattr(self, "_shutdown_executed", False) or not self.running_monitor:
                 return

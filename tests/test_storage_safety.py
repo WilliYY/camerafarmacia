@@ -18,6 +18,7 @@ import threading
 import time
 import types
 import unittest
+import urllib.error
 
 
 def load_manager_copy():
@@ -461,7 +462,8 @@ class StorageSafetyTests(unittest.TestCase):
         self.assertIn('password: "senha-segura-123456"', yaml_text)
         self.assertIn('ffmpeg:farmacia#video=mjpeg', yaml_text)
         self.assertNotIn('ffmpeg:farmacia#video=mjpeg#hardware', yaml_text)
-        self.assertIn('modules: [api, rtsp, webrtc, exec, ffmpeg, mjpeg, mpeg, mp4, hls, tuya]', yaml_text)
+        self.assertIn('modules: [api, rtsp, webrtc, exec, ffmpeg, mjpeg, mpegts, mp4, hls, tuya]', yaml_text)
+        self.assertNotIn(', mpeg,', yaml_text)
         self.assertIn('/api/stream.ts', yaml_text)
         self.assertIn('/api/stream.mjpeg', yaml_text)
         self.assertIn('/api/ws', yaml_text)
@@ -1129,6 +1131,18 @@ class StorageSafetyTests(unittest.TestCase):
             "free_bytes": 50 * 1024 ** 3,
             "reserve_bytes": 20 * 1024 ** 3,
         }
+        original_disk_usage = self.module.shutil.disk_usage
+        self.addCleanup(
+            setattr,
+            self.module.shutil,
+            "disk_usage",
+            original_disk_usage,
+        )
+        self.module.shutil.disk_usage = lambda _path: (
+            100 * 1024 ** 3,
+            50 * 1024 ** 3,
+            50 * 1024 ** 3,
+        )
 
         healthy = app.collect_health_snapshot()
         self.assertEqual(healthy["overall_status"], "healthy")
@@ -1174,6 +1188,32 @@ class StorageSafetyTests(unittest.TestCase):
 
         self.assertEqual(result["streams"], ["farmacia"])
         self.assertNotIn("secret", str(result))
+
+    def test_recording_route_probe_requires_registered_mpegts_handler(self):
+        app = self.new_app()
+        original_urlopen = self.module.urllib.request.urlopen
+
+        def http_error(body):
+            return urllib.error.HTTPError(
+                "http://127.0.0.1:1984/api/stream.ts",
+                404,
+                "Not Found",
+                {},
+                io.BytesIO(body),
+            )
+
+        try:
+            self.module.urllib.request.urlopen = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                http_error(b"stream not found\n")
+            )
+            self.assertTrue(app.probe_go2rtc_recording_route())
+
+            self.module.urllib.request.urlopen = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                http_error(b"404 page not found\n")
+            )
+            self.assertFalse(app.probe_go2rtc_recording_route())
+        finally:
+            self.module.urllib.request.urlopen = original_urlopen
 
     def test_legacy_merge_keeps_different_same_named_files(self):
         app = self.new_app()
