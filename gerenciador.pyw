@@ -38,6 +38,7 @@ import zipfile
 
 
 STREAM_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+STORAGE_FOLDER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _-]{0,63}$")
 ALLOWED_STREAM_PREFIXES = (
     "tuya://",
     "rtsp://",
@@ -111,6 +112,66 @@ def normalize_streams_config(streams):
             continue
         normalized[raw_name] = url
     return normalized
+
+
+def normalize_storage_folder_map(value, stream_names):
+    normalized = {}
+    used_folders = set()
+    if isinstance(value, dict):
+        for stream_name in stream_names:
+            folder_name = value.get(stream_name)
+            if (
+                isinstance(folder_name, str)
+                and STORAGE_FOLDER_PATTERN.fullmatch(folder_name)
+                and folder_name not in (".", "..")
+                and os.path.basename(folder_name) == folder_name
+                and folder_name.casefold() not in used_folders
+            ):
+                normalized[stream_name] = folder_name
+                used_folders.add(folder_name.casefold())
+
+    for index, stream_name in enumerate(stream_names):
+        if stream_name in normalized:
+            continue
+        candidate_number = index + 1
+        while True:
+            candidate = f"camera {candidate_number}"
+            if candidate.casefold() not in used_folders:
+                normalized[stream_name] = candidate
+                used_folders.add(candidate.casefold())
+                break
+            candidate_number += 1
+    return normalized
+
+
+def calculate_local_storage_reserve_bytes(total_bytes, configured_gb=None):
+    gib = 1024 ** 3
+    if configured_gb is not None:
+        try:
+            configured = int(configured_gb)
+        except (TypeError, ValueError):
+            configured = 0
+        if 10 <= configured <= 500:
+            return configured * gib
+    return max(20 * gib, int(max(0, total_bytes) * 0.10))
+
+
+def filter_kernel_144_dump_stamps(stamps, now_datetime, hours=24):
+    cutoff = now_datetime - timedelta(hours=max(1, int(hours)))
+    future_limit = now_datetime + timedelta(minutes=5)
+    accepted = set()
+    for raw_stamp in stamps or []:
+        if not isinstance(raw_stamp, str):
+            continue
+        stamp = raw_stamp.strip()
+        stamp_format = "%Y%m%d-%H%M%S" if re.fullmatch(r"\d{8}-\d{6}", stamp) else "%Y%m%d-%H%M"
+        try:
+            occurred_at = datetime.strptime(stamp, stamp_format)
+        except ValueError:
+            continue
+        if cutoff <= occurred_at <= future_limit:
+            accepted.add(stamp)
+    return sorted(accepted)
 
 
 def sync_public_viewer(proj_dir):
@@ -763,6 +824,8 @@ def carregar_config():
             "storage_identity": None,
             "bloco_minutos": 30,
             "streams": {},
+            "storage_folder_map": {},
+            "local_storage_reserve_gb": None,
             "web_auth": generate_web_auth(),
             "trusted_update_hashes": {},
             "retention_days": 90,
@@ -811,6 +874,10 @@ def carregar_config():
                     shared_streams = normalize_streams_config(shared_config.get("streams"))
                     if shared_streams:
                         config["streams"] = shared_streams
+                        config["storage_folder_map"] = normalize_storage_folder_map(
+                            shared_config.get("storage_folder_map"),
+                            list(shared_streams.keys()),
+                        )
                         updated = True
                     if shared_config.get("bloco_minutos") in (10, 15, 30):
                         config["bloco_minutos"] = shared_config["bloco_minutos"]
@@ -837,6 +904,24 @@ def carregar_config():
         streams = normalize_streams_config(config.get("streams"))
         if config.get("streams") != streams:
             config["streams"] = streams
+            updated = True
+        storage_folder_map = normalize_storage_folder_map(
+            config.get("storage_folder_map"),
+            list(streams.keys()),
+        )
+        if config.get("storage_folder_map") != storage_folder_map:
+            config["storage_folder_map"] = storage_folder_map
+            updated = True
+        configured_reserve = config.get("local_storage_reserve_gb")
+        if configured_reserve is not None:
+            try:
+                configured_reserve = int(configured_reserve)
+            except (TypeError, ValueError):
+                configured_reserve = None
+            if configured_reserve is not None and not 10 <= configured_reserve <= 500:
+                configured_reserve = None
+        if config.get("local_storage_reserve_gb") != configured_reserve:
+            config["local_storage_reserve_gb"] = configured_reserve
             updated = True
         web_auth = normalize_web_auth(config.get("web_auth"))
         if config.get("web_auth") != web_auth:
@@ -865,6 +950,10 @@ def carregar_config():
 def salvar_config_locked(config):
     try:
         config["streams"] = normalize_streams_config(config.get("streams"))
+        config["storage_folder_map"] = normalize_storage_folder_map(
+            config.get("storage_folder_map"),
+            list(config["streams"].keys()),
+        )
         config["web_auth"] = normalize_web_auth(config.get("web_auth"))
         config["storage_identity"] = normalize_storage_identity(config.get("storage_identity"))
         config["trusted_update_hashes"] = normalize_trusted_update_hashes(config.get("trusted_update_hashes"))
@@ -879,6 +968,7 @@ def salvar_config_locked(config):
             write_json_atomically(shared_path, {
                 "bloco_minutos": config.get("bloco_minutos", 30),
                 "streams": config["streams"],
+                "storage_folder_map": config["storage_folder_map"],
                 "storage_identity": config.get("storage_identity"),
             })
         return True
@@ -894,7 +984,6 @@ def salvar_config(config):
 CONFIG = carregar_config()
 GDRIVE_ROOT = CONFIG.get("gdrive_root") or ""
 
-LOCAL_STORAGE_RESERVE_BYTES = 5 * 1024 * 1024 * 1024
 HEALTH_CHECK_INTERVAL_SECONDS = 60
 KERNEL_REPORT_CACHE_SECONDS = 5 * 60
 STARTUP_LOG_LIMIT = 500
@@ -1149,21 +1238,29 @@ def build_operational_intelligence(snapshot):
     }
 
 
-def garantir_limite_backup_local(backup_dir, min_free_bytes=LOCAL_STORAGE_RESERVE_BYTES):
+def garantir_limite_backup_local(backup_dir, min_free_bytes=None):
     """Informa se ha reserva local sem apagar gravacoes ainda nao sincronizadas."""
+    reserve_bytes = min_free_bytes
     try:
         os.makedirs(backup_dir, exist_ok=True)
-        _, _, free_bytes = shutil.disk_usage(backup_dir)
+        total_bytes, _, free_bytes = shutil.disk_usage(backup_dir)
+        if reserve_bytes is None:
+            reserve_bytes = calculate_local_storage_reserve_bytes(
+                total_bytes,
+                (globals().get("CONFIG") or {}).get("local_storage_reserve_gb"),
+            )
         return {
-            "ok": free_bytes >= min_free_bytes,
+            "ok": free_bytes >= reserve_bytes,
             "free_bytes": free_bytes,
-            "reserve_bytes": min_free_bytes,
+            "reserve_bytes": reserve_bytes,
         }
     except Exception:
+        if reserve_bytes is None:
+            reserve_bytes = 20 * 1024 ** 3
         return {
             "ok": False,
             "free_bytes": 0,
-            "reserve_bytes": min_free_bytes,
+            "reserve_bytes": reserve_bytes,
         }
 
 # Cores do Tema Escuro Premium
@@ -1712,6 +1809,7 @@ class CameraManagerApp:
         self._stop_lock = threading.Lock()
         self._shutdown_request_lock = threading.Lock()
         self._scan_lock = threading.Lock()
+        self._retention_lock = threading.Lock()
         self._scan_state_path = os.path.join(LOGS_DIR, "integrity_scan_state.json")
         self._health_lock = threading.Lock()
         self._health_snapshot = None
@@ -1721,6 +1819,7 @@ class CameraManagerApp:
         self._last_go2rtc_ok = False
         self._usb_report_cache = None
         self._usb_report_cache_time = 0.0
+        self._kernel_144_state_path = os.path.join(LOGS_DIR, "kernel_144_baseline.json")
         self._kernel_144_session_baseline = None
         self._resource_samples = []
         self._smart_snapshot = {"status": "pending", "drives": [], "error": None}
@@ -1767,6 +1866,7 @@ class CameraManagerApp:
         
         # Agenda escaneamento automático a cada 3 horas (3 * 3600 * 1000 ms)
         self.root.after(10800000, self.trigger_periodic_scan)
+        self.root.after(14400000, self.trigger_periodic_retention)
         
         # Agenda diagnóstico automático a cada 6 horas (6 * 3600 * 1000 ms)
         self.root.after(21600000, self.trigger_periodic_diagnostics)
@@ -2036,12 +2136,12 @@ class CameraManagerApp:
     def get_gdrive_dir(self, stream_name, index):
         if not GDRIVE_ROOT:
             return ""
-        if index == 0:
-            return os.path.join(GDRIVE_ROOT, "camera 1")
-        elif index == 1:
-            return os.path.join(GDRIVE_ROOT, "camera 2")
-        else:
-            return os.path.join(GDRIVE_ROOT, f"camera {index+1}")
+        folder_map = normalize_storage_folder_map(
+            CONFIG.get("storage_folder_map"),
+            list(normalize_streams_config(CONFIG.get("streams")).keys()) or self.streams,
+        )
+        folder_name = folder_map.get(stream_name, f"camera {index + 1}")
+        return os.path.join(GDRIVE_ROOT, folder_name)
 
     def get_camera_storage_dirs(self):
         dirs = []
@@ -3091,46 +3191,104 @@ class CameraManagerApp:
         if self._usb_report_cache is not None and now - self._usb_report_cache_time < KERNEL_REPORT_CACHE_SECONDS:
             return self._usb_report_cache
 
-        program_data = os.environ.get("ProgramData", r"C:\ProgramData")
-        roots = [
-            os.path.join(program_data, "Microsoft", "Windows", "WER", "ReportArchive"),
-            os.path.join(program_data, "Microsoft", "Windows", "WER", "ReportQueue"),
-        ]
-        cutoff = now - (hours * 3600)
-        count = 0
-        latest_mtime = None
-        accessible_roots = 0
-        for report_root in roots:
-            try:
-                entries = list(os.scandir(report_root))
-                accessible_roots += 1
-            except Exception:
-                continue
-            for entry in entries[:2000]:
-                if not entry.is_dir(follow_symlinks=False) or not entry.name.lower().startswith("kernel_144"):
-                    continue
-                try:
-                    report_mtime = entry.stat(follow_symlinks=False).st_mtime
-                except Exception:
-                    continue
-                if report_mtime < cutoff:
-                    continue
-                count += 1
-                if latest_mtime is None or report_mtime > latest_mtime:
-                    latest_mtime = report_mtime
+        query_hours = max(72, int(hours) + 24)
+        powershell = (
+            f"$start=(Get-Date).AddHours(-{query_hours});"
+            "$stamps=@(Get-WinEvent -FilterHashtable "
+            "@{LogName='Application';ProviderName='Windows Error Reporting';Id=1001;StartTime=$start} "
+            "-ErrorAction Stop | Where-Object {"
+            "$_.Message -match 'LiveKernelEvent' -and $_.Message -match '(?m)^P1:\\s*144\\s*$'"
+            "} | ForEach-Object {"
+            "$m=[regex]::Match($_.Message,'(?i)(?:USBXHCI|WATCHDOG)-(?<stamp>\\d{8}-\\d{4,6})[^\\s\\\\]*\\.dmp');"
+            "if($m.Success){$m.Groups['stamp'].Value}"
+            "} | Sort-Object -Unique);"
+            "ConvertTo-Json -Compress -InputObject @($stamps)"
+        )
+        try:
+            output = subprocess.check_output(
+                ["powershell", "-NoProfile", "-Command", powershell],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=20,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            raw_stamps = json.loads(output) if output.strip() else []
+            if isinstance(raw_stamps, str):
+                raw_stamps = [raw_stamps]
+            observed_ids = filter_kernel_144_dump_stamps(
+                raw_stamps,
+                datetime.now(),
+                hours=query_hours,
+            )
+            recent_ids = filter_kernel_144_dump_stamps(
+                observed_ids,
+                datetime.now(),
+                hours=hours,
+            )
 
-        result = {
-            "status": "ok" if accessible_roots else "unknown",
-            "count_24h": count,
-            "latest": datetime.fromtimestamp(latest_mtime).isoformat(timespec="seconds") if latest_mtime else None,
-            "checked_at": datetime.now().isoformat(timespec="seconds"),
-        }
+            state_path = getattr(
+                self,
+                "_kernel_144_state_path",
+                os.path.join(LOGS_DIR, "kernel_144_baseline.json"),
+            )
+            state_exists = os.path.exists(state_path)
+            try:
+                state = load_json_file(state_path) if state_exists else {}
+            except Exception:
+                state = {}
+                state_exists = False
+            known_ids = {
+                item for item in state.get("known_report_ids", [])
+                if isinstance(item, str)
+            }
+            new_ids = sorted(set(observed_ids) - known_ids) if state_exists else []
+            merged_ids = sorted(known_ids | set(observed_ids))[-128:]
+            write_json_atomically(state_path, {
+                "version": 1,
+                "known_report_ids": merged_ids,
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            })
+
+            latest = None
+            if recent_ids:
+                stamp = recent_ids[-1]
+                stamp_format = "%Y%m%d-%H%M%S" if len(stamp) == 15 else "%Y%m%d-%H%M"
+                latest = datetime.strptime(stamp, stamp_format).isoformat(timespec="seconds")
+            result = {
+                "status": "ok",
+                "count_24h": len(recent_ids),
+                "latest": latest,
+                "report_ids": recent_ids,
+                "new_since_last_scan": len(new_ids),
+                "checked_at": datetime.now().isoformat(timespec="seconds"),
+                "source": "windows_event_log_dump_timestamp",
+            }
+        except Exception as error:
+            result = {
+                "status": "unknown",
+                "count_24h": 0,
+                "latest": None,
+                "report_ids": [],
+                "new_since_last_scan": 0,
+                "checked_at": datetime.now().isoformat(timespec="seconds"),
+                "source": "windows_event_log_dump_timestamp",
+                "error": str(error),
+            }
         self._usb_report_cache = result
         self._usb_report_cache_time = now
         return result
 
     def add_kernel_session_context(self, reports):
         result = dict(reports)
+        persisted_new = result.get("new_since_last_scan")
+        if isinstance(persisted_new, int):
+            result["session_baseline_count"] = max(
+                0,
+                result.get("count_24h", 0) - persisted_new,
+            )
+            result["session_baseline_latest"] = None
+            result["new_in_session"] = max(0, persisted_new)
+            return result
         current_count = result.get("count_24h", 0)
         current_latest = result.get("latest")
         baseline = getattr(self, "_kernel_144_session_baseline", None)
@@ -3239,21 +3397,23 @@ class CameraManagerApp:
         backup_root = os.path.join(PROJ_DIR, "sistema", "backup_gravacoes")
         local_status = garantir_limite_backup_local(backup_root)
         local_free_gb = local_status["free_bytes"] / (1024 ** 3)
-        if local_free_gb < 5:
+        local_reserve_gb = local_status["reserve_bytes"] / (1024 ** 3)
+        local_warning_gb = local_reserve_gb + max(5.0, local_reserve_gb * 0.25)
+        if not local_status["ok"]:
             issues.append(self.make_health_issue(
                 "LOCAL_SPACE_CRITICAL",
                 "critical",
                 "Espaco local abaixo da reserva segura.",
-                f"Caminho local com {local_free_gb:.2f} GB livres.",
+                f"{local_free_gb:.2f} GB livres; reserva configurada em {local_reserve_gb:.2f} GB.",
                 "Liberar espaco fora das pastas de gravacao; nao apagar backups pendentes.",
             ))
-        elif local_free_gb < 10:
+        elif local_free_gb < local_warning_gb:
             issues.append(self.make_health_issue(
                 "LOCAL_SPACE_LOW",
                 "warning",
                 "Espaco local se aproximando da reserva critica.",
-                f"Caminho local com {local_free_gb:.2f} GB livres.",
-                "Planejar liberacao de espaco antes de atingir 5 GB.",
+                f"{local_free_gb:.2f} GB livres; reserva configurada em {local_reserve_gb:.2f} GB.",
+                "Planejar liberacao de espaco antes de atingir a reserva.",
             ))
 
         hd_available = bool(GDRIVE_ROOT and os.path.isdir(GDRIVE_ROOT))
@@ -5308,11 +5468,10 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
                             scanned_count += 1
                             scan_result = "failed"
                             try:
-                                ffmpeg_reported_error = False
                                 if stat.st_size == 0:
-                                    return_code = 1
+                                    scan_result = "failed"
                                 else:
-                                    cmd = [
+                                    probe_commands = [[
                                         ffmpeg_bin,
                                         "-v", "error",
                                         "-nostdin",
@@ -5320,19 +5479,40 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
                                         "-t", "1",
                                         "-f", "null",
                                         "-",
-                                    ]
-                                    completed = subprocess.run(
-                                        cmd,
-                                        shell=False,
-                                        stdout=subprocess.DEVNULL,
-                                        stderr=subprocess.PIPE,
-                                        text=True,
-                                        timeout=15,
-                                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                                    )
-                                    return_code = completed.returncode
-                                    ffmpeg_reported_error = bool((completed.stderr or "").strip())
-                                scan_result = "ok" if return_code == 0 and not ffmpeg_reported_error else "failed"
+                                    ]]
+                                    if same_version and previous.get("failures", 0) >= 1:
+                                        probe_commands.append([
+                                            ffmpeg_bin,
+                                            "-v", "error",
+                                            "-nostdin",
+                                            "-sseof", "-2",
+                                            "-i", filepath,
+                                            "-t", "1",
+                                            "-f", "null",
+                                            "-",
+                                        ])
+
+                                    return_codes = []
+                                    diagnostics = []
+                                    for cmd in probe_commands:
+                                        completed = subprocess.run(
+                                            cmd,
+                                            shell=False,
+                                            stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.PIPE,
+                                            text=True,
+                                            timeout=15,
+                                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                                        )
+                                        return_codes.append(completed.returncode)
+                                        diagnostics.append(bool((completed.stderr or "").strip()))
+                                    if any(code != 0 for code in return_codes):
+                                        scan_result = "failed"
+                                    elif any(diagnostics):
+                                        scan_result = "inconclusive"
+                                        inconclusive_count += 1
+                                    else:
+                                        scan_result = "ok"
                             except subprocess.TimeoutExpired:
                                 scan_result = "inconclusive"
                                 inconclusive_count += 1
@@ -5379,7 +5559,6 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
                 path: item for path, item in file_state.items() if os.path.exists(path)
             }
             self.save_integrity_scan_state(state)
-            self.rotacionar_videos_hd(GDRIVE_ROOT)
 
             if not self.silent:
                 self.add_log(
@@ -5404,6 +5583,12 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             self._scan_lock.release()
 
     def rotacionar_videos_hd(self, hd_root, max_days=None):
+        retention_lock = getattr(self, "_retention_lock", None)
+        if retention_lock is None:
+            retention_lock = threading.Lock()
+            self._retention_lock = retention_lock
+        if not retention_lock.acquire(blocking=False):
+            return
         try:
             if not storage_path_matches_identity(hd_root, CONFIG.get("storage_identity")):
                 return
@@ -5437,6 +5622,9 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             if not self.silent:
                 self.add_log(f"Erro na rotação de vídeos do HD: {str(e)}")
 
+        finally:
+            retention_lock.release()
+
     def flash_button(self, button, temp_text, temp_bg):
         old_text = button.cget("text")
         old_bg = button.cget("bg")
@@ -5455,6 +5643,22 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             return
         self.click_escanear_corrompidos(show_popup=False)
         self.root.after(10800000, self.trigger_periodic_scan)
+
+    def trigger_periodic_retention(self):
+        intelligence = (getattr(self, "_health_snapshot", None) or {}).get("intelligence") or {}
+        protection = intelligence.get("hardware_protection") or {}
+        if protection and not protection.get("heavy_maintenance_allowed", True):
+            self.add_log(
+                f"[INTELLIGENCE][PROTECTION] Retencao automatica adiada: {protection.get('reason')}",
+                "tag_warn",
+            )
+        else:
+            threading.Thread(
+                target=self.rotacionar_videos_hd,
+                args=(GDRIVE_ROOT,),
+                daemon=True,
+            ).start()
+        self.root.after(86400000, self.trigger_periodic_retention)
 
     def trigger_periodic_diagnostics(self):
         """Executa diagnóstico automaticamente a cada 6 horas"""

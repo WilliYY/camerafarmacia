@@ -2,6 +2,7 @@ import importlib.machinery
 import importlib.util
 import ast
 import contextlib
+from datetime import datetime
 import hashlib
 import io
 import os
@@ -133,6 +134,49 @@ class StorageSafetyTests(unittest.TestCase):
         )
         self.assertFalse(status["ok"])
         self.assertEqual(pending.read_bytes(), b"pending-video")
+
+    def test_local_reserve_defaults_to_larger_of_twenty_gb_or_ten_percent(self):
+        gib = 1024 ** 3
+
+        self.assertEqual(
+            self.module.calculate_local_storage_reserve_bytes(100 * gib),
+            20 * gib,
+        )
+        self.assertEqual(
+            self.module.calculate_local_storage_reserve_bytes(1000 * gib),
+            100 * gib,
+        )
+        self.assertEqual(
+            self.module.calculate_local_storage_reserve_bytes(1000 * gib, configured_gb=40),
+            40 * gib,
+        )
+
+    def test_storage_folder_map_survives_stream_reordering(self):
+        original = self.module.normalize_storage_folder_map(
+            {},
+            ["farmacia", "farmacia2"],
+        )
+        reordered = self.module.normalize_storage_folder_map(
+            original,
+            ["farmacia2", "farmacia"],
+        )
+
+        self.assertEqual(original["farmacia"], "camera 1")
+        self.assertEqual(original["farmacia2"], "camera 2")
+        self.assertEqual(reordered, original)
+
+    def test_kernel_report_filter_uses_dump_timestamp_and_deduplicates_reprocessing(self):
+        now = datetime(2026, 7, 25, 18, 0, 0)
+        stamps = [
+            "20260718-2129",
+            "20260718-2129",
+            "20260725-1730",
+            "invalid",
+        ]
+
+        reports = self.module.filter_kernel_144_dump_stamps(stamps, now, hours=24)
+
+        self.assertEqual(reports, ["20260725-1730"])
 
     def test_unknown_battery_value_remains_unsigned(self):
         status = self.module.SYSTEM_POWER_STATUS()
@@ -674,7 +718,8 @@ class StorageSafetyTests(unittest.TestCase):
         app._scan_lock = threading.Lock()
         app._scan_state_path = str(Path(self.temp_dir.name) / "scan_state.json")
         app.get_gdrive_dir = lambda _stream, _index: ""
-        app.rotacionar_videos_hd = lambda _root: None
+        retention_calls = []
+        app.rotacionar_videos_hd = retention_calls.append
         self.module.GDRIVE_ROOT = ""
 
         ffmpeg = Path(self.module.PROJ_DIR) / "sistema" / "go2rtc" / "ffmpeg.exe"
@@ -708,6 +753,47 @@ class StorageSafetyTests(unittest.TestCase):
         self.assertFalse(source.exists())
         quarantine = Path(self.module.PROJ_DIR) / "sistema" / "quarentena_corrompidos"
         self.assertTrue(any(path.name == "suspect.ts" for path in quarantine.rglob("*.ts")))
+        self.assertEqual(retention_calls, [])
+
+    def test_scanner_does_not_quarantine_when_ffmpeg_returns_zero_with_output(self):
+        app = self.new_app()
+        app.streams = ["cam"]
+        app.silent = True
+        app._scan_lock = threading.Lock()
+        app._scan_state_path = str(Path(self.temp_dir.name) / "scan_warning_state.json")
+        app.get_gdrive_dir = lambda _stream, _index: ""
+        self.module.GDRIVE_ROOT = ""
+
+        ffmpeg = Path(self.module.PROJ_DIR) / "sistema" / "go2rtc" / "ffmpeg.exe"
+        ffmpeg.parent.mkdir(parents=True, exist_ok=True)
+        ffmpeg.write_bytes(b"test")
+        source = (
+            Path(self.module.PROJ_DIR)
+            / "sistema"
+            / "backup_gravacoes"
+            / "cam"
+            / "2026-07-17"
+            / "warning.ts"
+        )
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"video")
+        old_time = time.time() - 600
+        os.utime(source, (old_time, old_time))
+
+        original_run = self.module.subprocess.run
+        self.module.subprocess.run = lambda *args, **kwargs: types.SimpleNamespace(
+            returncode=0,
+            stderr="non-fatal diagnostic",
+        )
+        try:
+            app.escanear_videos_corrompidos_thread(show_popup=False)
+            app.escanear_videos_corrompidos_thread(show_popup=False)
+        finally:
+            self.module.subprocess.run = original_run
+
+        self.assertTrue(source.exists())
+        state = app.load_integrity_scan_state()["files"]
+        self.assertEqual(next(iter(state.values()))["result"], "inconclusive")
 
     def test_health_snapshot_correlates_recording_and_hardware_state(self):
         app = self.new_app()
