@@ -23,6 +23,7 @@ from tkinter import ttk, messagebox
 import os
 import socket
 import urllib.request
+import urllib.parse
 import json
 import threading
 import queue
@@ -54,6 +55,13 @@ TRUSTED_BINARY_HASHES = {
     "go2rtc.exe": "923d57252e8139a69c52e4acc1e399a640244a8ef457fd9b7267a25847d68f8c",
     "ffmpeg.exe": "1326dde4c84ff1f96fe6b8916c5bed29e163e9b5dccf995f6f3db069d143ec5e",
 }
+TRUSTED_VIEWER_ASSET_HASHES = {
+    "video-rtc.js": "d48ce627baf7c341a92c0f5844a3c546431f9db873ff21489671aba2ecfe64fb",
+}
+MAX_GO2RTC_ARCHIVE_BYTES = 64 * 1024 * 1024
+MAX_GO2RTC_BINARY_BYTES = 64 * 1024 * 1024
+MAX_FFMPEG_ARCHIVE_BYTES = 512 * 1024 * 1024
+MAX_FFMPEG_BINARY_BYTES = 256 * 1024 * 1024
 
 
 def sha256_file(path):
@@ -62,6 +70,12 @@ def sha256_file(path):
         for chunk in iter(lambda: file_obj.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def sha256_text_file_normalized(path):
+    with open(path, "rb") as file_obj:
+        content = file_obj.read()
+    return hashlib.sha256(content.replace(b"\r\n", b"\n")).hexdigest()
 
 
 def binary_is_trusted(path, expected_hash):
@@ -156,6 +170,94 @@ def calculate_local_storage_reserve_bytes(total_bytes, configured_gb=None):
     return max(20 * gib, int(max(0, total_bytes) * 0.10))
 
 
+def download_url_to_file_bounded(
+    url,
+    destination,
+    max_bytes,
+    timeout,
+    progress_callback=None,
+):
+    parsed_url = urllib.parse.urlparse(url)
+    if parsed_url.scheme != "https" or not parsed_url.hostname:
+        raise ValueError("download permitido somente por HTTPS")
+    parent_dir = os.path.dirname(os.path.abspath(destination))
+    os.makedirs(parent_dir, exist_ok=True)
+    total_bytes, _, free_bytes = shutil.disk_usage(parent_dir)
+    reserve_bytes = calculate_local_storage_reserve_bytes(
+        total_bytes,
+        (globals().get("CONFIG") or {}).get("local_storage_reserve_gb"),
+    )
+    if free_bytes < reserve_bytes + max_bytes:
+        raise OSError("espaco local insuficiente para download seguro")
+
+    request = urllib.request.Request(url, headers={"User-Agent": "NVR-Camera-Farmacia"})
+    downloaded = 0
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            final_url = getattr(response, "geturl", lambda: url)()
+            if urllib.parse.urlparse(final_url).scheme != "https":
+                raise ValueError("redirecionamento de download fora de HTTPS")
+            content_length = response.info().get("Content-Length")
+            if content_length:
+                try:
+                    declared_size = int(content_length)
+                except (TypeError, ValueError):
+                    raise ValueError("Content-Length invalido")
+                if declared_size < 0 or declared_size > max_bytes:
+                    raise ValueError("download excede o limite de tamanho")
+
+            with open(destination, "wb") as file_obj:
+                while True:
+                    chunk = response.read(128 * 1024)
+                    if not chunk:
+                        break
+                    downloaded += len(chunk)
+                    if downloaded > max_bytes:
+                        raise ValueError("download excede o limite de tamanho")
+                    file_obj.write(chunk)
+                    if progress_callback:
+                        progress_callback(downloaded, int(content_length or 0))
+                file_obj.flush()
+                os.fsync(file_obj.fileno())
+        return downloaded
+    except Exception:
+        try:
+            if os.path.exists(destination):
+                os.remove(destination)
+        except Exception:
+            pass
+        raise
+
+
+def extract_zip_member_bounded(zip_path, member_name, destination, max_bytes):
+    temporary = destination + ".extracting"
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            member = archive.getinfo(member_name)
+            if member.is_dir() or member.file_size > max_bytes:
+                raise ValueError("arquivo extraido excede o limite de tamanho")
+            written = 0
+            with archive.open(member) as source_file, open(temporary, "wb") as dest_file:
+                while True:
+                    chunk = source_file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > max_bytes:
+                        raise ValueError("arquivo extraido excede o limite de tamanho")
+                    dest_file.write(chunk)
+                dest_file.flush()
+                os.fsync(dest_file.fileno())
+        os.replace(temporary, destination)
+        return written
+    finally:
+        try:
+            if os.path.exists(temporary):
+                os.remove(temporary)
+        except Exception:
+            pass
+
+
 def filter_kernel_144_dump_stamps(stamps, now_datetime, hours=24):
     cutoff = now_datetime - timedelta(hours=max(1, int(hours)))
     future_limit = now_datetime + timedelta(minutes=5)
@@ -175,16 +277,40 @@ def filter_kernel_144_dump_stamps(stamps, now_datetime, hours=24):
 
 
 def sync_public_viewer(proj_dir):
-    source = os.path.join(proj_dir, "sistema", "visualizador.html")
+    viewer_source = os.path.join(proj_dir, "sistema", "visualizador.html")
+    player_source = os.path.join(proj_dir, "sistema", "viewer_assets", "video-rtc.js")
     public_dir = os.path.join(proj_dir, "sistema", "web")
-    destination = os.path.join(public_dir, "visualizador.html")
-    if not os.path.exists(source):
+    if not os.path.isfile(viewer_source) or not os.path.isfile(player_source):
         return False
+    if (
+        sha256_text_file_normalized(player_source)
+        != TRUSTED_VIEWER_ASSET_HASHES["video-rtc.js"]
+    ):
+        return False
+
     os.makedirs(public_dir, exist_ok=True)
-    temporary = destination + ".tmp"
-    shutil.copy2(source, temporary)
-    os.replace(temporary, destination)
-    return True
+    publications = (
+        (player_source, os.path.join(public_dir, "video-rtc.js")),
+        (viewer_source, os.path.join(public_dir, "visualizador.html")),
+        (viewer_source, os.path.join(public_dir, "index.html")),
+    )
+    staged = []
+    try:
+        for source, destination in publications:
+            temporary = destination + ".tmp"
+            shutil.copy2(source, temporary)
+            staged.append((temporary, destination))
+        for temporary, destination in staged:
+            os.replace(temporary, destination)
+        return True
+    except Exception:
+        for temporary, _destination in staged:
+            try:
+                if os.path.exists(temporary):
+                    os.remove(temporary)
+            except Exception:
+                pass
+        return False
 
 
 def get_short_path(long_path):
@@ -222,12 +348,16 @@ def atualizar_go2rtc_yaml(proj_dir):
     live_block = "\n".join(live_lines)
     mjpeg_block = "\n".join(mjpeg_lines)
 
-    conteudo = f'''api:
+    conteudo = f'''app:
+  modules: [api, rtsp, webrtc, exec, ffmpeg, mjpeg, mpeg, mp4, hls, tuya]
+
+api:
   listen: ":1984"
   username: {json.dumps(web_auth["username"])}
   password: {json.dumps(web_auth["password"])}
   local_auth: false
   static_dir: "../web"
+  allow_paths: [/, /api/streams, /api/stream.ts, /api/stream.mjpeg, /api/ws, /api/webrtc, /hls/]
 
 exec:
   allow_paths: [{json.dumps(ffmpeg_path)}]
@@ -331,88 +461,79 @@ def verificar_e_baixar_dependencias(proj_dir, silent=False):
         
         def run_installer_thread():
             import zipfile
-            import io
             try:
                 # 1. Download go2rtc
                 if needs_go2rtc:
                     update_gui("Baixando Ponte RTSP (go2rtc.exe)...", 0)
-                    
-                    req = urllib.request.Request(go2rtc_url, headers={'User-Agent': 'Mozilla/5.0'})
-                    with urllib.request.urlopen(req, timeout=30) as conn:
-                        total_size = int(conn.info().get('Content-Length', 0))
-                        downloaded = 0
-                        chunk_size = 1024 * 64
-                        temp_zip = os.path.join(go2rtc_dir, "go2rtc.zip.tmp")
-                        
-                        with open(temp_zip, "wb") as f:
-                            while True:
-                                chunk = conn.read(chunk_size)
-                                if not chunk:
-                                    break
-                                f.write(chunk)
-                                downloaded += len(chunk)
-                                if total_size > 0:
-                                    pct = int(downloaded * 100 / total_size)
-                                    val_global = int(pct * 0.3)
-                                    update_gui(f"Baixando go2rtc.zip... {pct}% ({downloaded/(1024*1024):.1f}MB)", val_global)
-                                    
-                        update_gui("Extraindo go2rtc.exe...", 28)
-                        with zipfile.ZipFile(temp_zip) as z:
-                            if z.testzip() is not None:
-                                raise Exception("Arquivo go2rtc.zip corrompido ou incompleto.")
-                            z.extract("go2rtc.exe", go2rtc_dir)
-                        require_trusted_binary(go2rtc_exe, "go2rtc.exe")
-                            
-                        try:
-                            os.remove(temp_zip)
-                        except Exception:
-                            pass
+
+                    temp_zip = os.path.join(go2rtc_dir, "go2rtc.zip.tmp")
+
+                    def update_go2rtc_progress(downloaded, total_size):
+                        if total_size > 0:
+                            pct = int(downloaded * 100 / total_size)
+                            update_gui(
+                                f"Baixando go2rtc.zip... {pct}% ({downloaded/(1024*1024):.1f}MB)",
+                                int(pct * 0.3),
+                            )
+
+                    download_url_to_file_bounded(
+                        go2rtc_url,
+                        temp_zip,
+                        MAX_GO2RTC_ARCHIVE_BYTES,
+                        timeout=30,
+                        progress_callback=update_go2rtc_progress,
+                    )
+                    update_gui("Extraindo go2rtc.exe...", 28)
+                    extract_zip_member_bounded(
+                        temp_zip,
+                        "go2rtc.exe",
+                        go2rtc_exe,
+                        MAX_GO2RTC_BINARY_BYTES,
+                    )
+                    require_trusted_binary(go2rtc_exe, "go2rtc.exe")
+                    os.remove(temp_zip)
                 
                 # 2. Download ffmpeg
                 if needs_ffmpeg:
                     update_gui("Baixando Transcodificador (ffmpeg.exe - ZIP)...", 30)
-                    
-                    req = urllib.request.Request(ffmpeg_url, headers={'User-Agent': 'Mozilla/5.0'})
-                    with urllib.request.urlopen(req, timeout=45) as conn:
-                        total_size = int(conn.info().get('Content-Length', 0))
-                        downloaded = 0
-                        chunk_size = 1024 * 128
-                        temp_zip = os.path.join(go2rtc_dir, "ffmpeg.zip.tmp")
-                        
-                        with open(temp_zip, "wb") as f:
-                            while True:
-                                chunk = conn.read(chunk_size)
-                                if not chunk:
-                                    break
-                                f.write(chunk)
-                                downloaded += len(chunk)
-                                if total_size > 0:
-                                    pct = int(downloaded * 100 / total_size)
-                                    val_global = 30 + int(pct * 0.6)
-                                    update_gui(f"Baixando ffmpeg.zip... {pct}% ({downloaded/(1024*1024):.1f}MB)", val_global)
-                        
-                        update_gui("Extraindo ffmpeg.exe do arquivo ZIP...", 92)
-                        with zipfile.ZipFile(temp_zip) as z:
-                            if z.testzip() is not None:
-                                raise Exception("Arquivo ffmpeg.zip corrompido ou incompleto.")
-                            ffmpeg_path_in_zip = None
-                            for name in z.namelist():
-                                if name.endswith("ffmpeg.exe"):
-                                    ffmpeg_path_in_zip = name
-                                    break
-                            
-                            if not ffmpeg_path_in_zip:
-                                raise Exception("ffmpeg.exe não foi encontrado no arquivo ZIP.")
-                                
-                            with z.open(ffmpeg_path_in_zip) as source_file:
-                                with open(ffmpeg_exe, "wb") as dest_file:
-                                    dest_file.write(source_file.read())
-                        require_trusted_binary(ffmpeg_exe, "ffmpeg.exe")
-                                    
-                        try:
-                            os.remove(temp_zip)
-                        except Exception:
-                            pass
+
+                    temp_zip = os.path.join(go2rtc_dir, "ffmpeg.zip.tmp")
+
+                    def update_ffmpeg_progress(downloaded, total_size):
+                        if total_size > 0:
+                            pct = int(downloaded * 100 / total_size)
+                            update_gui(
+                                f"Baixando ffmpeg.zip... {pct}% ({downloaded/(1024*1024):.1f}MB)",
+                                30 + int(pct * 0.6),
+                            )
+
+                    download_url_to_file_bounded(
+                        ffmpeg_url,
+                        temp_zip,
+                        MAX_FFMPEG_ARCHIVE_BYTES,
+                        timeout=45,
+                        progress_callback=update_ffmpeg_progress,
+                    )
+                    update_gui("Extraindo ffmpeg.exe do arquivo ZIP...", 92)
+                    with zipfile.ZipFile(temp_zip) as archive:
+                        ffmpeg_path_in_zip = next(
+                            (
+                                name for name in archive.namelist()
+                                if name.replace("\\", "/").endswith("/ffmpeg.exe")
+                                or name == "ffmpeg.exe"
+                            ),
+                            None,
+                        )
+                    if not ffmpeg_path_in_zip:
+                        raise Exception("ffmpeg.exe não foi encontrado no arquivo ZIP.")
+                    extract_zip_member_bounded(
+                        temp_zip,
+                        ffmpeg_path_in_zip,
+                        ffmpeg_exe,
+                        MAX_FFMPEG_BINARY_BYTES,
+                    )
+                    require_trusted_binary(ffmpeg_exe, "ffmpeg.exe")
+                    os.remove(temp_zip)
                                     
                 update_gui("Configurando rotas de vídeo e caminhos...", 98)
                 if not atualizar_go2rtc_yaml(proj_dir):
@@ -424,7 +545,15 @@ def verificar_e_baixar_dependencias(proj_dir, silent=False):
                 
             except Exception as e:
                 error_msg[0] = str(e)
-                for f in [go2rtc_exe, ffmpeg_exe, os.path.join(go2rtc_dir, "go2rtc.zip.tmp"), os.path.join(go2rtc_dir, "ffmpeg.zip.tmp")]:
+                cleanup_files = [
+                    os.path.join(go2rtc_dir, "go2rtc.zip.tmp"),
+                    os.path.join(go2rtc_dir, "ffmpeg.zip.tmp"),
+                ]
+                if needs_go2rtc:
+                    cleanup_files.append(go2rtc_exe)
+                if needs_ffmpeg:
+                    cleanup_files.append(ffmpeg_exe)
+                for f in cleanup_files:
                     if os.path.exists(f):
                         try:
                             os.remove(f)
@@ -454,50 +583,49 @@ def verificar_e_baixar_dependencias(proj_dir, silent=False):
         return True
 
 def download_and_extract_go2rtc_silencioso(url, dest_path, go2rtc_dir):
-    import zipfile
     temp_zip = os.path.join(go2rtc_dir, "go2rtc.zip.tmp")
-    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-    with urllib.request.urlopen(req, timeout=30) as conn:
-        with open(temp_zip, "wb") as f:
-            f.write(conn.read())
-    with zipfile.ZipFile(temp_zip) as z:
-        if z.testzip() is not None:
-            raise Exception("Arquivo go2rtc.zip corrompido.")
-        z.extract("go2rtc.exe", go2rtc_dir)
+    download_url_to_file_bounded(
+        url,
+        temp_zip,
+        MAX_GO2RTC_ARCHIVE_BYTES,
+        timeout=30,
+    )
+    extract_zip_member_bounded(
+        temp_zip,
+        "go2rtc.exe",
+        dest_path,
+        MAX_GO2RTC_BINARY_BYTES,
+    )
     require_trusted_binary(dest_path, "go2rtc.exe")
-    try:
-        os.remove(temp_zip)
-    except Exception:
-        pass
+    os.remove(temp_zip)
 
 def download_and_extract_ffmpeg_silencioso(url, dest_path, go2rtc_dir):
-    import zipfile
     temp_zip = os.path.join(go2rtc_dir, "ffmpeg.zip.tmp")
-    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-    with urllib.request.urlopen(req, timeout=45) as conn:
-        with open(temp_zip, "wb") as f:
-            f.write(conn.read())
-            
-    with zipfile.ZipFile(temp_zip) as z:
-        if z.testzip() is not None:
-            raise Exception("Arquivo ffmpeg.zip corrompido.")
-        ffmpeg_path_in_zip = None
-        for name in z.namelist():
-            if name.endswith("ffmpeg.exe"):
-                ffmpeg_path_in_zip = name
-                break
-        if ffmpeg_path_in_zip:
-            with z.open(ffmpeg_path_in_zip) as source_file:
-                with open(dest_path, "wb") as dest_file:
-                    dest_file.write(source_file.read())
-        else:
-            raise Exception("ffmpeg.exe não foi encontrado no arquivo ZIP.")
+    download_url_to_file_bounded(
+        url,
+        temp_zip,
+        MAX_FFMPEG_ARCHIVE_BYTES,
+        timeout=45,
+    )
+    with zipfile.ZipFile(temp_zip) as archive:
+        ffmpeg_path_in_zip = next(
+            (
+                name for name in archive.namelist()
+                if name.replace("\\", "/").endswith("/ffmpeg.exe")
+                or name == "ffmpeg.exe"
+            ),
+            None,
+        )
+    if not ffmpeg_path_in_zip:
+        raise Exception("ffmpeg.exe não foi encontrado no arquivo ZIP.")
+    extract_zip_member_bounded(
+        temp_zip,
+        ffmpeg_path_in_zip,
+        dest_path,
+        MAX_FFMPEG_BINARY_BYTES,
+    )
     require_trusted_binary(dest_path, "ffmpeg.exe")
-                    
-    try:
-        os.remove(temp_zip)
-    except Exception:
-        pass
+    os.remove(temp_zip)
 
 # Estrutura para obter status de energia e bateria do Windows (queda de energia)
 class SYSTEM_POWER_STATUS(ctypes.Structure):
@@ -1029,7 +1157,7 @@ def build_operational_intelligence(snapshot):
         ]
         correlations = ["SMART_DEGRADED"]
         heavy_maintenance_allowed = False
-        protection_reason = "SMART reportou degradacao."
+        protection_reason = "Status basico do Windows nao retornou OK para o disco."
         recording_recommendation = "safe_stop"
     elif "KERNEL_144_NEW_SESSION" in codes and "HD_UNAVAILABLE" in codes:
         status = "critical"
@@ -1192,7 +1320,7 @@ def build_operational_intelligence(snapshot):
     )
     if "SMART_DEGRADED" in codes:
         heavy_maintenance_allowed = False
-        protection_reason = "SMART reportou degradacao."
+        protection_reason = "Status basico do Windows nao retornou OK para o disco."
         recording_recommendation = "safe_stop"
     elif "KERNEL_144_NEW_SESSION" in codes:
         heavy_maintenance_allowed = False
@@ -2016,7 +2144,7 @@ class CameraManagerApp:
                 for drive in self._smart_snapshot["drives"]:
                     if str(drive["status"]).upper() != "OK":
                         self.add_log(
-                            f"[HEALTH][CRITICAL][SMART_DEGRADED] Disco '{drive['model']}' reportou status '{drive['status']}'.",
+                            f"[HEALTH][CRITICAL][SMART_DEGRADED] Status basico do Windows para '{drive['model']}': '{drive['status']}'.",
                             "tag_erro",
                         )
         threading.Thread(target=check, daemon=True).start()
@@ -2048,6 +2176,8 @@ class CameraManagerApp:
                 "status": "degraded" if unhealthy else "ok",
                 "drives": normalized_drives,
                 "error": None,
+                "telemetry_level": "basic_windows_status",
+                "source": "Win32_DiskDrive.Status",
                 "checked_at": datetime.now().isoformat(timespec="seconds"),
             }
         except Exception as error:
@@ -2055,6 +2185,8 @@ class CameraManagerApp:
                 "status": "unknown",
                 "drives": [],
                 "error": str(error),
+                "telemetry_level": "basic_windows_status",
+                "source": "Win32_DiskDrive.Status",
                 "checked_at": datetime.now().isoformat(timespec="seconds"),
             }
 
@@ -2928,10 +3060,11 @@ class CameraManagerApp:
                 pass
 
     def copy_link_to_clipboard(self):
+        viewer_url = f"http://{self.local_ip}:1984/visualizador.html"
         self.root.clipboard_clear()
-        self.root.clipboard_append(f"http://{self.local_ip}:1984")
+        self.root.clipboard_append(viewer_url)
         self.add_log("Link Web copiado para a área de transferência!")
-        messagebox.showinfo("Copiado", f"O link http://{self.local_ip}:1984 foi copiado com sucesso!")
+        messagebox.showinfo("Copiado", f"O link {viewer_url} foi copiado com sucesso!")
 
     # ================= MONITOR LOOP (THREAD SEPARADA) =================
     def get_cached_streams_data(self):
@@ -3615,15 +3748,15 @@ class CameraManagerApp:
             issues.append(self.make_health_issue(
                 "SMART_DEGRADED",
                 "critical",
-                "O Windows reportou degradacao em pelo menos um disco.",
+                "O status basico do Windows nao retornou OK para pelo menos um disco.",
                 json.dumps(smart_snapshot.get("drives", []), ensure_ascii=True),
-                "Interromper manutencoes pesadas e preparar copia dos dados importantes.",
+                "Interromper manutencoes pesadas e confirmar com diagnostico SMART do fabricante.",
             ))
         elif smart_snapshot.get("status") == "unknown":
             issues.append(self.make_health_issue(
                 "SMART_UNKNOWN",
                 "warning",
-                "A consulta de saude dos discos nao foi conclusiva.",
+                "A consulta basica de status dos discos nao foi conclusiva.",
                 smart_snapshot.get("error") or "status desconhecido",
                 "Executar diagnostico do fabricante ou consulta administrativa separada.",
             ))

@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-zrJxxCw5fWIRk3AO/vttj5fbeaPbMiAVSWzV9yYaB20='; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src http: ws:; frame-src 'none'; media-src 'self' blob: data:; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
     <title>Central de Monitoramento Profissional - Farmácia</title>
     <style>
         /* Design Premium Glassmorphism e Tema Escuro Futurista */
@@ -177,6 +178,9 @@
         }
 
         .close-btn {
+            background: none;
+            border: none;
+            padding: 4px;
             font-size: 1.2rem;
             cursor: pointer;
             color: #9CA3AF;
@@ -330,13 +334,12 @@
             flex-grow: 1;
         }
 
-        .camera-video-wrapper iframe {
+        .camera-video-wrapper video-rtc {
             position: absolute;
             top: 0;
             left: 0;
             width: 100%;
             height: 100%;
-            border: none;
             background-color: #000;
         }
 
@@ -405,8 +408,8 @@
             <div class="live-clock" id="live-clock">00:00:00</div>
         </div>
         <div class="header-right">
-            <button onclick="toggleSettings()"><span style="font-size:1.1rem">⚙️</span> Configurações</button>
-            <button class="primary" onclick="loadActiveStreams()"><span style="font-size:1.1rem">🔄</span> Recarregar Painel</button>
+            <button id="settings-button" type="button"><span style="font-size:1.1rem">⚙️</span> Configurações</button>
+            <button id="reload-button" class="primary" type="button"><span style="font-size:1.1rem">🔄</span> Recarregar Painel</button>
         </div>
     </header>
 
@@ -414,7 +417,7 @@
     <div class="sidebar" id="sidebar">
         <div class="sidebar-header">
             <h2>Configurações</h2>
-            <span class="close-btn" onclick="toggleSettings()">✖</span>
+            <button id="close-settings-button" class="close-btn" type="button" title="Fechar configurações">✖</button>
         </div>
         
         <div class="input-group">
@@ -424,7 +427,7 @@
 
         <div class="input-group">
             <label for="layout-select">Layout do Grid</label>
-            <select id="layout-select" onchange="changeLayout()">
+            <select id="layout-select">
                 <option value="auto">Automático (Responsivo)</option>
                 <option value="1">1 Coluna (Lista)</option>
                 <option value="2">2 Colunas (Lado a Lado)</option>
@@ -434,7 +437,7 @@
 
         <div class="input-group">
             <label for="mode-select">Modo de Transmissão (Player)</label>
-            <select id="mode-select" onchange="changeMode()">
+            <select id="mode-select">
                 <option value="auto">Automático (Padrão)</option>
                 <option value="mse">MSE (H.265 / Melhor Sincronia)</option>
                 <option value="webrtc">WebRTC (Ultra Baixa Latência)</option>
@@ -443,8 +446,8 @@
             </select>
         </div>
 
-        <button class="primary" style="margin-top: 15px; width: 100%; justify-content: center;" onclick="saveIP()">Salvar e Aplicar</button>
-        <button style="width: 100%; justify-content: center;" onclick="resetIP()">Usar IP Local (127.0.0.1)</button>
+        <button id="save-ip-button" class="primary" type="button" style="margin-top: 15px; width: 100%; justify-content: center;">Salvar e Aplicar</button>
+        <button id="reset-ip-button" type="button" style="width: 100%; justify-content: center;">Usar IP Local (127.0.0.1)</button>
     </div>
 
     <!-- Container Principal das Câmeras -->
@@ -469,202 +472,258 @@
         <div>v3.9 Dashboard de Segurança Profissional</div>
     </footer>
 
-    <script>
-        // Carrega IP do servidor do localStorage ou assume o host atual
-        let currentIP = localStorage.getItem("camera_server_ip") || window.location.hostname || "127.0.0.1";
-        let currentLayout = localStorage.getItem("camera_layout_mode") || "auto";
-        let currentMode = localStorage.getItem("camera_player_mode") || "auto";
+    <script type="module">
+        import { VideoRTC } from "./video-rtc.js";
+
+        if (!customElements.get("video-rtc")) {
+            customElements.define("video-rtc", VideoRTC);
+        }
+
+        const STREAM_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+        const VALID_LAYOUTS = new Set(["auto", "1", "2", "3"]);
+        const VALID_PLAYER_MODES = new Set(["auto", "mse", "webrtc", "hls", "mjpeg"]);
+
+        function normalizeServerHost(rawValue) {
+            let value = String(rawValue || "").trim();
+            if (!value) return "127.0.0.1";
+            if (/^https?:\/\//i.test(value)) {
+                const parsed = new URL(value);
+                if (parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash) {
+                    throw new Error("Informe somente o IP ou nome do servidor.");
+                }
+                value = parsed.hostname;
+            }
+            if (value.toLowerCase() === "localhost") return "127.0.0.1";
+            if (value.length > 253 || /[\s/@\\?#:[\]]/.test(value)) {
+                throw new Error("IP ou nome de servidor inválido.");
+            }
+            if (/^\d+\.\d+\.\d+\.\d+$/.test(value)) {
+                const octets = value.split(".").map(Number);
+                if (octets.some(octet => !Number.isInteger(octet) || octet < 0 || octet > 255)) {
+                    throw new Error("Endereço IPv4 inválido.");
+                }
+                return octets.join(".");
+            }
+            const labels = value.toLowerCase().split(".");
+            if (labels.some(label => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) {
+                throw new Error("Nome de servidor inválido.");
+            }
+            return labels.join(".");
+        }
+
+        function readStoredChoice(key, allowed, fallback) {
+            const value = localStorage.getItem(key);
+            return allowed.has(value) ? value : fallback;
+        }
+
+        let currentIP;
+        try {
+            currentIP = normalizeServerHost(
+                localStorage.getItem("camera_server_ip") || window.location.hostname
+            );
+        } catch (_error) {
+            currentIP = "127.0.0.1";
+            localStorage.removeItem("camera_server_ip");
+        }
+        let currentLayout = readStoredChoice("camera_layout_mode", VALID_LAYOUTS, "auto");
+        let currentMode = readStoredChoice("camera_player_mode", VALID_PLAYER_MODES, "auto");
+        let activeRequest = null;
 
         const cameraGrid = document.getElementById("camera-grid");
         const emptyState = document.getElementById("empty-state");
         const emptyMessage = document.getElementById("empty-message");
         const ipInput = document.getElementById("ip-input");
         const layoutSelect = document.getElementById("layout-select");
+        const modeSelect = document.getElementById("mode-select");
         const serverBadge = document.getElementById("server-badge");
         const ipDisplay = document.getElementById("ip-display");
         const sidebar = document.getElementById("sidebar");
         const liveClock = document.getElementById("live-clock");
 
-        // Atualiza o relógio dinâmico a cada segundo
+        function serverURL(pathname) {
+            return new URL(pathname, `http://${currentIP}:1984`);
+        }
+
         function updateClock() {
-            const now = new Date();
-            const timeString = now.toLocaleTimeString('pt-BR');
-            liveClock.textContent = timeString;
-        }
-        setInterval(updateClock, 1000);
-        updateClock();
-
-        // Inicializa a interface
-        function init() {
-            if (currentIP === "localhost") {
-                currentIP = "127.0.0.1";
-                localStorage.setItem("camera_server_ip", "127.0.0.1");
-            }
-            ipInput.value = currentIP;
-            ipDisplay.textContent = currentIP;
-            layoutSelect.value = currentLayout;
-            document.getElementById("mode-select").value = currentMode;
-            applyLayoutClass(currentLayout);
-            loadActiveStreams();
+            liveClock.textContent = new Date().toLocaleTimeString("pt-BR");
         }
 
-        // Abre/Fecha a barra de configurações lateral
         function toggleSettings() {
             sidebar.classList.toggle("active");
         }
 
-        // Altera o layout do grid manualmente
-        function changeLayout() {
-            const mode = layoutSelect.value;
-            localStorage.setItem("camera_layout_mode", mode);
-            currentLayout = mode;
-            applyLayoutClass(mode);
-        }
-
-        // Altera o modo do player de vídeo manualmente
-        function changeMode() {
-            const mode = document.getElementById("mode-select").value;
-            localStorage.setItem("camera_player_mode", mode);
-            currentMode = mode;
-            loadActiveStreams();
-        }
-
         function applyLayoutClass(mode) {
-            cameraGrid.className = "camera-grid"; // limpa classes
+            cameraGrid.className = "camera-grid";
             if (mode === "1") cameraGrid.classList.add("grid-1-col");
             else if (mode === "2") cameraGrid.classList.add("grid-2-col");
             else if (mode === "3") cameraGrid.classList.add("grid-3-col");
         }
 
-        // Salva as configurações de IP
-        function saveIP() {
-            let ipValue = ipInput.value.trim();
-            if (ipValue === "") ipValue = "127.0.0.1";
-            
-            // Remove protocolos desnecessários se colados pelo usuário
-            ipValue = ipValue.replace(/^(http:\/\/|https:\/\/)/, "").split(":")[0];
-            
-            localStorage.setItem("camera_server_ip", ipValue);
-            currentIP = ipValue;
-            ipDisplay.textContent = ipValue;
-            
-            sidebar.classList.remove("active");
+        function changeLayout() {
+            const mode = VALID_LAYOUTS.has(layoutSelect.value) ? layoutSelect.value : "auto";
+            localStorage.setItem("camera_layout_mode", mode);
+            currentLayout = mode;
+            applyLayoutClass(mode);
+        }
+
+        function changeMode() {
+            const mode = VALID_PLAYER_MODES.has(modeSelect.value) ? modeSelect.value : "auto";
+            localStorage.setItem("camera_player_mode", mode);
+            currentMode = mode;
             loadActiveStreams();
         }
 
-        // Reseta o IP para 127.0.0.1
+        function saveIP() {
+            try {
+                const normalized = normalizeServerHost(ipInput.value);
+                ipInput.setCustomValidity("");
+                localStorage.setItem("camera_server_ip", normalized);
+                currentIP = normalized;
+                ipInput.value = normalized;
+                ipDisplay.textContent = normalized;
+                sidebar.classList.remove("active");
+                loadActiveStreams();
+            } catch (error) {
+                ipInput.setCustomValidity(error.message);
+                ipInput.reportValidity();
+            }
+        }
+
         function resetIP() {
             ipInput.value = "127.0.0.1";
             saveIP();
         }
 
-        // Consulta a API do go2rtc e monta o painel de câmeras dinamicamente
-        function loadActiveStreams() {
-            cameraGrid.innerHTML = "";
+        function createIconButton(title, text, callback) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "card-icon-btn";
+            button.title = title;
+            button.textContent = text;
+            button.addEventListener("click", callback);
+            return button;
+        }
+
+        function reloadCamera(player) {
+            player.ondisconnect();
+            player.onconnect();
+        }
+
+        function toggleCardFullscreen(card) {
+            if (!document.fullscreenElement) {
+                card.requestFullscreen().catch(() => {
+                    emptyMessage.textContent = "Não foi possível ativar a tela cheia.";
+                });
+            } else {
+                document.exitFullscreen();
+            }
+        }
+
+        function createCameraCard(streamName) {
+            if (!STREAM_NAME_PATTERN.test(streamName)) return;
+
+            const card = document.createElement("div");
+            card.className = "camera-card";
+
+            const titlebar = document.createElement("div");
+            titlebar.className = "camera-titlebar";
+            const cameraName = document.createElement("div");
+            cameraName.className = "camera-name";
+            const pulse = document.createElement("span");
+            pulse.className = "pulse-dot";
+            const label = document.createElement("span");
+            label.textContent = `CÂMERA: ${streamName.replace(/_live$/, "").toUpperCase()}`;
+            cameraName.append(pulse, label);
+
+            const actions = document.createElement("div");
+            actions.className = "camera-actions";
+            const videoWrapper = document.createElement("div");
+            videoWrapper.className = "camera-video-wrapper";
+            const player = document.createElement("video-rtc");
+            const playerURL = serverURL("/api/ws");
+            playerURL.searchParams.set("src", streamName);
+            player.media = "video";
+            player.mode = currentMode === "auto" ? "webrtc,mse,hls,mjpeg" : currentMode;
+            player.visibilityThreshold = 0.01;
+            player.pcConfig = {
+                bundlePolicy: "max-bundle",
+                iceServers: [],
+                sdpSemantics: "unified-plan",
+            };
+            player.src = playerURL.href;
+            player.title = `Câmera ${streamName}`;
+
+            actions.append(
+                createIconButton("Recarregar esta câmera", "🔄", () => reloadCamera(player)),
+                createIconButton("Tela cheia", "📺", () => toggleCardFullscreen(card))
+            );
+            titlebar.append(cameraName, actions);
+            videoWrapper.appendChild(player);
+            card.append(titlebar, videoWrapper);
+            cameraGrid.appendChild(card);
+        }
+
+        async function loadActiveStreams() {
+            if (activeRequest) activeRequest.abort();
+            activeRequest = new AbortController();
+            const timeout = setTimeout(() => activeRequest.abort(), 8000);
+            cameraGrid.replaceChildren();
             emptyState.style.display = "flex";
             emptyMessage.textContent = "Procurando conexões ativas com o servidor...";
             serverBadge.textContent = "Servidor Offline";
             serverBadge.className = "server-badge";
-            
-            // Requisição API
-            fetch(`http://${currentIP}:1984/api/streams`)
-                .then(response => {
-                    if (!response.ok) throw new Error("Falha ao comunicar com a API");
-                    return response.json();
-                })
-                .then(data => {
-                    const streams = Object.keys(data);
-                    
-                    if (streams.length === 0) {
-                        emptyMessage.textContent = "Nenhuma câmera ativa encontrada no servidor go2rtc.";
-                        serverBadge.textContent = "Sem Câmeras";
-                        serverBadge.classList.add("server-connected");
-                        return;
-                    }
-                    
-                    // Filtra as streams para exibir apenas as versões _live se existirem
-                    let streamsToShow = streams;
-                    const liveStreams = streams.filter(s => s.endsWith("_live"));
-                    if (liveStreams.length > 0) {
-                        streamsToShow = liveStreams;
-                    }
-                    
-                    // Sucesso! Esconde tela de vazio e atualiza badge
-                    emptyState.style.display = "none";
-                    serverBadge.textContent = `ONLINE | ${streamsToShow.length} CAM`;
-                    serverBadge.classList.add("server-connected");
-                    
-                    // Renderiza cada câmera
-                    streamsToShow.forEach(stream => {
-                        createCameraCard(stream);
-                    });
-                })
-                .catch(error => {
-                    console.error(error);
-                    emptyMessage.textContent = `Não foi possível conectar ao servidor go2rtc no IP: ${currentIP}. Verifique se a Ponte RTSP está iniciada no computador.`;
+
+            try {
+                const response = await fetch(serverURL("/api/streams"), {
+                    cache: "no-store",
+                    signal: activeRequest.signal,
                 });
-        }
-
-        // Cria o elemento HTML de cada câmera dinamicamente
-        function createCameraCard(streamName) {
-            const card = document.createElement("div");
-            card.className = "camera-card";
-            card.id = `card-${streamName}`;
-            
-            let webrtcUrl = `http://${currentIP}:1984/video.html?src=${streamName}&media=video`;
-            if (currentMode === "auto") {
-                webrtcUrl += `&mode=webrtc,mse`;
-            } else {
-                webrtcUrl += `&mode=${currentMode}`;
-            }
-            
-            card.innerHTML = `
-                <div class="camera-titlebar">
-                    <div class="camera-name">
-                        <span class="pulse-dot"></span>
-                        <span>CÂMERA: ${streamName.replace("_live", "").toUpperCase()}</span>
-                    </div>
-                    <div class="camera-actions">
-                        <button class="card-icon-btn" title="Recarregar esta câmera" onclick="reloadCamera('${streamName}')">🔄</button>
-                        <button class="card-icon-btn" title="Tela Cheia" onclick="toggleCardFullscreen('${streamName}')">📺</button>
-                    </div>
-                </div>
-                <div class="camera-video-wrapper">
-                    <iframe id="iframe-${streamName}" src="${webrtcUrl}" allowfullscreen allow="autoplay"></iframe>
-                </div>
-            `;
-            
-            cameraGrid.appendChild(card);
-        }
-
-        // Recarrega apenas uma câmera específica
-        function reloadCamera(streamName) {
-            const iframe = document.getElementById(`iframe-${streamName}`);
-            if (iframe) {
-                const src = iframe.src;
-                iframe.src = "about:blank";
-                setTimeout(() => {
-                    iframe.src = src;
-                }, 100);
-            }
-        }
-
-        // Ativa tela cheia (Fullscreen) para a câmera selecionada
-        function toggleCardFullscreen(streamName) {
-            const card = document.getElementById(`card-${streamName}`);
-            if (card) {
-                if (!document.fullscreenElement) {
-                    card.requestFullscreen()
-                        .catch(err => {
-                            alert(`Erro ao tentar ativar tela cheia: ${err.message}`);
-                        });
-                } else {
-                    document.exitFullscreen();
+                if (!response.ok) throw new Error("Falha ao comunicar com a API");
+                const data = await response.json();
+                if (!data || typeof data !== "object" || Array.isArray(data)) {
+                    throw new Error("Resposta inválida da API");
                 }
+                const streams = Object.keys(data).filter(stream => STREAM_NAME_PATTERN.test(stream));
+                const liveStreams = streams.filter(stream => stream.endsWith("_live"));
+                const streamsToShow = liveStreams.length ? liveStreams : streams;
+
+                if (!streamsToShow.length) {
+                    emptyMessage.textContent = "Nenhuma câmera ativa encontrada no servidor go2rtc.";
+                    serverBadge.textContent = "Sem Câmeras";
+                    serverBadge.classList.add("server-connected");
+                    return;
+                }
+
+                emptyState.style.display = "none";
+                serverBadge.textContent = `ONLINE | ${streamsToShow.length} CAM`;
+                serverBadge.classList.add("server-connected");
+                streamsToShow.forEach(createCameraCard);
+            } catch (error) {
+                if (error.name !== "AbortError") console.error("Falha ao carregar streams.");
+                emptyMessage.textContent = `Não foi possível conectar ao servidor go2rtc em ${currentIP}.`;
+            } finally {
+                clearTimeout(timeout);
             }
         }
 
-        // Inicializa ao carregar a página
+        function init() {
+            ipInput.value = currentIP;
+            ipDisplay.textContent = currentIP;
+            layoutSelect.value = currentLayout;
+            modeSelect.value = currentMode;
+            applyLayoutClass(currentLayout);
+            loadActiveStreams();
+        }
+
+        document.getElementById("settings-button").addEventListener("click", toggleSettings);
+        document.getElementById("reload-button").addEventListener("click", loadActiveStreams);
+        document.getElementById("close-settings-button").addEventListener("click", toggleSettings);
+        document.getElementById("save-ip-button").addEventListener("click", saveIP);
+        document.getElementById("reset-ip-button").addEventListener("click", resetIP);
+        layoutSelect.addEventListener("change", changeLayout);
+        modeSelect.addEventListener("change", changeMode);
+        setInterval(updateClock, 1000);
+        updateClock();
         init();
     </script>
 </body>

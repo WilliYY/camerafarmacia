@@ -1,6 +1,7 @@
 import importlib.machinery
 import importlib.util
 import ast
+import base64
 import contextlib
 from datetime import datetime
 import hashlib
@@ -9,6 +10,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 import tempfile
@@ -23,6 +25,10 @@ def load_manager_copy():
     source = Path(__file__).resolve().parents[1] / "gerenciador.pyw"
     copied_source = Path(temp_dir.name) / "gerenciador.pyw"
     shutil.copy2(source, copied_source)
+    source_player = source.parent / "sistema" / "viewer_assets" / "video-rtc.js"
+    copied_player = Path(temp_dir.name) / "sistema" / "viewer_assets" / "video-rtc.js"
+    copied_player.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_player, copied_player)
 
     pil_module = types.ModuleType("PIL")
     pil_module.Image = types.ModuleType("PIL.Image")
@@ -447,15 +453,132 @@ class StorageSafetyTests(unittest.TestCase):
 
         yaml_path = Path(self.module.PROJ_DIR) / "sistema" / "go2rtc" / "go2rtc.yaml"
         public_viewer = Path(self.module.PROJ_DIR) / "sistema" / "web" / "visualizador.html"
+        public_index = Path(self.module.PROJ_DIR) / "sistema" / "web" / "index.html"
+        public_player = Path(self.module.PROJ_DIR) / "sistema" / "web" / "video-rtc.js"
         yaml_text = yaml_path.read_text(encoding="utf-8")
         self.assertIn('static_dir: "../web"', yaml_text)
         self.assertIn('username: "viewer"', yaml_text)
         self.assertIn('password: "senha-segura-123456"', yaml_text)
         self.assertIn('ffmpeg:farmacia#video=mjpeg', yaml_text)
         self.assertNotIn('ffmpeg:farmacia#video=mjpeg#hardware', yaml_text)
+        self.assertIn('modules: [api, rtsp, webrtc, exec, ffmpeg, mjpeg, mpeg, mp4, hls, tuya]', yaml_text)
+        self.assertIn('/api/stream.ts', yaml_text)
+        self.assertIn('/api/stream.mjpeg', yaml_text)
+        self.assertIn('/api/ws', yaml_text)
+        self.assertIn('allow_paths: [/, /api/streams', yaml_text)
+        self.assertNotIn('/video.html', yaml_text)
+        self.assertNotIn('allow_paths: [/api,', yaml_text)
         self.assertIn('allow_paths: ["', yaml_text)
         self.assertNotIn('allow_paths: [ffmpeg]', yaml_text)
         self.assertEqual(public_viewer.read_text(encoding="utf-8"), "<html>viewer</html>")
+        self.assertEqual(public_index.read_text(encoding="utf-8"), "<html>viewer</html>")
+        self.assertEqual(
+            public_player.read_bytes(),
+            (Path(self.module.PROJ_DIR) / "sistema" / "viewer_assets" / "video-rtc.js").read_bytes(),
+        )
+
+    def test_dependency_download_rejects_declared_and_streamed_oversize(self):
+        destination = Path(self.temp_dir.name) / "dependency.zip.tmp"
+
+        class FakeResponse:
+            def __init__(self, chunks, content_length=None):
+                self.chunks = list(chunks)
+                self.content_length = content_length
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def info(self):
+                if self.content_length is None:
+                    return {}
+                return {"Content-Length": str(self.content_length)}
+
+            def read(self, _size=-1):
+                return self.chunks.pop(0) if self.chunks else b""
+
+        original_urlopen = self.module.urllib.request.urlopen
+        original_disk_usage = self.module.shutil.disk_usage
+        self.module.shutil.disk_usage = lambda _path: (
+            100 * 1024 ** 3,
+            10 * 1024 ** 3,
+            90 * 1024 ** 3,
+        )
+        try:
+            self.module.urllib.request.urlopen = lambda *_args, **_kwargs: FakeResponse(
+                [],
+                content_length=5,
+            )
+            with self.assertRaises(ValueError):
+                self.module.download_url_to_file_bounded(
+                    "https://example.invalid/dependency.zip",
+                    str(destination),
+                    max_bytes=4,
+                    timeout=1,
+                )
+
+            self.module.urllib.request.urlopen = lambda *_args, **_kwargs: FakeResponse(
+                [b"abc", b"def"],
+            )
+            with self.assertRaises(ValueError):
+                self.module.download_url_to_file_bounded(
+                    "https://example.invalid/dependency.zip",
+                    str(destination),
+                    max_bytes=4,
+                    timeout=1,
+                )
+        finally:
+            self.module.urllib.request.urlopen = original_urlopen
+            self.module.shutil.disk_usage = original_disk_usage
+
+        self.assertFalse(destination.exists())
+
+    def test_windows_disk_status_identifies_basic_telemetry_source(self):
+        app = self.new_app()
+        original_check_output = self.module.subprocess.check_output
+        self.module.subprocess.check_output = lambda *_args, **_kwargs: (
+            '{"Model":"Disk","Status":"OK"}'
+        )
+        try:
+            result = app.query_smart_status()
+        finally:
+            self.module.subprocess.check_output = original_check_output
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["telemetry_level"], "basic_windows_status")
+        self.assertEqual(result["source"], "Win32_DiskDrive.Status")
+
+    def test_viewer_uses_safe_dom_and_validates_server_host(self):
+        viewer_path = Path(__file__).resolve().parents[1] / "sistema" / "visualizador.html"
+        viewer = viewer_path.read_text(encoding="utf-8")
+
+        self.assertNotIn("innerHTML", viewer)
+        self.assertNotIn("onclick=", viewer)
+        self.assertNotIn("onchange=", viewer)
+        self.assertIn("normalizeServerHost", viewer)
+        self.assertIn("replaceChildren", viewer)
+        self.assertIn('type="module"', viewer)
+        self.assertIn('from "./video-rtc.js"', viewer)
+        self.assertIn('document.createElement("video-rtc")', viewer)
+        self.assertNotIn("/video.html", viewer)
+        self.assertNotIn("<iframe", viewer)
+        self.assertIn("Content-Security-Policy", viewer)
+        self.assertIn("script-src 'self' 'sha256-", viewer)
+        self.assertNotIn("script-src 'self' 'unsafe-inline'", viewer)
+        script = re.search(r'<script type="module">(.*?)</script>', viewer, re.DOTALL)
+        declared_hash = re.search(r"script-src 'self' 'sha256-([^']+)'", viewer)
+        self.assertIsNotNone(script)
+        self.assertIsNotNone(declared_hash)
+        actual_hash = base64.b64encode(
+            hashlib.sha256(script.group(1).encode("utf-8")).digest()
+        ).decode("ascii")
+        self.assertEqual(declared_hash.group(1), actual_hash)
+
+    def test_copied_web_link_targets_the_allowed_viewer_route(self):
+        source = inspect.getsource(self.module.CameraManagerApp.copy_link_to_clipboard)
+        self.assertIn("/visualizador.html", source)
 
     def test_stream_parser_uses_validated_config_without_yaml_quotes(self):
         app = self.new_app()
@@ -993,6 +1116,18 @@ class StorageSafetyTests(unittest.TestCase):
             "status": "ok",
             "count_24h": 0,
             "latest": None,
+        }
+        original_local_status = self.module.garantir_limite_backup_local
+        self.addCleanup(
+            setattr,
+            self.module,
+            "garantir_limite_backup_local",
+            original_local_status,
+        )
+        self.module.garantir_limite_backup_local = lambda _path: {
+            "ok": True,
+            "free_bytes": 50 * 1024 ** 3,
+            "reserve_bytes": 20 * 1024 ** 3,
         }
 
         healthy = app.collect_health_snapshot()
