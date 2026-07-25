@@ -1,6 +1,53 @@
 # Auditoria Tecnica do NVR - 2026-07-24
 
-## Resumo executivo
+## Atualizacao de remediacao - 2026-07-25
+
+Os achados de software de prioridade alta e media desta auditoria foram
+tratados incrementalmente nos commits:
+
+- `f85d087`: diagnostico `Kernel_144`, reserva local dinamica, scanner
+  conservador, retencao desacoplada e mapa persistente de pastas.
+- `f99e6e8`: serializacao do ciclo de vida, ownership de processos, singleton,
+  encerramento e copias atomicas retomaveis.
+- `77241b6`: allowlist de rotas/modulos, downloads limitados, visualizador
+  local com CSP e telemetria de disco corretamente identificada como basica.
+- `d887f97`: modulo `mpegts` correto e prova de disponibilidade da rota
+  `/api/stream.ts` antes de iniciar os gravadores.
+- `951e301`: temporario no HD validado, publicacao sem copia no mesmo volume,
+  recuperacao limitada de `.recording`, fallback local somente quando
+  necessario e monitor de smoke test.
+
+Validacao executada:
+
+- `59/59` testes unitarios aprovados.
+- Compilacao Python e `git diff --check` aprovados.
+- Rotas reais das duas cameras entregaram MPEG-TS.
+- Ensaio real controlado de 30 segundos aprovado para duas cameras.
+- Pico do processo: `180,6 MB`, `43` threads e `1,4%` de CPU.
+- Dois videos novos de `851.968 bytes`, ambos aceitos pelo FFmpeg.
+- `0` novos `Kernel_144`, `0` artefatos e `0` processos residuais.
+- HD principal com `847,05 GB` livres e status basico do Windows `OK`.
+
+O software nao faz mais a escrita continua primeiro no SSD do Windows quando o
+HD validado esta disponivel. O `C:` estava com cerca de `22 GB` livres, abaixo
+da reserva dinamica de `23,74 GB`; isso continua sendo alertado, mas nao impede
+a gravacao no HD principal. Nenhum arquivo foi apagado para liberar espaco.
+
+Permanecem abertos:
+
+- diagnostico fisico do historico USBXHCI/cabo/porta/energia;
+- liberacao segura de espaco no `C:` fora das pastas de gravacao;
+- teste supervisionado prolongado;
+- testes reais de desconexao do HD e queda de energia;
+- telemetria SMART detalhada com ferramenta do fabricante.
+
+As regras de firewall nao foram alteradas, conforme decisao operacional do
+responsavel.
+
+## Resumo executivo original (estado em 2026-07-24)
+
+As secoes abaixo preservam a fotografia e as evidencias da auditoria original.
+Para o estado atual, prevalece a atualizacao de remediacao acima.
 
 O projeto possui boas protecoes contra perda direta de gravacoes, mas ainda nao
 deve ser classificado como comprovadamente seguro para operacao 24h nesta

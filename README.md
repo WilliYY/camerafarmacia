@@ -20,9 +20,14 @@ Este projeto é uma solução completa de NVR (Network Video Recorder) local e h
 
 ### 1. Gravação com Baixo Consumo (0% CPU de Transcodificação)
 
-O gravador consome o fluxo de vídeo direto da ponte go2rtc em formato bruto, usando cópia binária direta para arquivos `.ts`. Não há re-encode local durante a gravação, mantendo baixo uso de CPU.
+O gravador consome `/api/stream.ts?src=NOME`, fornecido pelo modulo `mpegts`
+do go2rtc, e grava os bytes diretamente em arquivos `.ts`. O inicio da
+gravacao e bloqueado se essa rota nao estiver registrada, evitando o falso
+estado "gravando" com arquivo vazio.
 
-As gravações são organizadas automaticamente em pastas diárias (`AAAA-MM-DD`) dentro do destino final de cada câmera.
+As gravacoes sao organizadas em pastas diarias (`AAAA-MM-DD`). O temporario
+`.recording` fica no mesmo volume do destino validado e e publicado por
+renomeacao atomica, sem gravar o bloco inteiro primeiro no SSD do Windows.
 
 ### 2. Sincronização e Contingência Offline Inteligente
 
@@ -42,7 +47,7 @@ O grid é responsivo e preserva a proporção original de 16:9:
 
 ### 4. Gestão de Energia e Quedas de Eletricidade
 
-- **Prevenção de suspensão:** usa `SetThreadExecutionState` da Windows API para manter sistema e monitor ativos. O comportamento padrão do Windows é restaurado ao fechar o aplicativo.
+- **Prevenção de suspensão:** usa `SetThreadExecutionState` para manter o sistema acordado. No modo silencioso, a tela pode apagar normalmente; o comportamento padrão é restaurado ao fechar.
 - **Monitor de queda de energia:** usa `GetSystemPowerStatus` para detectar operação em bateria ou nobreak.
 - **Desligamento seguro:** se a energia cair e a bateria chegar ao limite crítico (`<= 20%`), o sistema:
   1. Salva e encerra os gravadores de forma limpa para evitar corrupção.
@@ -63,9 +68,13 @@ O gerenciador compara a versão local com a versão publicada no GitHub, mas só
 
 ### 7. Retenção e Espaço em Disco
 
-- A rotação automática preserva os últimos 90 dias por padrão.
-- Com menos de 15 GB livres, o NVR alerta e preserva o acervo; ele pode usar o fallback local e pausar se ambos os destinos ficarem sem espaço.
-- A exclusão emergencial é desativada por padrão. Quando habilitada por manutenção consciente, ainda remove apenas pastas mais antigas que a retenção configurada.
+- A rotacao automatica preserva os ultimos 90 dias por padrao.
+- O HD principal exige ao menos 15 GB livres. O fallback local preserva por
+  padrao a maior reserva entre 20 GB e 10% do volume do Windows.
+- Pouco espaco no `C:` nao bloqueia um HD principal valido; o `C:` so e usado
+  quando o fallback local for realmente necessario.
+- A exclusao emergencial e desativada por padrao e nunca remove gravacoes mais
+  novas que a retencao configurada.
 
 ---
 
@@ -159,10 +168,10 @@ pythonw.exe gerenciador.pyw --silent
 
 ## Diagnostico de Saude
 
-O NVR v4.12 possui um avaliador automatico executado em segundo plano. Ele
+O NVR v4.13 possui um avaliador automatico executado em segundo plano. Ele
 correlaciona espaco local, disponibilidade do HD, backups pendentes, threads de
-gravacao, ultimo byte recebido por camera, reconexoes, memoria, energia, SMART
-informado pelo Windows e relatorios `Kernel_144`.
+gravacao, ultimo byte recebido por camera, reconexoes, memoria, energia, status
+basico informado pelo Windows e relatorios `Kernel_144`.
 
 Sobre esses sinais existe uma inteligencia operacional local. Ela nao usa API
 externa e nao envia imagens, credenciais ou logs para a internet. A cada coleta,
@@ -216,3 +225,11 @@ O comando de parada aceita conexao somente na interface local `127.0.0.1`. Um
 ensaio deve ser precedido por `--health-check` e seguido pela verificacao de
 processos, temporarios, arquivos publicados, espaco livre e novos relatorios
 `Kernel_144`.
+
+O monitor operacional automatiza essa linha de base, mede CPU, memoria e
+threads, valida somente os videos criados pelo ensaio e confirma que nao
+sobraram processos ou artefatos:
+
+```powershell
+.\tools\smoke_test_monitor.ps1 -Seconds 30
+```

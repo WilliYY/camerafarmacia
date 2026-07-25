@@ -17,12 +17,19 @@
   scanner automatico pesado durante risco de hardware.
 - Deteccao de novo `Kernel_144` na sessao separada do historico de 24 horas.
 - Tendencia de memoria limitada a duas horas e mantida apenas em RAM.
+- Identidade persistente do HD por numero de serie e nome do volume.
+- Temporario `.recording` criado no proprio destino validado, sem escrita
+  continua duplicada no SSD do Windows.
+- Rota MPEG-TS verificada antes de iniciar os gravadores.
+- Monitor de ensaio real com CPU, memoria, threads, FFmpeg, processos,
+  artefatos, espaco e `Kernel_144`.
 
 ## Prioridade alta
 
-1. **Identidade persistente do HD**
-   Gravar e validar o numero de serie do volume, alem do nome `FARMACIA`. Isso
-   evita aceitar outro disco com a mesma letra ou uma pasta criada por engano.
+1. **Recuperar a reserva do Windows**
+   Liberar espaco no `C:` fora das pastas de gravacao ate superar a reserva
+   dinamica. Nao apagar backups pendentes nem reduzir a protecao apenas para
+   eliminar o alerta.
 
 2. **Supervisor externo controlado**
    Usar uma Tarefa Agendada do Windows com reinicio em falha, diferenciando
@@ -47,10 +54,10 @@
    Adicionar manifesto assinado ou releases autenticadas antes de substituir o
    codigo em uma maquina que grava 24h.
 
-6. **Reduzir escrita no disco do Windows**
-   Tornar `gravando_temp` configuravel para um volume apropriado, mantendo
-   reserva de espaco e fallback seguro. So migrar depois de medir bitrate e
-   capacidade real dos discos.
+6. **Telemetria SMART detalhada**
+   O status atual vem de `Win32_DiskDrive.Status` e e apenas basico. Usar a
+   ferramenta do fabricante para temperatura, setores realocados, erros de
+   interface e horas ligadas, sem transformar ausencia de dados em estado OK.
 
 7. **Separacao gradual do arquivo principal**
    Extrair primeiro funcoes puras de armazenamento e validacao, depois scanner,
