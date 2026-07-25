@@ -3306,7 +3306,18 @@ class CameraManagerApp:
             os.path.join(PROJ_DIR, "sistema", "gravando_temp"),
             os.path.join(PROJ_DIR, "sistema", "backup_gravacoes"),
         ]
-        suffixes = (".finalizing", ".syncing", ".recovering")
+        if storage_path_matches_identity(
+            GDRIVE_ROOT,
+            CONFIG.get("storage_identity"),
+        ):
+            for index, stream_name in enumerate(self.streams):
+                roots.append(
+                    os.path.join(
+                        self.get_gdrive_dir(stream_name, index),
+                        ".gravando_temp",
+                    )
+                )
+        suffixes = (".finalizing", ".syncing", ".recovering", ".recording")
         now = time.time()
         stale = []
         inspected = 0
@@ -4699,8 +4710,71 @@ class CameraManagerApp:
                 except Exception:
                     pass
 
+    def get_recording_storage_status(self, destination_dir, gdrive_dir):
+        if not gdrive_dir:
+            backup_root = os.path.join(PROJ_DIR, "sistema", "backup_gravacoes")
+            return garantir_limite_backup_local(backup_root)
+
+        reserve_bytes = 15 * 1024 ** 3
+        if not storage_path_matches_identity(
+            gdrive_dir,
+            CONFIG.get("storage_identity"),
+        ):
+            return {
+                "ok": False,
+                "free_bytes": 0,
+                "reserve_bytes": reserve_bytes,
+                "reason": "hd_unavailable",
+            }
+
+        try:
+            _, _, free_bytes = shutil.disk_usage(destination_dir)
+            return {
+                "ok": free_bytes >= reserve_bytes,
+                "free_bytes": free_bytes,
+                "reserve_bytes": reserve_bytes,
+                "reason": "ok" if free_bytes >= reserve_bytes else "hd_space_low",
+            }
+        except Exception:
+            return {
+                "ok": False,
+                "free_bytes": 0,
+                "reserve_bytes": reserve_bytes,
+                "reason": "hd_unavailable",
+            }
+
+    def flush_recording_buffer_if_due(
+        self,
+        out_file,
+        last_flush_time,
+        now,
+        interval_seconds=5.0,
+    ):
+        if now - last_flush_time < interval_seconds:
+            return last_flush_time
+        out_file.flush()
+        return now
+
     def select_recording_destination(self, stream_name, index, escrever_log_cam):
         backup_root = os.path.join(PROJ_DIR, "sistema", "backup_gravacoes")
+        gdrive_dir = self.get_gdrive_dir(stream_name, index)
+        if (
+            storage_path_matches_identity(gdrive_dir, CONFIG.get("storage_identity"))
+            and self.storage_path_is_writable(gdrive_dir)
+        ):
+            hd_status = self.get_recording_storage_status(gdrive_dir, gdrive_dir)
+            if hd_status["ok"]:
+                previous = self.recording_destinations.get(stream_name)
+                self.recording_destinations[stream_name] = "hd"
+                if previous == "backup":
+                    escrever_log_cam("HD disponivel novamente. Proximos blocos voltarao ao destino principal.")
+                return gdrive_dir, gdrive_dir
+            free_gb = hd_status["free_bytes"] / (1024 ** 3)
+            escrever_log_cam(
+                f"AVISO: HD principal com apenas {free_gb:.2f} GB livres. "
+                "Tentando o backup local sem apagar gravacoes."
+            )
+
         local_status = garantir_limite_backup_local(backup_root)
         if not local_status["ok"]:
             free_gb = local_status["free_bytes"] / (1024 ** 3)
@@ -4712,17 +4786,6 @@ class CameraManagerApp:
                     "Gravacao pausada para evitar preencher o Windows; nenhum backup foi apagado."
                 )
             return None, ""
-
-        gdrive_dir = self.get_gdrive_dir(stream_name, index)
-        if (
-            storage_path_matches_identity(gdrive_dir, CONFIG.get("storage_identity"))
-            and self.storage_path_is_writable(gdrive_dir)
-        ):
-            previous = self.recording_destinations.get(stream_name)
-            self.recording_destinations[stream_name] = "hd"
-            if previous == "backup":
-                escrever_log_cam("HD disponivel novamente. Proximos blocos voltarao ao destino principal.")
-            return gdrive_dir, gdrive_dir
 
         backup_dir = os.path.join(backup_root, stream_name)
         if not self.storage_path_is_writable(backup_dir):
@@ -4786,6 +4849,102 @@ class CameraManagerApp:
             return True
         except Exception:
             raise
+
+    def publish_recording_file(self, src, dst):
+        """Publica no mesmo volume por rename; entre volumes, copia e valida."""
+        if not os.path.isfile(src) or os.path.getsize(src) <= 0:
+            raise Exception(f"Temporario de gravacao ausente ou vazio: {src}")
+
+        destination_dir = os.path.dirname(dst)
+        os.makedirs(destination_dir, exist_ok=True)
+        if os.path.exists(dst):
+            if not self.files_have_same_content(src, dst):
+                raise Exception(f"Destino ja existe com conteudo diferente: {dst}")
+            try:
+                os.remove(src)
+            except Exception:
+                pass
+            return True
+
+        source_device = os.stat(src).st_dev
+        destination_device = os.stat(destination_dir).st_dev
+        if source_device == destination_device:
+            os.replace(src, dst)
+            return True
+
+        self.safe_atomic_copy(
+            src,
+            dst,
+            temp_suffix=".finalizing",
+        )
+        try:
+            os.remove(src)
+        except Exception:
+            pass
+        return True
+
+    def recover_recording_temporaries(
+        self,
+        camera_dir,
+        active_temp_path,
+        escrever_log_cam,
+        max_files=100,
+    ):
+        """Publica temporarios antigos reconhecidos e preserva qualquer nome desconhecido."""
+        temp_dir = os.path.join(camera_dir, ".gravando_temp")
+        if not os.path.isdir(temp_dir):
+            return 0
+
+        active_path = (
+            os.path.normcase(os.path.abspath(active_temp_path))
+            if active_temp_path
+            else None
+        )
+        recovered = 0
+        inspected = 0
+        try:
+            entries = os.scandir(temp_dir)
+        except Exception:
+            return 0
+
+        with entries:
+            for entry in entries:
+                inspected += 1
+                if inspected > max_files:
+                    break
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                source_path = entry.path
+                if active_path and os.path.normcase(os.path.abspath(source_path)) == active_path:
+                    continue
+                match = re.fullmatch(
+                    r"(camera_(\d{4}-\d{2}-\d{2})_\d{2}-\d{2}_ate_\d{2}-\d{2}\.ts)\.recording",
+                    entry.name,
+                )
+                if not match:
+                    continue
+                try:
+                    datetime.strptime(match.group(2), "%Y-%m-%d")
+                    if entry.stat(follow_symlinks=False).st_size <= 0:
+                        os.remove(source_path)
+                        continue
+                    destination_dir = os.path.join(camera_dir, match.group(2))
+                    destination_path = os.path.join(destination_dir, match.group(1))
+                    destination_path = self.get_nonconflicting_destination(
+                        source_path,
+                        destination_path,
+                    )
+                    self.publish_recording_file(source_path, destination_path)
+                    recovered += 1
+                    escrever_log_cam(
+                        "Temporario preservado recuperado: "
+                        f"{os.path.join(match.group(2), os.path.basename(destination_path))}"
+                    )
+                except Exception as error:
+                    escrever_log_cam(
+                        f"AVISO: temporario preservado para nova recuperacao ({str(error)})"
+                    )
+        return recovered
 
     def safe_rate_limited_copy(self, src, dst):
         return self.safe_atomic_copy(
@@ -5106,10 +5265,13 @@ class CameraManagerApp:
         pasta_dia_final = os.path.join(pasta_final, data_dia)
         nome_arquivo = os.path.join(pasta_dia_final, f"camera_{data_dia}_{hora_inicio}_ate_{hora_fim}.ts")
         
-        # Gravação local temporária
-        temp_dir = os.path.join(PROJ_DIR, "sistema", "gravando_temp", stream_name)
+        # O temporario fica no proprio destino para evitar escrita duplicada no SSD.
+        temp_dir = os.path.join(pasta_final, ".gravando_temp")
         os.makedirs(temp_dir, exist_ok=True)
-        nome_temp = os.path.join(temp_dir, f"temp_camera_{data_dia}_{hora_inicio}_ate_{hora_fim}.ts")
+        nome_temp = os.path.join(
+            temp_dir,
+            f"camera_{data_dia}_{hora_inicio}_ate_{hora_fim}.ts.recording",
+        )
         
         escrever_log_cam(f"Iniciando gravacao temporaria do bloco: {os.path.basename(nome_arquivo)}")
         
@@ -5118,10 +5280,16 @@ class CameraManagerApp:
         if not self.atualizar_heartbeat_cam(gdrive_dir, stream_name):
             escrever_log_cam("[ERRO_DUPLICADO] Nao foi possivel adquirir a trava de gravacao no destino.")
             return "duplicado"
+        self.recover_recording_temporaries(
+            pasta_final,
+            nome_temp,
+            escrever_log_cam,
+        )
         last_heartbeat_time = time.time()
         last_storage_check = 0.0
         
         status_ret = "reconectar"
+        last_file_flush_time = time.time()
         
         # Abre o arquivo no modo append se ele já existir (reconexão dentro do mesmo bloco)
         mode = "ab" if os.path.exists(nome_temp) else "wb"
@@ -5168,16 +5336,23 @@ class CameraManagerApp:
                                 last_heartbeat_time = agora_ts
 
                             if agora_ts - last_storage_check >= 30:
-                                backup_root = os.path.join(PROJ_DIR, "sistema", "backup_gravacoes")
-                                local_status = garantir_limite_backup_local(backup_root)
+                                storage_status = self.get_recording_storage_status(
+                                    pasta_final,
+                                    gdrive_dir,
+                                )
                                 last_storage_check = agora_ts
-                                if not local_status["ok"]:
-                                    free_gb = local_status["free_bytes"] / (1024 ** 3)
+                                if not storage_status["ok"]:
+                                    free_gb = storage_status["free_bytes"] / (1024 ** 3)
+                                    storage_name = "HD principal" if gdrive_dir else "disco local"
                                     escrever_log_cam(
-                                        f"ERRO CRITICO: espaco local caiu para {free_gb:.2f} GB. "
-                                        "Finalizando o bloco atual antes de pausar."
+                                        f"ERRO CRITICO: {storage_name} indisponivel ou com apenas "
+                                        f"{free_gb:.2f} GB livres. Finalizando o bloco atual."
                                     )
-                                    status_ret = "espaco_critico"
+                                    status_ret = (
+                                        "reconectar_storage"
+                                        if gdrive_dir
+                                        else "espaco_critico"
+                                    )
                                     break
                                 
                             # Leitura do fluxo de vídeo
@@ -5191,6 +5366,11 @@ class CameraManagerApp:
                                     self.stream_bytes_written.get(stream_name, 0) + len(chunk)
                                 )
                                 self.stream_last_data_at[stream_name] = last_read_time
+                                last_file_flush_time = self.flush_recording_buffer_if_due(
+                                    out_file,
+                                    last_file_flush_time,
+                                    last_read_time,
+                                )
                             except (socket.timeout, TimeoutError):
                                 if time.time() - last_read_time > 15:
                                     break
@@ -5206,7 +5386,12 @@ class CameraManagerApp:
                     finally:
                         self.active_connections.pop(stream_name, None)
 
-                    if status_ret in ("parar", "duplicado", "espaco_critico"):
+                    if status_ret in (
+                        "parar",
+                        "duplicado",
+                        "espaco_critico",
+                        "reconectar_storage",
+                    ):
                         break
                         
                 if datetime.now() >= fim_bloco:
@@ -5222,15 +5407,19 @@ class CameraManagerApp:
             status_ret = "erro"
             
         # Move o arquivo temporário se concluído
-        if os.path.exists(nome_temp) and status_ret in ("rotacionar", "parar", "espaco_critico"):
+        if os.path.exists(nome_temp) and status_ret in (
+            "rotacionar",
+            "parar",
+            "espaco_critico",
+            "reconectar_storage",
+        ):
             if os.path.getsize(nome_temp) > 0:
                 try:
                     os.makedirs(pasta_dia_final, exist_ok=True)
                     nome_arquivo = self.get_nonconflicting_destination(nome_temp, nome_arquivo)
-                    self.safe_atomic_copy(
+                    self.publish_recording_file(
                         nome_temp,
                         nome_arquivo,
-                        temp_suffix=".finalizing",
                     )
                 except Exception as e_move:
                     escrever_log_cam(f"Erro ao mover bloco para {pasta_dia_final} ({str(e_move)}). Salvando no backup local.")
@@ -5239,20 +5428,14 @@ class CameraManagerApp:
                         os.makedirs(backup_dia_dir, exist_ok=True)
                         backup_arquivo = os.path.join(backup_dia_dir, f"camera_{data_dia}_{hora_inicio}_ate_{hora_fim}.ts")
                         backup_arquivo = self.get_nonconflicting_destination(nome_temp, backup_arquivo)
-                        self.safe_atomic_copy(
+                        self.publish_recording_file(
                             nome_temp,
                             backup_arquivo,
-                            temp_suffix=".finalizing",
                         )
-                        os.remove(nome_temp)
                         escrever_log_cam(f"Bloco salvo no backup local de contingencia: {os.path.join(data_dia, os.path.basename(backup_arquivo))}")
                     except Exception as e_backup:
                         escrever_log_cam(f"ERRO CRITICO: Nao foi possivel salvar no backup local ({str(e_backup)})")
                 else:
-                    try:
-                        os.remove(nome_temp)
-                    except Exception as e_cleanup:
-                        escrever_log_cam(f"AVISO: Bloco publicado, mas o temporario local nao foi removido ({str(e_cleanup)})")
                     escrever_log_cam(f"Bloco publicado com seguranca na pasta definitiva: {os.path.join(data_dia, os.path.basename(nome_arquivo))}")
             else:
                 try:

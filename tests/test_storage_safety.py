@@ -957,6 +957,102 @@ class StorageSafetyTests(unittest.TestCase):
             self.module.CONFIG = original_config
             self.module.get_volume_identity = original_identity
 
+    def test_external_hd_recording_does_not_require_local_fallback_space(self):
+        app = self.new_app()
+        app.recording_destinations = {}
+        logs = []
+        hd_dir = str(Path(self.temp_dir.name) / "external-only" / "camera 1")
+        Path(hd_dir).mkdir(parents=True)
+        original_status = self.module.garantir_limite_backup_local
+        original_config = self.module.CONFIG
+        original_identity = self.module.get_volume_identity
+        original_disk_usage = self.module.shutil.disk_usage
+        self.module.garantir_limite_backup_local = lambda _path: {
+            "ok": False,
+            "free_bytes": 1 * 1024 ** 3,
+            "reserve_bytes": 20 * 1024 ** 3,
+        }
+        self.module.CONFIG = {
+            **original_config,
+            "storage_identity": {"serial": "A1B2C3D4", "label": "FARMACIA"},
+        }
+        self.module.get_volume_identity = lambda _path: {
+            "serial": "A1B2C3D4",
+            "label": "FARMACIA",
+        }
+        self.module.shutil.disk_usage = lambda _path: (
+            1000 * 1024 ** 3,
+            100 * 1024 ** 3,
+            900 * 1024 ** 3,
+        )
+        app.get_gdrive_dir = lambda _stream, _index: hd_dir
+        app.storage_path_is_writable = lambda _path: True
+
+        try:
+            selected, heartbeat = app.select_recording_destination("cam", 0, logs.append)
+        finally:
+            self.module.garantir_limite_backup_local = original_status
+            self.module.CONFIG = original_config
+            self.module.get_volume_identity = original_identity
+            self.module.shutil.disk_usage = original_disk_usage
+
+        self.assertEqual(selected, hd_dir)
+        self.assertEqual(heartbeat, hd_dir)
+        self.assertEqual(app.recording_destinations["cam"], "hd")
+
+    def test_recording_file_is_published_without_copy_on_destination_volume(self):
+        app = self.new_app()
+        work_dir = Path(self.temp_dir.name) / "direct-publish"
+        work_dir.mkdir()
+        source = work_dir / "block.ts.recording"
+        destination = work_dir / "block.ts"
+        source.write_bytes(b"camera-data")
+        app.safe_atomic_copy = lambda *_args, **_kwargs: self.fail(
+            "same-volume publication must not copy video data"
+        )
+
+        app.publish_recording_file(str(source), str(destination))
+
+        self.assertFalse(source.exists())
+        self.assertEqual(destination.read_bytes(), b"camera-data")
+
+    def test_recording_buffer_is_flushed_at_bounded_intervals(self):
+        app = self.new_app()
+
+        class FakeFile:
+            def __init__(self):
+                self.flush_count = 0
+
+            def flush(self):
+                self.flush_count += 1
+
+        out_file = FakeFile()
+        last_flush = app.flush_recording_buffer_if_due(out_file, 100.0, 104.9)
+        self.assertEqual(last_flush, 100.0)
+        self.assertEqual(out_file.flush_count, 0)
+
+        last_flush = app.flush_recording_buffer_if_due(out_file, last_flush, 105.0)
+        self.assertEqual(last_flush, 105.0)
+        self.assertEqual(out_file.flush_count, 1)
+
+    def test_stale_recording_temp_is_recovered_without_deleting_unknown_files(self):
+        app = self.new_app()
+        camera_dir = Path(self.temp_dir.name) / "camera 1"
+        temp_dir = camera_dir / ".gravando_temp"
+        temp_dir.mkdir(parents=True)
+        recoverable = temp_dir / "camera_2026-07-25_20-00_ate_20-30.ts.recording"
+        unknown = temp_dir / "unknown.recording"
+        recoverable.write_bytes(b"recoverable-video")
+        unknown.write_bytes(b"preserve-me")
+        logs = []
+
+        app.recover_recording_temporaries(str(camera_dir), None, logs.append)
+
+        published = camera_dir / "2026-07-25" / "camera_2026-07-25_20-00_ate_20-30.ts"
+        self.assertEqual(published.read_bytes(), b"recoverable-video")
+        self.assertFalse(recoverable.exists())
+        self.assertEqual(unknown.read_bytes(), b"preserve-me")
+
     def test_stop_sequence_waits_for_local_recording_thread(self):
         app = self.new_app()
         app.streams = ["cam"]
