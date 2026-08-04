@@ -190,6 +190,20 @@ nao permanece verde quando a camera esta offline. A faixa lateral do card e o
 contorno da analise seguem a mesma gravidade para facilitar a leitura rapida.
 Uma transicao para `OFFLINE` invalida a coleta de saude anterior, registra
 `CAMERA_OFFLINE` no snapshot e atualiza a analise sem aguardar o ciclo normal.
+O estado tambem preserva `status_since` e `last_recovered_at`: os cards mostram
+ha quanto tempo a camera esta sem midia e deixam explicito que a reconexao
+automatica continua ativa. Quando a midia retorna, duas amostras positivas
+confirmam a recuperacao antes de voltar ao verde.
+
+Tentativas vazias de gravacao usam espera progressiva de 2, 4, 8 e no maximo 15
+segundos. Qualquer byte recebido restaura imediatamente a espera base de 2
+segundos. Isso reduz conexoes repetidas durante uma indisponibilidade longa sem
+desistir da camera. Os contadores de amostras ficam limitados a 120.
+
+Na interface, cameras recolhidas nao reservam mais grandes areas vazias. O painel
+mostra a atividade recente em cada card e inclui o horario da ultima coleta no
+`Diagnostico Operacional`, facilitando distinguir informacao atual de estado
+antigo.
 
 Para operacao continua, a busca da ultima gravacao e armazenada em cache por 30
 segundos para cada camera e caminho. O verificador percorre os arquivos sem criar

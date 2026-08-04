@@ -646,6 +646,7 @@ CAMERA_DATA_FRESH_SECONDS = 20
 CAMERA_DATA_OFFLINE_SECONDS = 90
 CAMERA_SIGNAL_OFFLINE_SAMPLES = 10
 CAMERA_SIGNAL_RECOVERY_SAMPLES = 2
+CAMERA_SIGNAL_COUNTER_CAP = 120
 
 
 def producer_has_media_evidence(producer):
@@ -724,6 +725,105 @@ def classify_camera_connectivity(
         "last_data_age_seconds": round(last_data_age, 1) if last_data_age is not None else None,
         "preview_age_seconds": round(preview_age, 1) if preview_age is not None else None,
     }
+
+
+def enrich_camera_connectivity_state(previous, current, now=None):
+    now = time.time() if now is None else now
+    previous = previous or {}
+    result = dict(current)
+    previous_status = previous.get("status")
+    current_status = result.get("status")
+
+    if previous_status == current_status and previous.get("status_since") is not None:
+        result["status_since"] = previous["status_since"]
+    else:
+        result["status_since"] = now
+
+    last_recovered_at = previous.get("last_recovered_at")
+    if current_status == "online" and previous_status != "online":
+        last_recovered_at = now
+    if last_recovered_at is not None:
+        result["last_recovered_at"] = last_recovered_at
+    return result
+
+
+def update_camera_signal_samples(samples, positive_sample, observation_active):
+    if positive_sample:
+        samples["success"] = min(
+            CAMERA_SIGNAL_COUNTER_CAP,
+            samples.get("success", 0) + 1,
+        )
+        samples["missing"] = 0
+    elif not observation_active:
+        samples["missing"] = 0
+        samples["success"] = 0
+    else:
+        samples["missing"] = min(
+            CAMERA_SIGNAL_COUNTER_CAP,
+            samples.get("missing", 0) + 1,
+        )
+        samples["success"] = 0
+    return samples
+
+
+def format_elapsed_short(seconds):
+    seconds = max(0, int(seconds or 0))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60} min"
+    if seconds < 86400:
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        return f"{hours}h" if minutes == 0 else f"{hours}h {minutes}min"
+    days = seconds // 86400
+    hours = (seconds % 86400) // 3600
+    return f"{days}d" if hours == 0 else f"{days}d {hours}h"
+
+
+def format_camera_activity(state, now=None):
+    now = time.time() if now is None else now
+    connectivity = state.get("connectivity") or {}
+    status = camera_connectivity_status_from_state(state)
+    status_since = connectivity.get("status_since")
+    status_age = None if status_since is None else max(0.0, now - status_since)
+    age_text = format_elapsed_short(status_age) if status_age is not None else None
+
+    if status == "online":
+        last_data_age = connectivity.get("last_data_age_seconds")
+        if last_data_age is None:
+            return "Sinal de mídia confirmado"
+        if last_data_age <= 5:
+            return "Mídia recebida agora"
+        return f"Última mídia há {format_elapsed_short(last_data_age)}"
+    if status == "connecting":
+        return "Conectando · tentativa automática ativa"
+    if status == "reconnecting":
+        prefix = f"Reconectando há {age_text}" if age_text else "Reconectando"
+        return f"{prefix} · tentativa automática ativa"
+    if status == "standby":
+        return "Em espera · sem medição ativa"
+    prefix = f"Sem mídia há {age_text}" if age_text else "Sem mídia"
+    return f"{prefix} · reconexão automática ativa"
+
+
+def next_recording_retry_delay(
+    current_delay,
+    received_data=False,
+    base_delay=2.0,
+    max_delay=15.0,
+):
+    if received_data:
+        return float(base_delay)
+    current_delay = max(float(base_delay), float(current_delay or base_delay))
+    return min(float(max_delay), current_delay * 2)
+
+
+def format_health_collection_time(generated_at):
+    try:
+        return datetime.fromisoformat(str(generated_at)).strftime("%H:%M:%S")
+    except (TypeError, ValueError):
+        return "horário indisponível"
 
 
 def camera_connectivity_status_from_state(state):
@@ -1784,6 +1884,7 @@ class LiveCameraWidget(tk.Frame):
     def expand(self):
         self.expanded = True
         self.update_header_text()
+        self.pack_configure(fill="both", expand=True)
         self.body_frame.pack(fill="both", expand=True)
         self.start_stream()
         self._recalc_camera_sizes()
@@ -1793,6 +1894,7 @@ class LiveCameraWidget(tk.Frame):
         self.update_header_text()
         self.stop_stream()
         self.body_frame.pack_forget()
+        self.pack_configure(fill="x", expand=False)
         self._recalc_camera_sizes()
 
     def _recalc_camera_sizes(self):
@@ -1800,6 +1902,19 @@ class LiveCameraWidget(tk.Frame):
         if not hasattr(self.app, 'camera_widgets'):
             return
         expanded_count = sum(1 for w in self.app.camera_widgets.values() if w.expanded)
+
+        try:
+            self.master.pack_configure(
+                fill="both" if expanded_count else "x",
+                expand=bool(expanded_count),
+            )
+            for widget in self.app.camera_widgets.values():
+                widget.pack_configure(
+                    fill="both" if widget.expanded else "x",
+                    expand=widget.expanded,
+                )
+        except Exception:
+            pass
         
         # Obtém as dimensões disponíveis da coluna direita
         try:
@@ -2771,7 +2886,14 @@ class CameraManagerApp:
             
             # Título da Câmera
             cam_label = f"CÂMERA {idx+1}: {stream.upper()}"
-            tk.Label(card, text=f"📷 {cam_label}", font=("Segoe UI", 10, "bold"), fg=ACCENT_COLOR, bg=CARD_COLOR).pack(anchor="w", pady=(0, 6))
+            lbl_title = tk.Label(
+                card,
+                text=f"📷 {cam_label}",
+                font=("Segoe UI", 10, "bold"),
+                fg=ACCENT_COLOR,
+                bg=CARD_COLOR,
+            )
+            lbl_title.pack(anchor="w", pady=(0, 6))
             
             # Novo Grid de Status (Pílulas/Badges)
             grid_frame = tk.Frame(card, bg=CARD_COLOR, pady=6)
@@ -2813,6 +2935,17 @@ class CameraManagerApp:
             led_web.pack(side="left", padx=(0, 4))
             lbl_web = tk.Label(web_badge_frame, text="VERIFICANDO", font=("Segoe UI", 8, "bold"), fg=ORANGE_COLOR, bg="#78350F", padx=6, pady=2)
             lbl_web.pack(side="left")
+
+            lbl_activity = tk.Label(
+                card,
+                text="Coletando atividade da câmera...",
+                font=("Segoe UI", 8),
+                fg=TEXT_MUTED,
+                bg=CARD_COLOR,
+                anchor="w",
+                justify="left",
+            )
+            lbl_activity.pack(fill="x", pady=(1, 2))
             
             # Linha divisória sutil
             divider = tk.Frame(card, bg="#1F2232", height=1)
@@ -2825,12 +2958,14 @@ class CameraManagerApp:
             # Salva referências para atualização
             self.camera_cards[stream] = {
                 "accent_bar": accent_bar,
+                "lbl_title": lbl_title,
                 "led_sinal": led_sinal,
                 "lbl_sinal": lbl_sinal,
                 "led_grav": led_grav,
                 "lbl_grav": lbl_grav,
                 "led_web": led_web,
                 "lbl_web": lbl_web,
+                "lbl_activity": lbl_activity,
                 "lbl_sync": lbl_sync
             }
 
@@ -3022,12 +3157,12 @@ class CameraManagerApp:
 
         # 3.5. CONTAINERS DAS CÂMERAS AO VIVO (na coluna da direita)
         self.live_cams_container = tk.Frame(right_col, bg=BG_COLOR)
-        self.live_cams_container.pack(fill="both", expand=True, padx=10, pady=4)
+        self.live_cams_container.pack(fill="x", expand=False, padx=10, pady=4)
         
         self.camera_widgets = {}
         for stream in self.streams:
             cam_widget = LiveCameraWidget(self.live_cams_container, stream, self)
-            cam_widget.pack(side="top", fill="both", expand=True, pady=4)
+            cam_widget.pack(side="top", fill="x", expand=False, pady=4)
             self.camera_widgets[stream] = cam_widget
 
         # Divisor horizontal sutil entre Câmeras e Logs
@@ -3045,7 +3180,7 @@ class CameraManagerApp:
         intelligence_header.pack(fill="x")
         tk.Label(
             intelligence_header,
-            text="Analise Inteligente",
+            text="Diagnóstico Operacional",
             font=("Segoe UI", 9, "bold"),
             fg=TEXT_COLOR,
             bg="#161822",
@@ -4165,7 +4300,12 @@ class CameraManagerApp:
             self.report_health_transitions(snapshot)
             self._health_snapshot = snapshot
             if not self.silent:
-                self.root.after(0, self.update_intelligence_ui, snapshot.get("intelligence") or {})
+                self.root.after(
+                    0,
+                    self.update_intelligence_ui,
+                    snapshot.get("intelligence") or {},
+                    snapshot.get("generated_at"),
+                )
         except Exception as error:
             self.add_log(f"[HEALTH][WARNING][ASSESSMENT_FAILED] Falha no avaliador de saude: {str(error)}", "tag_warn")
         finally:
@@ -4636,15 +4776,7 @@ class CameraManagerApp:
             or (not recording_active and producer_active)
         )
         observation_active = recording_active or preview_active or producer_active
-        if positive_sample:
-            samples["success"] += 1
-            samples["missing"] = 0
-        elif not observation_active:
-            samples["missing"] = 0
-            samples["success"] = 0
-        else:
-            samples["missing"] += 1
-            samples["success"] = 0
+        update_camera_signal_samples(samples, positive_sample, observation_active)
 
         result = classify_camera_connectivity(
             go2rtc_ok=go2rtc_ok,
@@ -4660,6 +4792,7 @@ class CameraManagerApp:
             previous_status=previous.get("status"),
             now=now,
         )
+        result = enrich_camera_connectivity_state(previous, result, now)
         result.update({
             "producer_active": producer_active,
             "recording_active": recording_active,
@@ -4843,7 +4976,7 @@ class CameraManagerApp:
         return viewers
 
     # ================= ATUALIZAÇÃO DA GUI =================
-    def update_intelligence_ui(self, intelligence):
+    def update_intelligence_ui(self, intelligence, generated_at=None):
         if self.silent or not hasattr(self, "lbl_intelligence_summary"):
             return
         status = intelligence.get("status", "attention")
@@ -4859,9 +4992,10 @@ class CameraManagerApp:
         }
         color = colors.get(status, ORANGE_COLOR)
         label = labels.get(status, "ANALISANDO")
-        self.configure_badge_label(self.hdr_pill_brain, f"ANALISE: {label}", color)
+        collection_time = format_health_collection_time(generated_at)
+        self.configure_badge_label(self.hdr_pill_brain, f"DIAGNÓSTICO: {label}", color)
         self.lbl_intelligence_confidence.configure(
-            text=f"confianca {intelligence.get('confidence_score', 0)}%",
+            text=f"atualizado {collection_time} · confiança {intelligence.get('confidence_score', 0)}%",
             fg=color,
         )
         self.lbl_intelligence_summary.configure(
@@ -4991,6 +5125,14 @@ class CameraManagerApp:
                     }.get(camera_status, RED_COLOR)
                     if "accent_bar" in card:
                         card["accent_bar"].configure(bg=camera_color)
+                    if "lbl_title" in card:
+                        card["lbl_title"].configure(fg=camera_color)
+                    if "lbl_activity" in card:
+                        activity_color = TEXT_MUTED if camera_status == "standby" else camera_color
+                        card["lbl_activity"].configure(
+                            text=format_camera_activity(state),
+                            fg=activity_color,
+                        )
                     widget = getattr(self, "camera_widgets", {}).get(stream)
                     if widget is not None:
                         widget.set_connectivity_status(camera_status)
@@ -5707,6 +5849,7 @@ class CameraManagerApp:
         
         status_ret = "reconectar"
         last_file_flush_time = time.time()
+        retry_delay = 2.0
         
         # Abre o arquivo no modo append se ele já existir (reconexão dentro do mesmo bloco)
         mode = "ab" if os.path.exists(nome_temp) else "wb"
@@ -5782,6 +5925,10 @@ class CameraManagerApp:
                                     break
                                 out_file.write(chunk)
                                 received_data_this_connection = True
+                                retry_delay = next_recording_retry_delay(
+                                    retry_delay,
+                                    received_data=True,
+                                )
                                 last_read_time = time.time()
                                 self.stream_bytes_written[stream_name] = (
                                     self.stream_bytes_written.get(stream_name, 0) + len(chunk)
@@ -5801,10 +5948,10 @@ class CameraManagerApp:
                                 
                         response.close()
                     except Exception:
-                        # Em caso de erro de conexão, aguarda 2 segundos antes do retry
-                        if not self.wait_for_recording_retry(stream_name):
+                        if not self.wait_for_recording_retry(stream_name, retry_delay):
                             status_ret = "parar"
                             break
+                        retry_delay = next_recording_retry_delay(retry_delay)
                         continue
                     finally:
                         self.active_connections.pop(stream_name, None)
@@ -5817,9 +5964,10 @@ class CameraManagerApp:
                     ):
                         break
                     if not received_data_this_connection:
-                        if not self.wait_for_recording_retry(stream_name):
+                        if not self.wait_for_recording_retry(stream_name, retry_delay):
                             status_ret = "parar"
                             break
+                        retry_delay = next_recording_retry_delay(retry_delay)
                         
                 if datetime.now() >= fim_bloco:
                     status_ret = "rotacionar"

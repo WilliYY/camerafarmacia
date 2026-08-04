@@ -178,6 +178,92 @@ class StorageSafetyTests(unittest.TestCase):
         self.assertEqual(result["status"], "standby")
         self.assertEqual(result["reason"], "no_active_media_probe")
 
+    def test_camera_state_tracks_duration_and_confirmed_recovery(self):
+        offline = self.module.enrich_camera_connectivity_state(
+            {"status": "offline", "status_since": 100.0},
+            {"status": "offline", "reason": "recording_without_data"},
+            now=200.0,
+        )
+        recovering = self.module.enrich_camera_connectivity_state(
+            offline,
+            {"status": "reconnecting", "reason": "recovery_confirmation"},
+            now=205.0,
+        )
+        online = self.module.enrich_camera_connectivity_state(
+            recovering,
+            {"status": "online", "reason": "recording_data_recent"},
+            now=211.0,
+        )
+
+        self.assertEqual(offline["status_since"], 100.0)
+        self.assertEqual(recovering["status_since"], 205.0)
+        self.assertEqual(online["status_since"], 211.0)
+        self.assertEqual(online["last_recovered_at"], 211.0)
+
+    def test_camera_activity_text_explains_media_and_automatic_recovery(self):
+        offline_text = self.module.format_camera_activity(
+            {
+                "connectivity": {
+                    "status": "offline",
+                    "status_since": 100.0,
+                    "last_data_age_seconds": None,
+                },
+            },
+            now=3_700.0,
+        )
+        online_text = self.module.format_camera_activity(
+            {
+                "connectivity": {
+                    "status": "online",
+                    "status_since": 3_690.0,
+                    "last_data_age_seconds": 1.2,
+                },
+            },
+            now=3_700.0,
+        )
+
+        self.assertIn("Sem mídia há 1h", offline_text)
+        self.assertIn("reconexão automática ativa", offline_text)
+        self.assertEqual(online_text, "Mídia recebida agora")
+
+    def test_camera_signal_samples_are_bounded_for_long_running_use(self):
+        cap = self.module.CAMERA_SIGNAL_COUNTER_CAP
+        samples = {"missing": cap, "success": 0}
+        self.module.update_camera_signal_samples(
+            samples,
+            positive_sample=False,
+            observation_active=True,
+        )
+        self.assertEqual(samples, {"missing": cap, "success": 0})
+
+        samples = {"missing": 0, "success": cap}
+        self.module.update_camera_signal_samples(
+            samples,
+            positive_sample=True,
+            observation_active=True,
+        )
+        self.assertEqual(samples, {"missing": 0, "success": cap})
+
+    def test_recording_retry_backoff_is_bounded_and_resets_after_data(self):
+        self.assertEqual(self.module.next_recording_retry_delay(2.0), 4.0)
+        self.assertEqual(self.module.next_recording_retry_delay(4.0), 8.0)
+        self.assertEqual(self.module.next_recording_retry_delay(8.0), 15.0)
+        self.assertEqual(self.module.next_recording_retry_delay(15.0), 15.0)
+        self.assertEqual(
+            self.module.next_recording_retry_delay(15.0, received_data=True),
+            2.0,
+        )
+
+    def test_health_collection_time_is_human_readable_and_safe(self):
+        self.assertEqual(
+            self.module.format_health_collection_time("2026-08-04T09:37:37"),
+            "09:37:37",
+        )
+        self.assertEqual(
+            self.module.format_health_collection_time("invalid"),
+            "horário indisponível",
+        )
+
     def test_recording_overview_requires_recent_camera_data(self):
         cam_states = {
             "cam_ok": {
@@ -320,7 +406,8 @@ class StorageSafetyTests(unittest.TestCase):
         source = inspect.getsource(self.module.CameraManagerApp.gravar_bloco_cam)
         self.assertIn("if now_ts - last_heartbeat_time >= 30:", source)
         self.assertIn("if not received_data_this_connection:", source)
-        self.assertIn("self.wait_for_recording_retry(stream_name)", source)
+        self.assertIn("self.wait_for_recording_retry(stream_name, retry_delay)", source)
+        self.assertIn("next_recording_retry_delay(retry_delay)", source)
 
     def test_internal_method_calls_match_declared_arity(self):
         source_path = Path(__file__).resolve().parents[1] / "gerenciador.pyw"
