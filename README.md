@@ -173,6 +173,16 @@ correlaciona espaco local, disponibilidade do HD, backups pendentes, threads de
 gravacao, ultimo byte recebido por camera, reconexoes, memoria, energia, status
 basico informado pelo Windows e relatorios `Kernel_144`.
 
+O estado `ONLINE` de cada camera exige evidencia de midia: produtor ativo no
+go2rtc, bytes recentes na gravacao ou frame recente no painel. Durante uma
+oscilacao, a interface passa por `RECONECTANDO` e somente conclui `OFFLINE`
+apos 90 segundos sem dados ou dez amostras sem midia em uma visualizacao ativa.
+A recuperacao exige duas amostras positivas. Sem gravacao ou visualizacao ativa,
+o estado e `EM ESPERA`, evitando declarar uma camera offline sem ter sido medida.
+As mesmas evidencias ficam em `metrics.camera_connectivity` no snapshot JSON.
+Uma conexao encerrada sem entregar midia aguarda antes de tentar novamente, e o
+heartbeat do gravador continua limitado a uma renovacao a cada 30 segundos.
+
 Sobre esses sinais existe uma inteligencia operacional local. Ela nao usa API
 externa e nao envia imagens, credenciais ou logs para a internet. A cada coleta,
 ela correlaciona sintomas e informa:

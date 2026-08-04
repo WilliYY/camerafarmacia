@@ -80,6 +80,131 @@ class StorageSafetyTests(unittest.TestCase):
     def new_app(self):
         return self.module.CameraManagerApp.__new__(self.module.CameraManagerApp)
 
+    def test_producer_requires_real_media_evidence(self):
+        self.assertFalse(self.module.producer_has_media_evidence({"url": "local-source"}))
+        self.assertFalse(self.module.producer_has_media_evidence({"error": "offline"}))
+        self.assertTrue(self.module.producer_has_media_evidence({"medias": [{"kind": "video"}]}))
+        self.assertTrue(self.module.producer_has_media_evidence({"receivers": [{"id": 1}]}))
+
+    def test_camera_connectivity_uses_recording_data_and_timeouts(self):
+        now = 10_000.0
+        fresh = self.module.classify_camera_connectivity(
+            go2rtc_ok=True,
+            producer_active=True,
+            recording_active=True,
+            recording_started_at=now - 600,
+            last_data_at=now - 2,
+            now=now,
+        )
+        stale = self.module.classify_camera_connectivity(
+            go2rtc_ok=True,
+            producer_active=True,
+            recording_active=True,
+            recording_started_at=now - 600,
+            last_data_at=now - 40,
+            now=now,
+        )
+        offline = self.module.classify_camera_connectivity(
+            go2rtc_ok=True,
+            producer_active=True,
+            recording_active=True,
+            recording_started_at=now - 600,
+            last_data_at=now - 120,
+            now=now,
+        )
+
+        self.assertEqual(fresh["status"], "online")
+        self.assertEqual(stale["status"], "reconnecting")
+        self.assertEqual(offline["status"], "offline")
+        self.assertEqual(offline["reason"], "recording_data_timeout")
+
+    def test_camera_connectivity_has_startup_grace_and_recovery_hysteresis(self):
+        now = 20_000.0
+        starting = self.module.classify_camera_connectivity(
+            go2rtc_ok=True,
+            producer_active=False,
+            recording_active=True,
+            recording_started_at=now - 10,
+            now=now,
+        )
+        first_recovery = self.module.classify_camera_connectivity(
+            go2rtc_ok=True,
+            producer_active=True,
+            success_samples=1,
+            previous_status="offline",
+            now=now,
+        )
+        confirmed_recovery = self.module.classify_camera_connectivity(
+            go2rtc_ok=True,
+            producer_active=True,
+            success_samples=2,
+            previous_status="offline",
+            now=now,
+        )
+
+        self.assertEqual(starting["status"], "connecting")
+        self.assertEqual(first_recovery["status"], "reconnecting")
+        self.assertEqual(confirmed_recovery["status"], "online")
+
+    def test_camera_connectivity_marks_persistent_missing_producer_offline(self):
+        result = self.module.classify_camera_connectivity(
+            go2rtc_ok=True,
+            producer_active=False,
+            preview_active=True,
+            missing_samples=self.module.CAMERA_SIGNAL_OFFLINE_SAMPLES,
+            now=30_000.0,
+        )
+        bridge_down = self.module.classify_camera_connectivity(
+            go2rtc_ok=False,
+            producer_active=True,
+            now=30_000.0,
+        )
+
+        self.assertEqual(result["status"], "offline")
+        self.assertEqual(result["reason"], "producer_without_media")
+        self.assertEqual(bridge_down["status"], "offline")
+        self.assertEqual(bridge_down["reason"], "go2rtc_offline")
+
+    def test_camera_connectivity_does_not_claim_offline_without_active_probe(self):
+        result = self.module.classify_camera_connectivity(
+            go2rtc_ok=True,
+            producer_active=False,
+            recording_active=False,
+            preview_active=False,
+            missing_samples=self.module.CAMERA_SIGNAL_OFFLINE_SAMPLES * 3,
+            now=40_000.0,
+        )
+
+        self.assertEqual(result["status"], "standby")
+        self.assertEqual(result["reason"], "no_active_media_probe")
+
+    def test_rtsp_signal_rejects_configured_but_inactive_producer(self):
+        app = self.new_app()
+        app.get_cached_streams_data = lambda: {
+            "cam": {"producers": [{"url": "local-source"}]},
+        }
+        self.assertEqual(app.check_rtsp_stream(True, "cam"), "Conectando...")
+
+        app.get_cached_streams_data = lambda: {
+            "cam": {"producers": [{"medias": [{"kind": "video"}]}]},
+        }
+        self.assertEqual(app.check_rtsp_stream(True, "cam"), "Sinal OK")
+
+    def test_recording_retry_is_bounded_and_heartbeat_is_throttled(self):
+        app = self.new_app()
+        app.recording_active = {"cam": True}
+        started_at = time.monotonic()
+        self.assertTrue(app.wait_for_recording_retry("cam", 0.02))
+        self.assertGreaterEqual(time.monotonic() - started_at, 0.015)
+
+        app.recording_active = {"cam": False}
+        self.assertFalse(app.wait_for_recording_retry("cam", 0.01))
+
+        source = inspect.getsource(self.module.CameraManagerApp.gravar_bloco_cam)
+        self.assertIn("if now_ts - last_heartbeat_time >= 30:", source)
+        self.assertIn("if not received_data_this_connection:", source)
+        self.assertIn("self.wait_for_recording_retry(stream_name)", source)
+
     def test_internal_method_calls_match_declared_arity(self):
         source_path = Path(__file__).resolve().parents[1] / "gerenciador.pyw"
         tree = ast.parse(source_path.read_text(encoding="utf-8"))
@@ -257,8 +382,23 @@ class StorageSafetyTests(unittest.TestCase):
         result = self.module.build_operational_intelligence(snapshot)
 
         self.assertEqual(result["root_cause"], "single_camera_path")
+        self.assertEqual(result["status"], "attention")
         self.assertEqual(result["affected_streams"], ["cam1"])
         self.assertTrue(result["hardware_protection"]["heavy_maintenance_allowed"])
+
+    def test_intelligence_marks_confirmed_single_camera_outage_critical(self):
+        snapshot = {
+            "issues": [
+                {"code": "STREAM_NO_DATA", "severity": "critical", "stream": "cam1"},
+            ],
+            "metrics": {"active_streams": ["cam1", "cam2"]},
+        }
+
+        result = self.module.build_operational_intelligence(snapshot)
+
+        self.assertEqual(result["root_cause"], "single_camera_path")
+        self.assertEqual(result["status"], "critical")
+        self.assertIn("offline", result["headline"].lower())
 
     def test_intelligence_correlates_go2rtc_failure_with_all_missing_data(self):
         snapshot = {

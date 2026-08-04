@@ -642,6 +642,89 @@ class SYSTEM_POWER_STATUS(ctypes.Structure):
 # Versão do Sistema (usada para o auto-update)
 VERSION = "4.13"
 
+CAMERA_DATA_FRESH_SECONDS = 20
+CAMERA_DATA_OFFLINE_SECONDS = 90
+CAMERA_SIGNAL_OFFLINE_SAMPLES = 10
+CAMERA_SIGNAL_RECOVERY_SAMPLES = 2
+
+
+def producer_has_media_evidence(producer):
+    if not isinstance(producer, dict) or producer.get("error"):
+        return False
+    if producer.get("active") is True:
+        return True
+    for key in ("medias", "tracks", "receivers", "mediainfo"):
+        value = producer.get(key)
+        if value:
+            return True
+    return False
+
+
+def classify_camera_connectivity(
+    go2rtc_ok,
+    producer_active,
+    recording_active=False,
+    recording_started_at=None,
+    last_data_at=None,
+    preview_last_frame_at=None,
+    preview_active=False,
+    reconnect_failures=0,
+    missing_samples=0,
+    success_samples=0,
+    previous_status=None,
+    now=None,
+):
+    now = time.time() if now is None else now
+    recording_age = max(0.0, now - recording_started_at) if recording_started_at else 0.0
+    last_data_age = max(0.0, now - last_data_at) if last_data_at else None
+    preview_age = max(0.0, now - preview_last_frame_at) if preview_last_frame_at else None
+    recorder_fresh = last_data_age is not None and last_data_age <= CAMERA_DATA_FRESH_SECONDS
+    preview_fresh = preview_age is not None and preview_age <= CAMERA_DATA_FRESH_SECONDS
+
+    if not go2rtc_ok:
+        status, reason = "offline", "go2rtc_offline"
+    elif preview_fresh:
+        status, reason = "online", "preview_frame_recent"
+    elif recording_active:
+        if recorder_fresh:
+            status, reason = "online", "recording_data_recent"
+        elif reconnect_failures >= 3 and recording_age >= 30:
+            status, reason = "offline", "recording_reconnect_failures"
+        elif last_data_age is None and recording_age < 30:
+            status, reason = "connecting", "recording_start_grace"
+        elif last_data_age is None and recording_age < CAMERA_DATA_OFFLINE_SECONDS:
+            status, reason = "reconnecting", "recording_waiting_first_data"
+        elif last_data_age is None:
+            status, reason = "offline", "recording_without_data"
+        elif last_data_age < CAMERA_DATA_OFFLINE_SECONDS:
+            status, reason = "reconnecting", "recording_data_stale"
+        else:
+            status, reason = "offline", "recording_data_timeout"
+    elif producer_active:
+        status, reason = "online", "go2rtc_media_active"
+    elif not preview_active:
+        status, reason = "standby", "no_active_media_probe"
+    elif missing_samples >= CAMERA_SIGNAL_OFFLINE_SAMPLES:
+        status, reason = "offline", "producer_without_media"
+    elif missing_samples >= 3:
+        status, reason = "reconnecting", "producer_reconnecting"
+    else:
+        status, reason = "connecting", "producer_start_grace"
+
+    if (
+        status == "online"
+        and previous_status == "offline"
+        and success_samples < CAMERA_SIGNAL_RECOVERY_SAMPLES
+    ):
+        status, reason = "reconnecting", "recovery_confirmation"
+
+    return {
+        "status": status,
+        "reason": reason,
+        "last_data_age_seconds": round(last_data_age, 1) if last_data_age is not None else None,
+        "preview_age_seconds": round(preview_age, 1) if preview_age is not None else None,
+    }
+
 # Configurações do Projeto
 PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
 GO2RTC_EXE = os.path.join(PROJ_DIR, "sistema", "go2rtc", "go2rtc.exe")
@@ -1260,11 +1343,21 @@ def build_operational_intelligence(snapshot):
         ]
         correlations = ["STREAM_NO_DATA em todas as cameras"]
     elif no_data_streams:
-        status = "attention"
+        isolated_stream_is_critical = any(
+            issue.get("code") == "STREAM_NO_DATA"
+            and issue.get("severity") == "critical"
+            and issue.get("stream") in no_data_streams
+            for issue in issues
+        )
+        status = "critical" if isolated_stream_is_critical else "attention"
         root_cause = "single_camera_path"
         confidence_score = 88
         names = ", ".join(sorted(stream.upper() for stream in no_data_streams))
-        headline = f"A camera {names} esta ativa, mas sem dados recentes."
+        headline = (
+            f"A camera {names} esta offline e sem dados."
+            if isolated_stream_is_critical
+            else f"A camera {names} esta ativa, mas sem dados recentes."
+        )
         explanation = "As outras cameras nao compartilham o sintoma, reduzindo a suspeita sobre o PC e o HD."
         actions = ["Verificar sinal, rede e alimentacao da camera afetada."]
         correlations = ["STREAM_NO_DATA isolado"]
@@ -1436,6 +1529,8 @@ class LiveCameraWidget(tk.Frame):
         self.target_width = 620  # Tamanho padrão, será ajustado dinamicamente
         self.current_error_msg = ""
         self.is_online = False
+        self.connectivity_status = "connecting"
+        self.last_frame_at = None
         
         # Botão de cabeçalho para expandir/recolher
         self.header_btn = tk.Button(
@@ -1554,11 +1649,25 @@ class LiveCameraWidget(tk.Frame):
             self.expand()
 
     def update_header_text(self):
-        status_badge = "  [🟢 ONLINE]" if self.is_online else "  [🔴 RECONECTANDO]"
+        if self.connectivity_status == "online":
+            status_badge = "  [🟢 ONLINE]"
+        elif self.connectivity_status == "offline":
+            status_badge = "  [🔴 OFFLINE]"
+        elif self.connectivity_status == "standby":
+            status_badge = "  [🟠 EM ESPERA]"
+        else:
+            status_badge = "  [🟠 RECONECTANDO]"
         if self.expanded:
             self.header_btn.configure(text=f" ▼️ RECOLHER: {self.stream_name.upper()}{status_badge}", bg="#111827")
         else:
             self.header_btn.configure(text=f" ▶️ CÂMERA: {self.stream_name.upper()}{status_badge}", bg="#161822")
+
+    def set_connectivity_status(self, status):
+        if status not in {"online", "connecting", "reconnecting", "offline", "standby"}:
+            status = "reconnecting"
+        self.connectivity_status = status
+        self.is_online = status == "online"
+        self.update_header_text()
 
     def expand(self):
         self.expanded = True
@@ -1569,7 +1678,6 @@ class LiveCameraWidget(tk.Frame):
 
     def collapse(self):
         self.expanded = False
-        self.is_online = False
         self.update_header_text()
         self.stop_stream()
         self.body_frame.pack_forget()
@@ -1759,12 +1867,15 @@ class LiveCameraWidget(tk.Frame):
             return
         self.current_error_msg = msg
         self.is_online = False
+        self.connectivity_status = "reconnecting"
         self.app.root.after(0, lambda: self.video_lbl.configure(image="", text=msg, fg=ORANGE_COLOR, font=("Segoe UI", 9, "bold"), compound="center"))
         self.app.root.after(0, self.update_header_text)
 
     def update_image(self, pil_image):
         self.current_error_msg = ""
         self.is_online = True
+        self.connectivity_status = "online"
+        self.last_frame_at = time.time()
         def apply_image():
             if not self.running:
                 return
@@ -1965,6 +2076,8 @@ class CameraManagerApp:
         self.recording_started_at = {}
         self.stream_bytes_written = {}
         self.stream_last_data_at = {}
+        self.camera_connectivity_states = {}
+        self.camera_signal_samples = {}
         self.alerted_duplicates = {} # Evita exibir alerta popup repetidamente
         
         # Cache de performance para evitar chamadas repetidas
@@ -3164,6 +3277,11 @@ class CameraManagerApp:
                 
                 c_grav_ok = self.check_process_recorder(lock_file, stream)
                 c_signal_str = self.check_rtsp_stream(go2rtc_ok, stream)
+                connectivity = self.evaluate_camera_connectivity(
+                    go2rtc_ok,
+                    stream,
+                    c_signal_str,
+                )
                 last_file_str = self.check_last_recording(gdrive_ok, gdrive_dir, stream)
                 
                 # Checa por erro de duplicidade nos logs se o gravador estiver parado
@@ -3182,6 +3300,7 @@ class CameraManagerApp:
                 cam_states[stream] = {
                     "grav_ok": c_grav_ok,
                     "signal": c_signal_str,
+                    "connectivity": connectivity,
                     "sync": last_file_str,
                     "duplicate_error": duplicate_msg is not None,
                     "web_status": web_status,
@@ -3849,6 +3968,10 @@ class CameraManagerApp:
                 "pending_backup_count": pending_backup["count"],
                 "pending_backup_gb": round(pending_backup["size_bytes"] / (1024 ** 3), 3),
                 "stream_data": stream_data_metrics,
+                "camera_connectivity": {
+                    stream: dict(state)
+                    for stream, state in getattr(self, "camera_connectivity_states", {}).items()
+                },
                 "resource_trend": resource_trend,
                 "go2rtc_restart_count": self.go2rtc_restart_count,
                 "kernel_144_reports_24h": kernel_reports.get("count_24h"),
@@ -4347,14 +4470,94 @@ class CameraManagerApp:
                 return "Erro API"
             if stream_name in data:
                 producers = data[stream_name].get("producers") or []
-                if producers:
+                if any(producer_has_media_evidence(producer) for producer in producers):
                     return "Sinal OK"
-                else:
+                elif producers:
                     return "Conectando..."
+                else:
+                    return "Sem produtor"
             else:
                 return "Não configurada"
         except Exception:
             return "Erro API"
+
+    def evaluate_camera_connectivity(self, go2rtc_ok, stream_name, signal_hint):
+        now = time.time()
+        previous = self.camera_connectivity_states.get(stream_name, {})
+        samples = self.camera_signal_samples.setdefault(
+            stream_name,
+            {"missing": 0, "success": 0},
+        )
+        recording_active = self.recording_active.get(stream_name, False)
+        last_data_at = self.stream_last_data_at.get(stream_name)
+        widget = getattr(self, "camera_widgets", {}).get(stream_name)
+        preview_last_frame_at = getattr(widget, "last_frame_at", None)
+        preview_active = bool(getattr(widget, "running", False))
+        recorder_fresh = (
+            last_data_at is not None
+            and now - last_data_at <= CAMERA_DATA_FRESH_SECONDS
+        )
+        preview_fresh = (
+            preview_last_frame_at is not None
+            and now - preview_last_frame_at <= CAMERA_DATA_FRESH_SECONDS
+        )
+        producer_active = "Sinal OK" in signal_hint
+        positive_sample = go2rtc_ok and (
+            recorder_fresh
+            or preview_fresh
+            or (not recording_active and producer_active)
+        )
+        observation_active = recording_active or preview_active or producer_active
+        if positive_sample:
+            samples["success"] += 1
+            samples["missing"] = 0
+        elif not observation_active:
+            samples["missing"] = 0
+            samples["success"] = 0
+        else:
+            samples["missing"] += 1
+            samples["success"] = 0
+
+        result = classify_camera_connectivity(
+            go2rtc_ok=go2rtc_ok,
+            producer_active=producer_active,
+            recording_active=recording_active,
+            recording_started_at=self.recording_started_at.get(stream_name),
+            last_data_at=last_data_at,
+            preview_last_frame_at=preview_last_frame_at,
+            preview_active=preview_active,
+            reconnect_failures=self.reconnect_failures.get(stream_name, 0),
+            missing_samples=samples["missing"],
+            success_samples=samples["success"],
+            previous_status=previous.get("status"),
+            now=now,
+        )
+        result.update({
+            "producer_active": producer_active,
+            "recording_active": recording_active,
+            "missing_samples": samples["missing"],
+            "success_samples": samples["success"],
+        })
+        self.camera_connectivity_states[stream_name] = result
+
+        previous_status = previous.get("status")
+        if previous_status and previous_status != result["status"]:
+            if result["status"] == "online":
+                self.add_log(
+                    f"[HEALTH][RECOVERY][CAMERA_ONLINE] {stream_name.upper()} voltou a entregar midia.",
+                    "tag_success",
+                )
+            elif result["status"] == "offline":
+                self.add_log(
+                    f"[HEALTH][CRITICAL][CAMERA_OFFLINE] {stream_name.upper()} ficou offline. Evidencia: {result['reason']}.",
+                    "tag_error",
+                )
+            else:
+                self.add_log(
+                    f"[HEALTH][WARNING][CAMERA_RECONNECTING] {stream_name.upper()} esta reconectando. Evidencia: {result['reason']}.",
+                    "tag_warn",
+                )
+        return result
 
     def check_live_stream_status(self, go2rtc_ok, stream_name):
         if not go2rtc_ok:
@@ -4524,12 +4727,31 @@ class CameraManagerApp:
                 self.configure_badge_label(self.hdr_pill_grav, "  NVR STATUS: PARADO  ", RED_COLOR)
                 
             # Pílula 2: Câmeras Online
-            online_count = sum(1 for state in cam_states.values() if "Sinal OK" in state.get("signal", ""))
+            def connectivity_status(state):
+                status = (state.get("connectivity") or {}).get("status")
+                if status:
+                    return status
+                if "Sinal OK" in state.get("signal", ""):
+                    return "online"
+                if "Conectando" in state.get("signal", ""):
+                    return "reconnecting"
+                return "offline"
+
+            online_count = sum(
+                1 for state in cam_states.values()
+                if connectivity_status(state) == "online"
+            )
+            standby_count = sum(
+                1 for state in cam_states.values()
+                if connectivity_status(state) == "standby"
+            )
             total_cams = len(self.streams)
             if online_count == total_cams:
                 self.configure_badge_label(self.hdr_pill_cams, f"  CÂMERAS: {online_count}/{total_cams} ONLINE  ", GREEN_COLOR)
             elif online_count > 0:
                 self.configure_badge_label(self.hdr_pill_cams, f"  CÂMERAS: {online_count}/{total_cams} ONLINE  ", ORANGE_COLOR)
+            elif standby_count == total_cams:
+                self.configure_badge_label(self.hdr_pill_cams, "  CÂMERAS: EM ESPERA  ", ORANGE_COLOR)
             else:
                 self.configure_badge_label(self.hdr_pill_cams, f"  CÂMERAS: {online_count}/{total_cams} ONLINE  ", RED_COLOR)
                 
@@ -4601,16 +4823,23 @@ class CameraManagerApp:
             for stream, state in cam_states.items():
                 if stream in self.camera_cards:
                     card = self.camera_cards[stream]
+                    camera_status = connectivity_status(state)
+                    widget = getattr(self, "camera_widgets", {}).get(stream)
+                    if widget is not None:
+                        widget.set_connectivity_status(camera_status)
                     
                     # Sinal
-                    if "Sinal OK" in state["signal"]:
+                    if camera_status == "online":
                         self.configure_badge_label(card["lbl_sinal"], "SINAL OK", GREEN_COLOR)
                         card["led_sinal"].set_status(GREEN_COLOR, "#065F46")
-                    elif "Conectando" in state["signal"]:
-                        self.configure_badge_label(card["lbl_sinal"], "CONECTANDO...", ORANGE_COLOR)
+                    elif camera_status in {"connecting", "reconnecting"}:
+                        self.configure_badge_label(card["lbl_sinal"], "RECONECTANDO...", ORANGE_COLOR)
+                        card["led_sinal"].set_status(ORANGE_COLOR, "#78350F")
+                    elif camera_status == "standby":
+                        self.configure_badge_label(card["lbl_sinal"], "EM ESPERA", ORANGE_COLOR)
                         card["led_sinal"].set_status(ORANGE_COLOR, "#78350F")
                     else:
-                        self.configure_badge_label(card["lbl_sinal"], "SEM SINAL", RED_COLOR)
+                        self.configure_badge_label(card["lbl_sinal"], "OFFLINE", RED_COLOR)
                         card["led_sinal"].set_status(RED_COLOR, "#991B1B")
                         
                     # Gravação
@@ -5253,6 +5482,14 @@ class CameraManagerApp:
             fim = dt.replace(minute=minuto_fim, second=0, microsecond=0)
         return inicio, fim
 
+    def wait_for_recording_retry(self, stream_name, seconds=2.0):
+        deadline = time.monotonic() + max(0.0, seconds)
+        while time.monotonic() < deadline:
+            if not self.recording_active.get(stream_name, False):
+                return False
+            time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+        return self.recording_active.get(stream_name, False)
+
     def gravar_bloco_cam(self, stream_name, pasta_final, gdrive_dir, escrever_log_cam):
         agora = datetime.now()
         inicio_bloco, fim_bloco = self.obter_faixa_horario(agora)
@@ -5308,16 +5545,19 @@ class CameraManagerApp:
                         status_ret = "duplicado"
                         break
                     
-                    if not self.atualizar_heartbeat_cam(gdrive_dir, stream_name):
-                        escrever_log_cam("[ERRO_DUPLICADO] A trava de gravacao foi assumida por outro processo.")
-                        status_ret = "duplicado"
-                        break
-                    last_heartbeat_time = time.time()
-                    
+                    now_ts = time.time()
+                    if now_ts - last_heartbeat_time >= 30:
+                        if not self.atualizar_heartbeat_cam(gdrive_dir, stream_name):
+                            escrever_log_cam("[ERRO_DUPLICADO] A trava de gravacao foi assumida por outro processo.")
+                            status_ret = "duplicado"
+                            break
+                        last_heartbeat_time = now_ts
+
                     try:
                         req = urllib.request.Request(url)
                         response = urllib.request.urlopen(req, timeout=8)
                         self.active_connections[stream_name] = response
+                        received_data_this_connection = False
                         
                         last_read_time = time.time()
                         
@@ -5361,6 +5601,7 @@ class CameraManagerApp:
                                 if not chunk:
                                     break
                                 out_file.write(chunk)
+                                received_data_this_connection = True
                                 last_read_time = time.time()
                                 self.stream_bytes_written[stream_name] = (
                                     self.stream_bytes_written.get(stream_name, 0) + len(chunk)
@@ -5381,7 +5622,9 @@ class CameraManagerApp:
                         response.close()
                     except Exception:
                         # Em caso de erro de conexão, aguarda 2 segundos antes do retry
-                        time.sleep(2.0)
+                        if not self.wait_for_recording_retry(stream_name):
+                            status_ret = "parar"
+                            break
                         continue
                     finally:
                         self.active_connections.pop(stream_name, None)
@@ -5393,6 +5636,10 @@ class CameraManagerApp:
                         "reconectar_storage",
                     ):
                         break
+                    if not received_data_this_connection:
+                        if not self.wait_for_recording_retry(stream_name):
+                            status_ret = "parar"
+                            break
                         
                 if datetime.now() >= fim_bloco:
                     status_ret = "rotacionar"
