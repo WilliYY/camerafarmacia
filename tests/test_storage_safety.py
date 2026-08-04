@@ -178,6 +178,123 @@ class StorageSafetyTests(unittest.TestCase):
         self.assertEqual(result["status"], "standby")
         self.assertEqual(result["reason"], "no_active_media_probe")
 
+    def test_recording_overview_requires_recent_camera_data(self):
+        cam_states = {
+            "cam_ok": {
+                "grav_ok": True,
+                "connectivity": {"status": "online"},
+            },
+            "cam_offline": {
+                "grav_ok": True,
+                "connectivity": {"status": "offline"},
+            },
+        }
+
+        overview = self.module.summarize_recording_coverage(cam_states)
+        offline_badge = self.module.camera_recording_display(cam_states["cam_offline"])
+
+        self.assertEqual(overview["active_count"], 2)
+        self.assertEqual(overview["verified_count"], 1)
+        self.assertEqual(overview["level"], "warning")
+        self.assertEqual(overview["label"], "NVR: GRAVANDO 1/2")
+        self.assertEqual(offline_badge, ("SEM DADOS", "error"))
+
+    def test_recording_overview_distinguishes_stopped_and_fully_healthy(self):
+        stopped = self.module.summarize_recording_coverage({
+            "cam": {"grav_ok": False, "connectivity": {"status": "standby"}},
+        })
+        healthy = self.module.summarize_recording_coverage({
+            "cam": {"grav_ok": True, "connectivity": {"status": "online"}},
+        })
+
+        self.assertEqual((stopped["label"], stopped["level"]), ("NVR STATUS: PARADO", "error"))
+        self.assertEqual((healthy["label"], healthy["level"]), ("NVR: GRAVANDO 1/1", "ok"))
+
+    def test_active_offline_camera_becomes_health_issue(self):
+        issues = self.module.active_camera_connectivity_issues(
+            ["cam_offline", "cam_online"],
+            {
+                "cam_offline": {"status": "offline", "reason": "recording_without_data"},
+                "cam_online": {"status": "online", "reason": "recording_data_recent"},
+            },
+        )
+
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0]["code"], "CAMERA_OFFLINE")
+        self.assertEqual(issues[0]["severity"], "critical")
+        self.assertEqual(issues[0]["stream"], "cam_offline")
+        self.assertIn("recording_without_data", issues[0]["evidence"])
+
+    def test_camera_transition_invalidates_cached_health_assessment(self):
+        app = self.new_app()
+        app.camera_connectivity_states = {"cam": {"status": "reconnecting"}}
+        app.camera_signal_samples = {"cam": {"missing": 9, "success": 0}}
+        app.recording_active = {"cam": True}
+        app.stream_last_data_at = {}
+        app.recording_started_at = {"cam": time.time() - 120}
+        app.reconnect_failures = {"cam": 3}
+        app.camera_widgets = {}
+        app._last_health_check = time.time()
+        app.add_log = lambda *_args, **_kwargs: None
+
+        result = app.evaluate_camera_connectivity(True, "cam", "Conectando...")
+
+        self.assertEqual(result["status"], "offline")
+        self.assertEqual(app._last_health_check, 0.0)
+
+    def test_last_recording_scan_is_cached_per_camera_path(self):
+        app = self.new_app()
+        app._last_recording_cache = {}
+        scan_calls = []
+
+        with tempfile.TemporaryDirectory() as first_dir, tempfile.TemporaryDirectory() as second_dir:
+            def fake_scan(read_path):
+                scan_calls.append(read_path)
+                return os.path.join(read_path, "camera_2026-08-04.ts"), time.time()
+
+            app.scan_latest_recording = fake_scan
+            first = app.check_last_recording(True, first_dir, "cam")
+            second = app.check_last_recording(True, first_dir, "cam")
+            app.check_last_recording(True, second_dir, "cam")
+
+        self.assertEqual(first, second)
+        self.assertIn("camera_2026-08-04.ts", first)
+        self.assertEqual(len(scan_calls), 2)
+
+    def test_log_tail_reader_is_bounded_to_recent_content(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "camera.log"
+            log_path.write_text(
+                "[ERRO_DUPLICADO] antigo\n" + ("linha comum\n" * 3000),
+                encoding="utf-8",
+            )
+
+            recent_lines = self.module.read_log_tail_lines(log_path, max_bytes=4096)
+            self.assertFalse(any("[ERRO_DUPLICADO]" in line for line in recent_lines))
+
+            with log_path.open("a", encoding="utf-8") as log_file:
+                log_file.write("[ERRO_DUPLICADO] recente\n")
+
+            recent_lines = self.module.read_log_tail_lines(log_path, max_bytes=4096)
+            self.assertTrue(any("[ERRO_DUPLICADO] recente" in line for line in recent_lines))
+
+    def test_log_dedup_state_is_bounded(self):
+        last_logged = {f"msg-{index}": float(index) for index in range(700)}
+        suppressed = {key: 1 for key in last_logged}
+
+        self.module.prune_log_dedup_state(
+            last_logged,
+            suppressed,
+            now=10_000.0,
+            max_entries=500,
+            max_age_seconds=20_000.0,
+        )
+
+        self.assertEqual(len(last_logged), 500)
+        self.assertEqual(set(suppressed), set(last_logged))
+        self.assertNotIn("msg-0", last_logged)
+        self.assertIn("msg-699", last_logged)
+
     def test_rtsp_signal_rejects_configured_but_inactive_producer(self):
         app = self.new_app()
         app.get_cached_streams_data = lambda: {

@@ -725,6 +725,118 @@ def classify_camera_connectivity(
         "preview_age_seconds": round(preview_age, 1) if preview_age is not None else None,
     }
 
+
+def camera_connectivity_status_from_state(state):
+    status = (state.get("connectivity") or {}).get("status")
+    if status:
+        return status
+    signal = state.get("signal", "")
+    if "Sinal OK" in signal:
+        return "online"
+    if "Conectando" in signal:
+        return "reconnecting"
+    return "offline"
+
+
+def summarize_recording_coverage(cam_states):
+    states = list(cam_states.values())
+    total = len(states)
+    active_count = sum(1 for state in states if state.get("grav_ok"))
+    verified_count = sum(
+        1 for state in states
+        if state.get("grav_ok") and camera_connectivity_status_from_state(state) == "online"
+    )
+
+    if active_count == 0:
+        label, level = "NVR STATUS: PARADO", "error"
+    elif total > 0 and verified_count == total:
+        label, level = f"NVR: GRAVANDO {verified_count}/{total}", "ok"
+    elif verified_count > 0:
+        label, level = f"NVR: GRAVANDO {verified_count}/{total}", "warning"
+    else:
+        label, level = f"NVR: SEM DADOS 0/{total}", "error"
+
+    return {
+        "label": label,
+        "level": level,
+        "active_count": active_count,
+        "verified_count": verified_count,
+        "total": total,
+    }
+
+
+def camera_recording_display(state):
+    if not state.get("grav_ok"):
+        if state.get("duplicate_error"):
+            return "DUPLICADO (AVISO)", "warning"
+        return "PARADO", "error"
+
+    status = camera_connectivity_status_from_state(state)
+    if status == "online":
+        return "GRAVANDO", "ok"
+    if status == "connecting":
+        return "CONECTANDO", "warning"
+    if status == "reconnecting":
+        return "RECONECTANDO", "warning"
+    if status == "standby":
+        return "AGUARDANDO DADOS", "warning"
+    return "SEM DADOS", "error"
+
+
+def active_camera_connectivity_issues(active_streams, connectivity_states):
+    issues = []
+    for stream in active_streams:
+        state = connectivity_states.get(stream) or {}
+        if state.get("status") != "offline":
+            continue
+        reason = state.get("reason") or "sem evidencia detalhada"
+        issues.append({
+            "code": "CAMERA_OFFLINE",
+            "severity": "critical",
+            "summary": f"A camera {stream.upper()} esta ativa, mas ficou offline.",
+            "evidence": f"Estado de conectividade: {reason}.",
+            "action": "Verificar energia, rede e disponibilidade da camera sem interromper as demais gravacoes.",
+            "stream": stream,
+        })
+    return issues
+
+
+def read_log_tail_lines(log_file_path, max_bytes=16 * 1024):
+    max_bytes = max(1024, int(max_bytes))
+    with open(log_file_path, "rb") as log_file:
+        log_file.seek(0, os.SEEK_END)
+        file_size = log_file.tell()
+        start = max(0, file_size - max_bytes)
+        log_file.seek(start)
+        data = log_file.read(max_bytes)
+
+    if start:
+        newline_pos = data.find(b"\n")
+        data = data[newline_pos + 1:] if newline_pos >= 0 else b""
+    return data.decode("utf-8", errors="replace").splitlines()
+
+
+def prune_log_dedup_state(last_logged, suppressed_counts, now, max_entries=500, max_age_seconds=7200):
+    if len(last_logged) <= max_entries:
+        return
+
+    cutoff = now - max_age_seconds
+    for key, timestamp in list(last_logged.items()):
+        if timestamp < cutoff:
+            last_logged.pop(key, None)
+            suppressed_counts.pop(key, None)
+
+    overflow = len(last_logged) - max_entries
+    if overflow > 0:
+        oldest_keys = sorted(last_logged, key=last_logged.get)[:overflow]
+        for key in oldest_keys:
+            last_logged.pop(key, None)
+            suppressed_counts.pop(key, None)
+
+    for key in list(suppressed_counts):
+        if key not in last_logged:
+            suppressed_counts.pop(key, None)
+
 # Configurações do Projeto
 PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
 GO2RTC_EXE = os.path.join(PROJ_DIR, "sistema", "go2rtc", "go2rtc.exe")
@@ -2085,6 +2197,7 @@ class CameraManagerApp:
         self._cached_streams_time = 0
         self._cached_backup_stats = (0, 0)
         self._cached_backup_time = 0
+        self._last_recording_cache = {}
         
         self.streams = [s for s in self.parse_streams() if not s.endswith("_live") and not s.endswith("_mjpeg")]
         self.local_ip = self.get_local_ip()
@@ -2711,6 +2824,7 @@ class CameraManagerApp:
             
             # Salva referências para atualização
             self.camera_cards[stream] = {
+                "accent_bar": accent_bar,
                 "led_sinal": led_sinal,
                 "lbl_sinal": lbl_sinal,
                 "led_grav": led_grav,
@@ -3157,6 +3271,7 @@ class CameraManagerApp:
             suppressed = self._suppressed_counts.get(msg_key, 0)
             self._last_logged_msgs[msg_key] = now
             self._suppressed_counts[msg_key] = 0
+            prune_log_dedup_state(self._last_logged_msgs, self._suppressed_counts, now)
 
             if suppressed:
                 summary = f"[DEDUPLICACAO] A mensagem anterior se repetiu {suppressed} vezes nos ultimos 2 minutos."
@@ -3790,6 +3905,19 @@ class CameraManagerApp:
         block_minutes = CONFIG.get("bloco_minutos", 30)
         stale_after = max(20 * 60, (block_minutes * 60) + (15 * 60))
         stream_data_metrics = {}
+        connectivity_issues = active_camera_connectivity_issues(
+            active_streams,
+            getattr(self, "camera_connectivity_states", {}),
+        )
+        for issue in connectivity_issues:
+            issues.append(self.make_health_issue(
+                issue["code"],
+                issue["severity"],
+                issue["summary"],
+                issue["evidence"],
+                issue["action"],
+                issue["stream"],
+            ))
         for index, stream in enumerate(self.streams):
             if not self.recording_active.get(stream, False):
                 continue
@@ -4542,6 +4670,7 @@ class CameraManagerApp:
 
         previous_status = previous.get("status")
         if previous_status and previous_status != result["status"]:
+            self._last_health_check = 0.0
             if result["status"] == "online":
                 self.add_log(
                     f"[HEALTH][RECOVERY][CAMERA_ONLINE] {stream_name.upper()} voltou a entregar midia.",
@@ -4599,6 +4728,23 @@ class CameraManagerApp:
         except Exception:
             return "Erro API", RED_COLOR, "#991B1B"
 
+    def scan_latest_recording(self, read_path):
+        last_file = None
+        last_mtime = None
+        for root_dir, _, files in os.walk(read_path):
+            for filename in files:
+                if not filename.lower().endswith((".mp4", ".ts")):
+                    continue
+                filepath = os.path.join(root_dir, filename)
+                try:
+                    mtime = os.path.getmtime(filepath)
+                except OSError:
+                    continue
+                if last_mtime is None or mtime > last_mtime:
+                    last_file = filepath
+                    last_mtime = mtime
+        return last_file, last_mtime
+
     def check_last_recording(self, gdrive_ok, gdrive_path, stream_name):
         read_path = gdrive_path
         if not gdrive_ok or not os.path.exists(gdrive_path):
@@ -4608,17 +4754,32 @@ class CameraManagerApp:
             return "Nenhuma gravação encontrada."
             
         try:
-            mp4_files = []
-            for root_dir, _, files in os.walk(read_path):
-                for f in files:
-                    if f.endswith((".mp4", ".ts")):
-                        mp4_files.append(os.path.join(root_dir, f))
-                        
-            if not mp4_files:
+            now_monotonic = time.monotonic()
+            cache = getattr(self, "_last_recording_cache", None)
+            if cache is None:
+                cache = {}
+                self._last_recording_cache = cache
+            normalized_path = os.path.normcase(os.path.abspath(read_path))
+            cached = cache.get(stream_name)
+            if (
+                cached
+                and cached.get("read_path") == normalized_path
+                and now_monotonic - cached.get("checked_at", 0) < 30
+            ):
+                last_file = cached.get("last_file")
+                mtime = cached.get("mtime")
+            else:
+                last_file, mtime = self.scan_latest_recording(read_path)
+                cache[stream_name] = {
+                    "read_path": normalized_path,
+                    "checked_at": now_monotonic,
+                    "last_file": last_file,
+                    "mtime": mtime,
+                }
+
+            if not last_file or mtime is None:
                 return "Sem gravações nesta pasta."
-                
-            last_file = max(mp4_files, key=os.path.getmtime)
-            mtime = os.path.getmtime(last_file)
+
             mtime_dt = datetime.fromtimestamp(mtime)
             delta = datetime.now() - mtime_dt
             
@@ -4639,8 +4800,7 @@ class CameraManagerApp:
         if not os.path.exists(log_file_path):
             return None
         try:
-            with open(log_file_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
+            lines = read_log_tail_lines(log_file_path)
             if lines:
                 for line in lines[-5:]:
                     if "[ERRO_DUPLICADO]" in line:
@@ -4708,6 +4868,8 @@ class CameraManagerApp:
             text=intelligence.get("headline", "Analise indisponivel."),
             fg=color if status != "stable" else TEXT_COLOR,
         )
+        if hasattr(self, "intelligence_band"):
+            self.intelligence_band.configure(highlightbackground=color)
         actions = intelligence.get("priority_actions") or []
         action = actions[0] if actions else "Revisar o diagnostico detalhado."
         self.lbl_intelligence_action.configure(text=f"Acao: {action}")
@@ -4717,33 +4879,30 @@ class CameraManagerApp:
             if self.silent:
                 return
                 
-            any_recording = any(state["grav_ok"] for state in cam_states.values())
+            recording_overview = summarize_recording_coverage(cam_states)
+            any_recording = recording_overview["active_count"] > 0
+            level_colors = {
+                "ok": GREEN_COLOR,
+                "warning": ORANGE_COLOR,
+                "error": RED_COLOR,
+            }
 
             # 0.5. Atualiza o cabeçalho dinâmico do topo (Top Status Header)
             # Pílula 1: Gravação
-            if any_recording:
-                self.configure_badge_label(self.hdr_pill_grav, "  NVR STATUS: GRAVANDO  ", GREEN_COLOR)
-            else:
-                self.configure_badge_label(self.hdr_pill_grav, "  NVR STATUS: PARADO  ", RED_COLOR)
+            self.configure_badge_label(
+                self.hdr_pill_grav,
+                recording_overview["label"],
+                level_colors[recording_overview["level"]],
+            )
                 
             # Pílula 2: Câmeras Online
-            def connectivity_status(state):
-                status = (state.get("connectivity") or {}).get("status")
-                if status:
-                    return status
-                if "Sinal OK" in state.get("signal", ""):
-                    return "online"
-                if "Conectando" in state.get("signal", ""):
-                    return "reconnecting"
-                return "offline"
-
             online_count = sum(
                 1 for state in cam_states.values()
-                if connectivity_status(state) == "online"
+                if camera_connectivity_status_from_state(state) == "online"
             )
             standby_count = sum(
                 1 for state in cam_states.values()
-                if connectivity_status(state) == "standby"
+                if camera_connectivity_status_from_state(state) == "standby"
             )
             total_cams = len(self.streams)
             if online_count == total_cams:
@@ -4823,7 +4982,15 @@ class CameraManagerApp:
             for stream, state in cam_states.items():
                 if stream in self.camera_cards:
                     card = self.camera_cards[stream]
-                    camera_status = connectivity_status(state)
+                    camera_status = camera_connectivity_status_from_state(state)
+                    camera_color = {
+                        "online": GREEN_COLOR,
+                        "connecting": ORANGE_COLOR,
+                        "reconnecting": ORANGE_COLOR,
+                        "standby": ORANGE_COLOR,
+                    }.get(camera_status, RED_COLOR)
+                    if "accent_bar" in card:
+                        card["accent_bar"].configure(bg=camera_color)
                     widget = getattr(self, "camera_widgets", {}).get(stream)
                     if widget is not None:
                         widget.set_connectivity_status(camera_status)
@@ -4832,8 +4999,11 @@ class CameraManagerApp:
                     if camera_status == "online":
                         self.configure_badge_label(card["lbl_sinal"], "SINAL OK", GREEN_COLOR)
                         card["led_sinal"].set_status(GREEN_COLOR, "#065F46")
-                    elif camera_status in {"connecting", "reconnecting"}:
-                        self.configure_badge_label(card["lbl_sinal"], "RECONECTANDO...", ORANGE_COLOR)
+                    elif camera_status == "connecting":
+                        self.configure_badge_label(card["lbl_sinal"], "CONECTANDO", ORANGE_COLOR)
+                        card["led_sinal"].set_status(ORANGE_COLOR, "#78350F")
+                    elif camera_status == "reconnecting":
+                        self.configure_badge_label(card["lbl_sinal"], "RECONECTANDO", ORANGE_COLOR)
                         card["led_sinal"].set_status(ORANGE_COLOR, "#78350F")
                     elif camera_status == "standby":
                         self.configure_badge_label(card["lbl_sinal"], "EM ESPERA", ORANGE_COLOR)
@@ -4843,20 +5013,30 @@ class CameraManagerApp:
                         card["led_sinal"].set_status(RED_COLOR, "#991B1B")
                         
                     # Gravação
-                    if state["grav_ok"]:
-                        self.configure_badge_label(card["lbl_grav"], "GRAVANDO", GREEN_COLOR)
-                        card["led_grav"].set_status(GREEN_COLOR, "#065F46")
-                    elif state["duplicate_error"]:
-                        self.configure_badge_label(card["lbl_grav"], "DUPLICADO (AVISO)", ORANGE_COLOR)
-                        card["led_grav"].set_status(ORANGE_COLOR, "#78350F")
-                    else:
-                        self.configure_badge_label(card["lbl_grav"], "PARADO", RED_COLOR)
-                        card["led_grav"].set_status(RED_COLOR, "#991B1B")
+                    recording_text, recording_level = camera_recording_display(state)
+                    recording_color = level_colors[recording_level]
+                    recording_border = {
+                        "ok": "#065F46",
+                        "warning": "#78350F",
+                        "error": "#991B1B",
+                    }[recording_level]
+                    self.configure_badge_label(card["lbl_grav"], recording_text, recording_color)
+                    card["led_grav"].set_status(recording_color, recording_border)
                         
                     # Web Stream
                     if "led_web" in card and "lbl_web" in card:
-                        self.configure_badge_label(card["lbl_web"], state["web_status"], state["web_color"])
-                        card["led_web"].set_status(state["web_color"], state["web_border"])
+                        if camera_status == "online":
+                            web_text = state["web_status"]
+                            web_color = state["web_color"]
+                            web_border = state["web_border"]
+                        elif camera_status in {"connecting", "reconnecting"}:
+                            web_text, web_color, web_border = "AGUARDANDO", ORANGE_COLOR, "#78350F"
+                        elif camera_status == "standby":
+                            web_text, web_color, web_border = "EM ESPERA", ORANGE_COLOR, "#78350F"
+                        else:
+                            web_text, web_color, web_border = "INDISPONÍVEL", RED_COLOR, "#991B1B"
+                        self.configure_badge_label(card["lbl_web"], web_text, web_color)
+                        card["led_web"].set_status(web_color, web_border)
                         
                     card["lbl_sync"].configure(text=state["sync"])
 

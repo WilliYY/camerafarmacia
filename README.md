@@ -183,6 +183,19 @@ As mesmas evidencias ficam em `metrics.camera_connectivity` no snapshot JSON.
 Uma conexao encerrada sem entregar midia aguarda antes de tentar novamente, e o
 heartbeat do gravador continua limitado a uma renovacao a cada 30 segundos.
 
+O cabecalho e os cards distinguem uma thread de gravacao ativa de uma camera que
+realmente entrega midia. `GRAVANDO` verde exige dados recentes; uma thread sem
+bytes aparece como `CONECTANDO`, `RECONECTANDO` ou `SEM DADOS`, e a transmissao
+nao permanece verde quando a camera esta offline. A faixa lateral do card e o
+contorno da analise seguem a mesma gravidade para facilitar a leitura rapida.
+Uma transicao para `OFFLINE` invalida a coleta de saude anterior, registra
+`CAMERA_OFFLINE` no snapshot e atualiza a analise sem aguardar o ciclo normal.
+
+Para operacao continua, a busca da ultima gravacao e armazenada em cache por 30
+segundos para cada camera e caminho. O verificador percorre os arquivos sem criar
+uma lista completa em memoria. A deteccao de erro duplicado le somente os 16 KiB
+finais do log, e o estado interno de deduplicacao fica limitado a 500 mensagens.
+
 Sobre esses sinais existe uma inteligencia operacional local. Ela nao usa API
 externa e nao envia imagens, credenciais ou logs para a internet. A cada coleta,
 ela correlaciona sintomas e informa:
