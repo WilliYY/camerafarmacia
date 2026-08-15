@@ -240,8 +240,40 @@ class NvrHealthBridge:
         }
 
 
-def build_dashboard_payload(bridge, panel_url="http://127.0.0.1:8765"):
+def build_dashboard_payload(
+    bridge,
+    panel_url="http://127.0.0.1:8765",
+    network=None,
+):
     nvr = bridge.read()
+    if not isinstance(network, dict) or network.get("schema_version") != SCHEMA_VERSION:
+        network = {
+            "schema_version": SCHEMA_VERSION,
+            "state": "not_configured",
+            "reason": "network_collector_not_configured",
+            "coverage": "none",
+            "can_observe_store_traffic": False,
+            "collected_at": None,
+            "interfaces": [],
+            "connectivity": {
+                "active_interface_count": 0,
+                "default_gateway_configured": False,
+                "dns_configured": False,
+            },
+        }
+    network_state = network.get("state")
+    if network_state == "active":
+        network_module_status = "limited"
+        network_detail = "Rede deste PC visivel; DNS e flows da loja nao configurados"
+    elif network_state == "unsupported":
+        network_module_status = "not_configured"
+        network_detail = "Diagnostico local requer Windows"
+    elif network_state == "not_configured":
+        network_module_status = "not_configured"
+        network_detail = "Conector somente leitura nao configurado"
+    else:
+        network_module_status = "unavailable"
+        network_detail = "Diagnostico local da rede indisponivel"
     modules = [
         {
             "id": "nvr",
@@ -270,8 +302,8 @@ def build_dashboard_payload(bridge, panel_url="http://127.0.0.1:8765"):
         {
             "id": "network",
             "label": "Rede",
-            "status": "not_configured",
-            "detail": "Conector somente leitura nao configurado",
+            "status": network_module_status,
+            "detail": network_detail,
         },
         {
             "id": "reports",
@@ -291,6 +323,7 @@ def build_dashboard_payload(bridge, panel_url="http://127.0.0.1:8765"):
             "mode": "local_read_only",
         },
         "nvr": nvr,
+        "network": network,
         "modules": modules,
         "links": {
             "panel": panel_url,

@@ -211,6 +211,90 @@ function renderPendingModule(moduleId, title, body) {
   content.append(empty);
 }
 
+function formatAddresses(values) {
+  return Array.isArray(values) && values.length ? values.join(", ") : "Não configurado";
+}
+
+function renderNetwork() {
+  const network = state.overview.network;
+  if (!network || network.state !== "active") {
+    renderPendingModule(
+      "network",
+      "Diagnóstico de rede indisponível",
+      "O painel não recebeu uma configuração válida dos adaptadores deste computador.",
+    );
+    return;
+  }
+
+  const connectivity = network.connectivity || {};
+  const interfaces = network.interfaces || [];
+  const band = element("section", "summary-band");
+  const main = element("div", "summary-main limited");
+  main.append(element("h2", "", "Cobertura deste computador"));
+  main.append(
+    element(
+      "p",
+      "",
+      "Adaptadores, rota padrão e DNS são lidos do Windows. Tráfego dos demais dispositivos da loja não é observado por este coletor.",
+    ),
+  );
+  const meta = element("div", "summary-meta");
+  const list = element("dl");
+  [
+    ["Estado", "Conectado"],
+    ["Cobertura", "Somente este PC"],
+    ["Coleta", formatDate(network.collected_at)],
+  ].forEach(([key, value]) => {
+    const row = element("div");
+    row.append(element("dt", "", key), element("dd", "", value));
+    list.append(row);
+  });
+  meta.append(list);
+  band.append(main, meta);
+
+  const metrics = element("section", "metric-grid");
+  metrics.append(
+    renderMetric("Interfaces ativas", formatNumber(connectivity.active_interface_count), "Configuração do Windows"),
+    renderMetric("Gateway padrão", connectivity.default_gateway_configured ? "Configurado" : "Ausente", "Rota local"),
+    renderMetric("Servidores DNS", connectivity.dns_configured ? "Configurados" : "Ausentes", "Sem captura de consultas"),
+    renderMetric("Tráfego da loja", network.can_observe_store_traffic ? "Disponível" : "Não observado", "Exige fonte externa"),
+  );
+
+  const section = element("section", "section-block");
+  const heading = element("div", "section-heading");
+  heading.append(element("h2", "", "Interfaces do Windows"), element("p", "", `${interfaces.length} ativa(s)`));
+  const table = element("table", "data-table");
+  const thead = element("thead");
+  const header = element("tr");
+  ["Interface", "Link", "IPv4", "Gateway", "DNS"].forEach((label) => header.append(element("th", "", label)));
+  thead.append(header);
+  const tbody = element("tbody");
+  interfaces.forEach((networkInterface) => {
+    const row = element("tr");
+    row.append(
+      element("td", "", networkInterface.alias),
+      element("td", "", networkInterface.link_speed || "Sem dado"),
+      element("td", "", formatAddresses(networkInterface.ipv4)),
+      element("td", "", formatAddresses(networkInterface.gateways)),
+      element("td", "", formatAddresses(networkInterface.dns_servers)),
+    );
+    tbody.append(row);
+  });
+  table.append(thead, tbody);
+  section.append(heading, table);
+
+  const boundary = element("section", "network-boundary");
+  boundary.append(element("strong", "", "Limite de visibilidade"));
+  boundary.append(
+    element(
+      "p",
+      "",
+      "Para indicadores da rede inteira será necessária uma fonte autorizada no gateway, como DNS agregado ou NetFlow/IPFIX. O painel não captura mensagens, senhas, páginas ou pacotes.",
+    ),
+  );
+  content.append(band, metrics, section, boundary);
+}
+
 function renderTimeline() {
   const issues = currentSnapshot()?.issues || [];
   if (!issues.length) {
@@ -260,7 +344,7 @@ function render() {
   if (state.route === "cameras") renderCameras();
   if (state.route === "analytics") renderAnalytics();
   if (state.route === "computers") renderPendingModule("computers", "Computadores não configurados", "O agente Windows ainda não foi instalado. Nenhum aplicativo, janela, tecla ou conteúdo está sendo coletado.");
-  if (state.route === "network") renderPendingModule("network", "Rede não configurada", "O conector de DNS e flows permanece desativado. O Analytics não altera firewall, DNS, QoS ou tráfego da farmácia.");
+  if (state.route === "network") renderNetwork();
   if (state.route === "timeline") renderTimeline();
   if (state.route === "reports") renderPendingModule("reports", "Relatórios aguardando dados", "Relatórios serão habilitados quando as fontes operacionais validadas produzirem eventos suficientes.");
   if (state.route === "system") renderSystem();

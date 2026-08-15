@@ -85,8 +85,11 @@ Analytics, Computadores, Rede, Timeline, Relatorios e Sistema.
 Nesta primeira fundacao funcional, o servico e somente leitura: consome uma
 versao filtrada de `sistema/logs/health_status.json`, nao importa o
 `gerenciador.pyw`, nao controla gravacoes e nao escreve no HD de videos. Visao
-computacional, agente Windows e conector de rede aparecem como nao configurados
-ate passarem por instalacao e validacao proprias.
+computacional e agente Windows aparecem como nao configurados ate passarem por
+instalacao e validacao proprias. A rota Rede mostra somente a configuracao local
+do PC (interface ativa, IPv4, gateway e DNS); ela nao captura pacotes nem afirma
+enxergar o trafego da loja. Cobertura completa depende de uma fonte autorizada
+no gateway, como DNS agregado ou NetFlow/IPFIX.
 
 ---
 

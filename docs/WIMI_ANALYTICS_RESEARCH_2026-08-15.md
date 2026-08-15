@@ -8,9 +8,12 @@ do snapshot de saude, sessao de navegador, supervisor single-instance, botao no
 Tkinter e dashboard com todas as rotas planejadas. O detalhe executavel esta em
 `docs/WIMI_ANALYTICS_IMPLEMENTATION_2026-08-15.md`.
 
-Essa entrega nao ativa detector, tracking, agente Windows, DNS, flows, banco ou
-score de produtividade. Esses componentes permanecem explicitamente marcados
-como nao configurados ate as etapas de benchmark, governanca e teste real.
+Essa entrega nao ativa detector, tracking, agente Windows, DNS/flows da loja,
+banco ou score de produtividade. O painel possui apenas diagnostico local e
+somente leitura da interface, IPv4, gateway e DNS configurado neste PC, sem
+varredura ou captura de trafego. Os demais componentes permanecem explicitamente
+marcados como nao configurados ate as etapas de benchmark, governanca e teste
+real.
 
 Data da pesquisa: 15/08/2026
 

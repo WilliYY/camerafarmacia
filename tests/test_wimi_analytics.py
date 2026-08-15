@@ -2,6 +2,7 @@ import json
 import http.client
 import os
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -25,6 +26,7 @@ from wimi_analytics.launcher import (
     probe_server,
     stop_owned_server,
 )
+from wimi_analytics.network_diagnostics import WindowsNetworkDiagnostics
 
 
 class NvrHealthBridgeTests(unittest.TestCase):
@@ -195,6 +197,162 @@ class DashboardPayloadTests(unittest.TestCase):
         self.assertEqual(modules["reports"]["status"], "waiting_for_data")
         self.assertNotIn("productivity_score", json.dumps(payload))
 
+    def test_network_module_reports_limited_host_coverage_without_claiming_store_traffic(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bridge = NvrHealthBridge(Path(temp_dir) / "missing.json")
+            payload = build_dashboard_payload(
+                bridge,
+                network={
+                    "schema_version": 1,
+                    "state": "active",
+                    "coverage": "host_configuration_only",
+                    "can_observe_store_traffic": False,
+                    "reason": "host_network_detected",
+                    "collected_at": datetime.now().isoformat(timespec="seconds"),
+                    "interfaces": [],
+                    "connectivity": {
+                        "active_interface_count": 0,
+                        "default_gateway_configured": False,
+                        "dns_configured": False,
+                    },
+                },
+            )
+
+        modules = {module["id"]: module for module in payload["modules"]}
+        self.assertEqual(modules["network"]["status"], "limited")
+        self.assertFalse(payload["network"]["can_observe_store_traffic"])
+        self.assertNotIn("packets", json.dumps(payload).lower())
+
+
+class NetworkDiagnosticsTests(unittest.TestCase):
+    def make_completed_process(self, payload, returncode=0, stderr=b""):
+        return subprocess.CompletedProcess(
+            args=["powershell.exe"],
+            returncode=returncode,
+            stdout=json.dumps(payload).encode("utf-8"),
+            stderr=stderr,
+        )
+
+    def test_windows_collector_sanitizes_configuration_and_declares_host_only_coverage(self):
+        runner = mock.Mock(
+            return_value=self.make_completed_process(
+                [
+                    {
+                        "alias": "Ethernet",
+                        "profile": "Rede interna",
+                        "status": "Up",
+                        "link_speed": "1 Gbps",
+                        "ipv4": ["192.168.7.5", "invalid"],
+                        "gateway": ["192.168.7.1"],
+                        "dns": ["192.168.7.1", "fe80::1"],
+                        "mac_address": "AA-BB-CC-DD-EE-FF",
+                        "capture": "secret payload",
+                    }
+                ]
+            )
+        )
+        diagnostics = WindowsNetworkDiagnostics(
+            runner=runner,
+            platform_name="win32",
+            ttl_seconds=60,
+        )
+
+        result = diagnostics.read()
+        serialized = json.dumps(result)
+
+        self.assertEqual(result["state"], "active")
+        self.assertEqual(result["source"], "windows_cim_network_configuration")
+        self.assertEqual(result["coverage"], "host_configuration_only")
+        self.assertFalse(result["can_observe_store_traffic"])
+        self.assertEqual(result["interfaces"][0]["ipv4"], ["192.168.7.5"])
+        self.assertEqual(result["interfaces"][0]["gateways"], ["192.168.7.1"])
+        self.assertTrue(result["connectivity"]["default_gateway_configured"])
+        self.assertTrue(result["connectivity"]["dns_configured"])
+        self.assertNotIn("AA-BB-CC", serialized)
+        self.assertNotIn("secret payload", serialized)
+        powershell_command = runner.call_args.args[0][-1]
+        self.assertIn("Win32_NetworkAdapterConfiguration", powershell_command)
+        self.assertNotIn("Get-NetIPConfiguration", powershell_command)
+
+    def test_collector_uses_bounded_cache_instead_of_spawning_powershell_per_poll(self):
+        runner = mock.Mock(
+            return_value=self.make_completed_process(
+                [
+                    {
+                        "alias": "Ethernet",
+                        "status": "Up",
+                        "ipv4": ["192.168.7.5"],
+                        "gateway": ["192.168.7.1"],
+                        "dns": ["192.168.7.1"],
+                    }
+                ]
+            )
+        )
+        clock = mock.Mock(side_effect=[100.0, 110.0, 401.0])
+        diagnostics = WindowsNetworkDiagnostics(
+            runner=runner,
+            platform_name="win32",
+            clock=clock,
+        )
+
+        diagnostics.read()
+        diagnostics.read()
+        diagnostics.read()
+
+        self.assertEqual(runner.call_count, 2)
+
+    def test_failed_collection_uses_short_cache_for_automatic_recovery(self):
+        runner = mock.Mock(
+            side_effect=[
+                self.make_completed_process([]),
+                self.make_completed_process(
+                    [
+                        {
+                            "alias": "Ethernet",
+                            "status": "Up",
+                            "ipv4": ["192.168.7.5"],
+                        }
+                    ]
+                ),
+            ]
+        )
+        clock = mock.Mock(side_effect=[100.0, 120.0, 131.0])
+        diagnostics = WindowsNetworkDiagnostics(
+            runner=runner,
+            platform_name="win32",
+            clock=clock,
+        )
+
+        self.assertEqual(diagnostics.read()["state"], "unavailable")
+        self.assertEqual(diagnostics.read()["state"], "unavailable")
+        self.assertEqual(diagnostics.read()["state"], "active")
+        self.assertEqual(runner.call_count, 2)
+
+    def test_collector_fails_closed_on_timeout_invalid_json_and_unsupported_platform(self):
+        timeout_runner = mock.Mock(side_effect=subprocess.TimeoutExpired("powershell", 4))
+        timed_out = WindowsNetworkDiagnostics(
+            runner=timeout_runner,
+            platform_name="win32",
+        ).read()
+        self.assertEqual(timed_out["state"], "unavailable")
+        self.assertEqual(timed_out["reason"], "collector_timeout")
+
+        invalid_runner = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                args=["powershell.exe"], returncode=0, stdout=b"{invalid", stderr=b""
+            )
+        )
+        invalid = WindowsNetworkDiagnostics(
+            runner=invalid_runner,
+            platform_name="win32",
+        ).read()
+        self.assertEqual(invalid["state"], "unavailable")
+        self.assertEqual(invalid["reason"], "collector_invalid_output")
+
+        unsupported = WindowsNetworkDiagnostics(platform_name="linux").read()
+        self.assertEqual(unsupported["state"], "unsupported")
+        self.assertEqual(unsupported["interfaces"], [])
+
 
 class AnalyticsHttpServerTests(unittest.TestCase):
     def setUp(self):
@@ -212,10 +370,26 @@ class AnalyticsHttpServerTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        self.network_diagnostics = mock.Mock()
+        self.network_diagnostics.read.return_value = {
+            "schema_version": 1,
+            "state": "active",
+            "reason": "host_network_detected",
+            "coverage": "host_configuration_only",
+            "can_observe_store_traffic": False,
+            "collected_at": datetime.now().isoformat(timespec="seconds"),
+            "interfaces": [],
+            "connectivity": {
+                "active_interface_count": 0,
+                "default_gateway_configured": False,
+                "dns_configured": False,
+            },
+        }
         self.server = create_server(
             host="127.0.0.1",
             port=0,
             bridge=NvrHealthBridge(health_path),
+            network_diagnostics=self.network_diagnostics,
         )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -250,6 +424,51 @@ class AnalyticsHttpServerTests(unittest.TestCase):
             overview = json.loads(response.read().decode("utf-8"))
         self.assertEqual(overview["service"]["id"], "wimi-analytics")
         self.assertNotIn("Access-Control-Allow-Origin", response.headers)
+
+        network_request = urllib.request.Request(
+            f"{self.base_url}/api/v1/network/status",
+            headers={"Cookie": cookie},
+        )
+        with urllib.request.urlopen(network_request, timeout=2) as response:
+            network = json.loads(response.read().decode("utf-8"))
+        self.assertEqual(network["coverage"], "host_configuration_only")
+        self.assertFalse(network["can_observe_store_traffic"])
+
+    def test_healthz_remains_responsive_while_network_collection_is_busy(self):
+        with urllib.request.urlopen(f"{self.base_url}/", timeout=2) as response:
+            cookie = response.headers.get("Set-Cookie").split(";", 1)[0]
+
+        collection_started = threading.Event()
+        release_collection = threading.Event()
+        network_payload = self.network_diagnostics.read.return_value
+
+        def slow_network_read():
+            collection_started.set()
+            release_collection.wait(timeout=2)
+            return network_payload
+
+        self.network_diagnostics.read.side_effect = slow_network_read
+        overview_request = urllib.request.Request(
+            f"{self.base_url}/api/v1/overview",
+            headers={"Cookie": cookie},
+        )
+        overview_result = []
+
+        def load_overview():
+            with urllib.request.urlopen(overview_request, timeout=3) as response:
+                overview_result.append(response.status)
+
+        overview_thread = threading.Thread(target=load_overview)
+        overview_thread.start()
+        self.assertTrue(collection_started.wait(timeout=1))
+        try:
+            with urllib.request.urlopen(f"{self.base_url}/healthz", timeout=0.5) as response:
+                self.assertEqual(response.status, 200)
+        finally:
+            release_collection.set()
+            overview_thread.join(timeout=3)
+
+        self.assertEqual(overview_result, [200])
 
     def test_external_host_and_origin_are_rejected(self):
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=2)
@@ -355,6 +574,9 @@ class AnalyticsFrontendSafetyTests(unittest.TestCase):
         self.assertNotIn("eval(", script)
         self.assertIn('fetch("/api/v1/overview"', script)
         self.assertIn('rel = "noopener noreferrer"', script)
+        self.assertIn("function renderNetwork()", script)
+        self.assertIn('state.route === "network"', script)
+        self.assertIn("can_observe_store_traffic", script)
         self.assertIn('aria-label="Navegação principal"', html)
 
 

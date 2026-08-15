@@ -5,11 +5,12 @@ import secrets
 import socket
 from http import HTTPStatus
 from http.cookies import SimpleCookie
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from .backend import NvrHealthBridge, build_dashboard_payload
+from .network_diagnostics import WindowsNetworkDiagnostics
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -27,17 +28,26 @@ STATIC_ROUTES = {
 }
 
 
-class AnalyticsHttpServer(HTTPServer):
+class AnalyticsHttpServer(ThreadingHTTPServer):
     allow_reuse_address = False
+    daemon_threads = True
 
     def server_bind(self):
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         super().server_bind()
 
-    def __init__(self, address, handler, bridge, static_dir=STATIC_DIR):
+    def __init__(
+        self,
+        address,
+        handler,
+        bridge,
+        static_dir=STATIC_DIR,
+        network_diagnostics=None,
+    ):
         super().__init__(address, handler)
         self.bridge = bridge
+        self.network_diagnostics = network_diagnostics or WindowsNetworkDiagnostics()
         self.static_dir = Path(static_dir).resolve()
         self.session_token = secrets.token_urlsafe(32)
         host, port = self.server_address[:2]
@@ -129,13 +139,19 @@ class AnalyticsRequestHandler(BaseHTTPRequestHandler):
             if not self._session_allowed():
                 self._send_error_json(HTTPStatus.UNAUTHORIZED, "session_required", head_only)
                 return
-            payload = build_dashboard_payload(self.server.bridge, self.server.panel_url)
+            payload = build_dashboard_payload(
+                self.server.bridge,
+                self.server.panel_url,
+                network=self.server.network_diagnostics.read(),
+            )
             if path == "/api/v1/overview":
                 self._send_json(HTTPStatus.OK, payload, head_only)
             elif path == "/api/v1/nvr/health":
                 self._send_json(HTTPStatus.OK, payload["nvr"], head_only)
             elif path == "/api/v1/modules":
                 self._send_json(HTTPStatus.OK, {"modules": payload["modules"]}, head_only)
+            elif path == "/api/v1/network/status":
+                self._send_json(HTTPStatus.OK, payload["network"], head_only)
             else:
                 self._send_error_json(HTTPStatus.NOT_FOUND, "route_not_found", head_only)
             return
@@ -176,11 +192,23 @@ class AnalyticsRequestHandler(BaseHTTPRequestHandler):
     do_DELETE = do_POST
 
 
-def create_server(host=DEFAULT_HOST, port=DEFAULT_PORT, bridge=None, static_dir=STATIC_DIR):
+def create_server(
+    host=DEFAULT_HOST,
+    port=DEFAULT_PORT,
+    bridge=None,
+    static_dir=STATIC_DIR,
+    network_diagnostics=None,
+):
     if host not in ("127.0.0.1", "localhost"):
         raise ValueError("WIMI Analytics deve escutar somente na interface local")
     bridge = bridge or NvrHealthBridge(DEFAULT_HEALTH_PATH)
-    return AnalyticsHttpServer((host, int(port)), AnalyticsRequestHandler, bridge, static_dir)
+    return AnalyticsHttpServer(
+        (host, int(port)),
+        AnalyticsRequestHandler,
+        bridge,
+        static_dir,
+        network_diagnostics,
+    )
 
 
 def main(argv=None):

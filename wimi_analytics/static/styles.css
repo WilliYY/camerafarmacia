@@ -171,6 +171,7 @@ p { line-height: 1.5; }
   text-transform: uppercase;
 }
 .status-badge.active, .status-badge.healthy { border-color: #176c54; color: var(--green); background: #0e2b25; }
+.status-badge.limited { border-color: #236977; color: var(--cyan); background: #10272d; }
 .status-badge.warning, .status-badge.stale, .status-badge.waiting_for_data { border-color: #735724; color: var(--amber); background: #2b2110; }
 .status-badge.critical, .status-badge.unavailable { border-color: #77333a; color: var(--red); background: #2b1519; }
 .status-badge.not_configured, .status-badge.unknown, .status-badge.pending { color: #bdc8d6; background: #1a2029; }
@@ -203,6 +204,7 @@ p { line-height: 1.5; }
 .summary-main, .summary-meta { padding: 20px; background: var(--surface); }
 .summary-main { border-left: 4px solid var(--green); }
 .summary-main.warning, .summary-main.stale { border-left-color: var(--amber); }
+.summary-main.limited { border-left-color: var(--cyan); }
 .summary-main.critical, .summary-main.unavailable { border-left-color: var(--red); }
 .summary-main p, .summary-meta p { margin: 7px 0 0; color: var(--muted); }
 .summary-meta dl { margin: 0; display: grid; gap: 10px; }
@@ -282,6 +284,14 @@ p { line-height: 1.5; }
 .timeline-list li { position: relative; margin-left: 18px; padding: 0 0 22px 18px; }
 .timeline-list li::before { content: ""; position: absolute; width: 9px; height: 9px; left: -23px; top: 5px; border-radius: 50%; background: var(--blue); }
 .timeline-list p { margin: 4px 0 0; color: var(--muted); }
+
+.network-boundary {
+  margin-top: 18px;
+  padding: 14px 16px;
+  border-left: 4px solid var(--cyan);
+  background: #101b21;
+}
+.network-boundary p { margin: 5px 0 0; color: var(--muted); }
 
 @media (max-width: 1050px) {
   .metric-grid { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
