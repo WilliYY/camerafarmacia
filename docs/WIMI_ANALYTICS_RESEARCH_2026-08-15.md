@@ -1,5 +1,17 @@
 # Wimi Analytics - pesquisa, arquitetura unificada e MVP
 
+## Estado de implementacao em 15/08/2026
+
+A primeira fundacao funcional foi implementada no mesmo repositorio, sem mover
+ou substituir o NVR. Ela inclui processo HTTP local separado, bridge sanitizada
+do snapshot de saude, sessao de navegador, supervisor single-instance, botao no
+Tkinter e dashboard com todas as rotas planejadas. O detalhe executavel esta em
+`docs/WIMI_ANALYTICS_IMPLEMENTATION_2026-08-15.md`.
+
+Essa entrega nao ativa detector, tracking, agente Windows, DNS, flows, banco ou
+score de produtividade. Esses componentes permanecem explicitamente marcados
+como nao configurados ate as etapas de benchmark, governanca e teste real.
+
 Data da pesquisa: 15/08/2026
 
 ## Parecer executivo

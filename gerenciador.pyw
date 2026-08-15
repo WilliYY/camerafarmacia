@@ -2290,6 +2290,11 @@ class CameraManagerApp:
         self._intelligence_key = None
         self._last_health_check = 0.0
         self._last_go2rtc_ok = False
+        self._analytics_handle = None
+        self._analytics_start_lock = threading.Lock()
+        self._analytics_starting = False
+        self._analytics_open_when_ready = False
+        self._analytics_shutdown = False
         self._usb_report_cache = None
         self._usb_report_cache_time = 0.0
         self._kernel_144_state_path = os.path.join(LOGS_DIR, "kernel_144_baseline.json")
@@ -2336,6 +2341,7 @@ class CameraManagerApp:
         self.root.after(200, self.drain_ui_log_queue)
         self._external_log_thread = threading.Thread(target=self.external_log_writer_loop, daemon=True)
         self._external_log_thread.start()
+        self.root.after(300, self.start_wimi_analytics)
         
         # Inicializa a máquina de estados do botão e animação
         self.button_state = "STOPPED"
@@ -3011,6 +3017,23 @@ class CameraManagerApp:
         )
         self.btn_open_folder.pack(fill="x", padx=4, pady=2)
         self.setup_button_hover(self.btn_open_folder, "#1F2937", "#374151")
+
+        self.btn_wimi_panel = tk.Button(
+            actions_frame,
+            text=" ▦ Painel WIMI: INICIANDO ",
+            font=("Segoe UI", 9, "bold"),
+            fg=TEXT_COLOR,
+            bg="#1F2937",
+            activebackground="#374151",
+            activeforeground=TEXT_COLOR,
+            bd=0,
+            cursor="hand2",
+            padx=10,
+            pady=5,
+            command=lambda: self.start_wimi_analytics(open_browser=True),
+        )
+        self.btn_wimi_panel.pack(fill="x", padx=4, pady=2)
+        self.setup_button_hover(self.btn_wimi_panel, "#1F2937", "#374151")
 
         # Inicialização automática
         startup_frame = tk.Frame(left_col, bg=BG_COLOR, pady=2)
@@ -6327,6 +6350,80 @@ class CameraManagerApp:
         if hasattr(self, "btn_monitor"):
             self.flash_button(self.btn_monitor, "🌐 Abrindo...", "#3B82F6")
 
+    def set_wimi_panel_status(self, status, detail=None):
+        if not hasattr(self, "btn_wimi_panel") or getattr(self, "_shutdown_executed", False):
+            return
+        styles = {
+            "starting": (" ▦ Painel WIMI: INICIANDO ", "#1F2937", "#CBD5E1"),
+            "active": (" ▦ Painel WIMI: ATIVO ", "#065F46", "#34D399"),
+            "error": (" ▦ Painel WIMI: ATENÇÃO ", "#7F1D1D", "#FCA5A5"),
+        }
+        text, background, foreground = styles.get(status, styles["error"])
+        self.btn_wimi_panel.configure(text=text, bg=background, fg=foreground)
+        if detail:
+            self.btn_wimi_panel.configure(takefocus=True)
+
+    def start_wimi_analytics(self, open_browser=False):
+        if getattr(self, "_analytics_shutdown", False) or getattr(self, "_shutdown_executed", False):
+            return
+        with self._analytics_start_lock:
+            self._analytics_open_when_ready = self._analytics_open_when_ready or open_browser
+            if self._analytics_starting:
+                return
+            self._analytics_starting = True
+        self.set_wimi_panel_status("starting")
+        threading.Thread(target=self._start_wimi_analytics_worker, daemon=True).start()
+
+    def _start_wimi_analytics_worker(self):
+        try:
+            from wimi_analytics.launcher import ensure_server, stop_owned_server
+
+            handle = ensure_server(PROJ_DIR)
+            with self._analytics_start_lock:
+                if handle.owned or self._analytics_handle is None:
+                    self._analytics_handle = handle
+                open_browser = self._analytics_open_when_ready
+                self._analytics_open_when_ready = False
+                self._analytics_starting = False
+                should_stop = self._analytics_shutdown or getattr(self, "_shutdown_executed", False)
+            if should_stop:
+                stop_owned_server(handle)
+                return
+            self.root.after(0, lambda: self._on_wimi_analytics_ready(handle.url, open_browser))
+        except Exception as error:
+            with self._analytics_start_lock:
+                self._analytics_starting = False
+                self._analytics_open_when_ready = False
+            message = str(error)
+            self.add_log(f"WIMI Analytics indisponivel: {message}", "tag_atencao")
+            try:
+                self.root.after(0, lambda: self.set_wimi_panel_status("error", message))
+            except Exception:
+                pass
+
+    def _on_wimi_analytics_ready(self, url, open_browser):
+        self.set_wimi_panel_status("active")
+        if open_browser:
+            import webbrowser
+            webbrowser.open(url)
+
+    def stop_wimi_analytics(self):
+        analytics_lock = getattr(self, "_analytics_start_lock", None)
+        if analytics_lock is None:
+            self._analytics_shutdown = True
+            handle = getattr(self, "_analytics_handle", None)
+            self._analytics_handle = None
+        else:
+            with analytics_lock:
+                self._analytics_shutdown = True
+                handle = self._analytics_handle
+                self._analytics_handle = None
+        try:
+            from wimi_analytics.launcher import stop_owned_server
+            stop_owned_server(handle)
+        except Exception:
+            pass
+
     def click_configurar_inicializacao(self):
         try:
             startup_folder = os.path.join(os.getenv('APPDATA'), r"Microsoft\Windows\Start Menu\Programs\Startup")
@@ -6786,6 +6883,8 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             self.limpar_processos_ffmpeg_zumbis(sync=True)
         except Exception:
             pass
+
+        self.stop_wimi_analytics()
             
         time.sleep(0.5)
         # O root tambem precisa terminar no modo --silent; caso contrario a

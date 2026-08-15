@@ -76,6 +76,18 @@ O gerenciador compara a versão local com a versão publicada no GitHub, mas só
 - A exclusao emergencial e desativada por padrao e nunca remove gravacoes mais
   novas que a retencao configurada.
 
+### 8. Painel Unificado WIMI Analytics
+
+O aplicativo inicia um servico local separado em `http://127.0.0.1:8765/` e
+mostra o botao **Painel WIMI** na interface. O painel reune as rotas Cameras,
+Analytics, Computadores, Rede, Timeline, Relatorios e Sistema.
+
+Nesta primeira fundacao funcional, o servico e somente leitura: consome uma
+versao filtrada de `sistema/logs/health_status.json`, nao importa o
+`gerenciador.pyw`, nao controla gravacoes e nao escreve no HD de videos. Visao
+computacional, agente Windows e conector de rede aparecem como nao configurados
+ate passarem por instalacao e validacao proprias.
+
 ---
 
 ## 📂 Estrutura do Projeto
@@ -93,6 +105,7 @@ camera farmacia/
 │   ├── gravando_temp/
 │   ├── logs/
 │   └── config.json             # local, contém segredos e identidade do HD
+├── wimi_analytics/             # API local, supervisor, bridge e painel unificado
 ├── gerenciador.pyw
 ├── README.md
 └── .gitignore
@@ -149,6 +162,18 @@ Para rodar silenciosamente, use:
 ```bash
 pythonw.exe gerenciador.pyw --silent
 ```
+
+O WIMI Analytics e iniciado em processo separado tanto no modo visual quanto no
+modo silencioso. Para executar somente o painel, sem iniciar o NVR ou as
+cameras, use:
+
+```powershell
+python -m wimi_analytics.server
+```
+
+O endereco aceita somente a interface local. `/healthz` expoe apenas readiness;
+as APIs `/api/v1/*` exigem a sessao criada pela pagina, validam `Host` e
+`Origin` e nao habilitam CORS externo.
 
 ---
 

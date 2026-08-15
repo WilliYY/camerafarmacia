@@ -21,3 +21,15 @@ __pycache__/
 *.pyo
 *.pyd
 .pytest_cache/
+
+# Runtime e dependencias locais do WIMI Analytics
+wimi_analytics/.venv/
+wimi_analytics/node_modules/
+wimi_analytics/runtime/
+wimi_analytics/models/
+wimi_analytics/**/*.db
+wimi_analytics/**/*.sqlite*
+wimi_analytics/**/*.log
+wimi_analytics/**/.env*
+wimi_analytics/**/dist/
+wimi_analytics/**/coverage/
