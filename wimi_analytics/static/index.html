@@ -22,9 +22,9 @@
         <button type="button" data-route="overview">Visão geral</button>
         <button type="button" data-route="cameras">Câmeras</button>
         <button type="button" data-route="analytics">Analytics</button>
-        <button type="button" data-route="computers">Computadores</button>
+        <button type="button" data-route="computers"><span>Computadores</span><span class="nav-state">Pendente</span></button>
         <button type="button" data-route="network">Rede</button>
-        <button type="button" data-route="timeline">Timeline</button>
+        <button type="button" data-route="timeline">Ocorrências</button>
         <button type="button" data-route="reports">Relatórios</button>
         <button type="button" data-route="system">Sistema</button>
       </nav>
@@ -44,6 +44,7 @@
           <h1 id="page-title">Visão geral</h1>
         </div>
         <div class="topbar-actions">
+          <span id="topbar-update" class="topbar-update">NVR sem coleta</span>
           <span id="service-badge" class="status-badge pending">Verificando</span>
           <button id="refresh-button" class="icon-button" type="button" title="Atualizar dados" aria-label="Atualizar dados">↻</button>
         </div>

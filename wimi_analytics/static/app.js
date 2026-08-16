@@ -6,7 +6,7 @@ const ROUTES = {
   analytics: "Analytics",
   computers: "Computadores",
   network: "Rede",
-  timeline: "Timeline",
+  timeline: "Ocorrências",
   reports: "Relatórios",
   system: "Sistema",
 };
@@ -25,6 +25,7 @@ const serviceBadge = document.getElementById("service-badge");
 const connectionDot = document.getElementById("connection-dot");
 const connectionLabel = document.getElementById("connection-label");
 const lastUpdate = document.getElementById("last-update");
+const topbarUpdate = document.getElementById("topbar-update");
 const navButtons = [...document.querySelectorAll("[data-route]")];
 
 function element(tag, className, text) {
@@ -40,6 +41,23 @@ function clear(node) {
 
 function statusBadge(status, label) {
   return element("span", `status-badge ${status || "unknown"}`, label || status || "desconhecido");
+}
+
+function statusLabel(status) {
+  const labels = {
+    active: "Ativo",
+    current: "Atual",
+    limited: "Limitado",
+    warning: "Atenção",
+    critical: "Crítico",
+    stale: "Desatualizado",
+    partial: "Parcial",
+    unavailable: "Indisponível",
+    not_configured: "Não configurado",
+    waiting_for_data: "Aguardando dados",
+    unknown: "Sem confirmação",
+  };
+  return labels[status] || status || "Desconhecido";
 }
 
 function formatNumber(value, suffix = "") {
@@ -174,7 +192,7 @@ function renderAnalytics() {
   main.append(element("h2", "", "Fundação Analytics"));
   main.append(element("p", "", module?.detail || "Serviço local ativo."));
   const meta = element("div", "summary-meta");
-  meta.append(statusBadge(module?.status, module?.status));
+  meta.append(statusBadge(module?.status, statusLabel(module?.status)));
   band.append(main, meta);
   content.append(band);
 
@@ -191,14 +209,30 @@ function renderAnalytics() {
   section.append(heading);
   const table = element("table", "data-table");
   const body = element("tbody");
-  const priorityAction = intelligence.priority_actions?.[0];
-  [["Resumo", intelligence.explanation], ["Ação", priorityAction], ["Confiança", formatNumber(intelligence.confidence_score, "%")]].forEach(([label, value]) => {
+  const protection = intelligence.hardware_protection || {};
+  const recommendationLabels = {
+    continue_monitoring: "Continuar monitorando",
+    safe_stop: "Parada segura recomendada",
+  };
+  [
+    ["Resumo", intelligence.explanation],
+    ["Confiança", formatNumber(intelligence.confidence_score, "%")],
+    ["Gravação", recommendationLabels[protection.recording_recommendation] || protection.recording_recommendation],
+    ["Manutenção pesada", protection.heavy_maintenance_allowed === true ? "Liberada" : protection.heavy_maintenance_allowed === false ? "Bloqueada" : null],
+    ["Proteção de hardware", protection.reason],
+  ].forEach(([label, value]) => {
     const row = element("tr");
     row.append(element("th", "", label), element("td", "", value || "Sem dado"));
     body.append(row);
   });
   table.append(body);
   section.append(table);
+  if (Array.isArray(intelligence.priority_actions) && intelligence.priority_actions.length) {
+    const actionsHeading = element("h3", "subsection-title", "Ações prioritárias");
+    const actions = element("ol", "priority-list");
+    intelligence.priority_actions.forEach((action) => actions.append(element("li", "", action)));
+    section.append(actionsHeading, actions);
+  }
   content.append(section);
 }
 
@@ -297,29 +331,165 @@ function renderNetwork() {
 
 function renderTimeline() {
   const issues = currentSnapshot()?.issues || [];
+  const snapshotCurrent = state.overview.nvr?.state === "active";
   if (!issues.length) {
-    renderPendingModule("reports", "Timeline sem eventos", "Nenhum evento sanitizado está disponível na coleta atual.");
+    renderPendingModule(
+      "reports",
+      snapshotCurrent ? "Nenhuma ocorrência atual" : "Nenhuma ocorrência na última coleta",
+      snapshotCurrent
+        ? "O snapshot atual não contém alertas. O histórico persistente ainda não está configurado."
+        : "A última coleta recebida não contém alertas, mas está desatualizada. O histórico persistente ainda não está configurado.",
+    );
     return;
   }
+  const section = element("section", "section-block");
+  const heading = element("div", "section-heading");
+  heading.append(
+    element("h2", "", snapshotCurrent ? "Ocorrências atuais" : "Ocorrências da última coleta"),
+    element("p", "", snapshotCurrent ? "Snapshot atual, sem histórico persistente" : "Snapshot desatualizado, sem histórico persistente"),
+  );
   const list = element("ol", "timeline-list");
   issues.forEach((issue) => {
     const item = element("li");
     item.append(element("h3", "", issue.summary || issue.code), element("p", "", issue.action || "Revisar no NVR"));
     list.append(item);
   });
-  content.append(list);
+  section.append(heading, list);
+  content.append(section);
+}
+
+function renderReports() {
+  const operations = state.overview.operations || {};
+  const report = operations.report;
+  if (!report) {
+    renderPendingModule("reports", "Relatório indisponível", "Nenhuma coleta operacional válida foi recebida.");
+    return;
+  }
+
+  const band = element("section", "summary-band");
+  const main = element("div", `summary-main ${report.state}`);
+  main.append(element("h2", "", report.headline));
+  main.append(
+    element(
+      "p",
+      "",
+      report.state === "current"
+        ? "Consolidação da coleta atual do NVR e deste computador."
+        : "Os dados abaixo são parciais e não devem ser usados como histórico diário.",
+    ),
+  );
+  const meta = element("div", "summary-meta");
+  const list = element("dl");
+  [
+    ["Estado", statusLabel(report.state)],
+    ["Gerado", formatDate(report.generated_at)],
+    ["Fonte NVR", formatDate(report.source_generated_at)],
+    ["Escopo", "NVR e este PC"],
+  ].forEach(([key, value]) => {
+    const row = element("div");
+    row.append(element("dt", "", key), element("dd", "", value));
+    list.append(row);
+  });
+  meta.append(list);
+  band.append(main, meta);
+
+  const section = element("section", "section-block");
+  const heading = element("div", "section-heading");
+  heading.append(element("h2", "", "Verificações desta coleta"), element("p", "", `${report.checks.length} sinais`));
+  const table = element("table", "data-table report-table");
+  const thead = element("thead");
+  const header = element("tr");
+  ["Estado", "Verificação", "Resultado", "Evidência"].forEach((label) => header.append(element("th", "", label)));
+  thead.append(header);
+  const tbody = element("tbody");
+  report.checks.forEach((check) => {
+    const row = element("tr");
+    const stateCell = element("td");
+    stateCell.append(statusBadge(check.status, statusLabel(check.status)));
+    const detailCell = element("td", "check-copy");
+    detailCell.append(element("strong", "", check.label), element("small", "", check.detail));
+    row.append(
+      stateCell,
+      detailCell,
+      element("td", "", check.value),
+      element("td", "evidence", check.evidence),
+    );
+    tbody.append(row);
+  });
+  table.append(thead, tbody);
+  section.append(heading, table);
+  content.append(band, section);
+}
+
+function renderFindingList(title, items, kind) {
+  const section = element("section", `finding-section ${kind}`);
+  const heading = element("div", "section-heading");
+  heading.append(element("h2", "", title), element("p", "", `${items.length} item(ns)`));
+  const list = element("div", "finding-list");
+  items.forEach((item) => {
+    const row = element("article", "finding-row");
+    row.append(element("strong", "", item.label), element("p", "", item.detail));
+    row.append(element("code", "evidence", item.evidence));
+    list.append(row);
+  });
+  section.append(heading, list);
+  return section;
 }
 
 function renderSystem() {
+  const operations = state.overview.operations || {};
+  const readiness = operations.readiness || {
+    status: "unavailable",
+    generated_at: null,
+    strengths: [],
+    limitations: [],
+  };
+  const band = element("section", "summary-band");
+  const main = element("div", `summary-main ${readiness.status}`);
+  main.append(element("h2", "", "Prontidão operacional"));
+  main.append(
+    element(
+      "p",
+      "",
+      "Leitura objetiva do que está protegido, do que possui dados e do que ainda não foi configurado.",
+    ),
+  );
+  const meta = element("div", "summary-meta");
+  const metaList = element("dl");
+  [
+    ["Estado", statusLabel(readiness.status)],
+    ["Pontos fortes", readiness.strengths.length],
+    ["Limitações", readiness.limitations.length],
+    ["Coleta", formatDate(readiness.generated_at)],
+  ].forEach(([key, value]) => {
+    const row = element("div");
+    row.append(element("dt", "", key), element("dd", "", value));
+    metaList.append(row);
+  });
+  meta.append(metaList);
+  band.append(main, meta);
+
+  const findings = element("div", "finding-columns");
+  findings.append(
+    renderFindingList("Pontos fortes", readiness.strengths, "strengths"),
+    renderFindingList("Limitações e riscos", readiness.limitations, "limitations"),
+  );
+
   const heading = element("div", "section-heading");
   heading.append(element("h2", "", "Componentes"), element("p", "", "Estado declarado pelas fontes locais"));
   const list = element("div", "module-list");
   state.overview.modules.forEach((module) => {
     const row = element("div", "module-row");
-    row.append(element("strong", "", module.label), statusBadge(module.status, module.status), element("p", "", module.detail));
+    row.append(
+      element("strong", "", module.label),
+      statusBadge(module.status, statusLabel(module.status)),
+      element("p", "", module.detail),
+    );
     list.append(row);
   });
-  content.append(heading, list);
+  const modules = element("section", "section-block");
+  modules.append(heading, list);
+  content.append(band, findings, modules);
 }
 
 function render() {
@@ -340,23 +510,38 @@ function render() {
   }
   if (!state.overview) return;
 
+  if (state.error) {
+    const warning = element("div", "stale-data-banner");
+    warning.setAttribute("role", "status");
+    warning.append(
+      element("strong", "", "Atualização falhou"),
+      element("span", "", `${state.error} Exibindo os últimos dados recebidos.`),
+    );
+    content.append(warning);
+  }
+
   if (state.route === "overview") renderOverview();
   if (state.route === "cameras") renderCameras();
   if (state.route === "analytics") renderAnalytics();
   if (state.route === "computers") renderPendingModule("computers", "Computadores não configurados", "O agente Windows ainda não foi instalado. Nenhum aplicativo, janela, tecla ou conteúdo está sendo coletado.");
   if (state.route === "network") renderNetwork();
   if (state.route === "timeline") renderTimeline();
-  if (state.route === "reports") renderPendingModule("reports", "Relatórios aguardando dados", "Relatórios serão habilitados quando as fontes operacionais validadas produzirem eventos suficientes.");
+  if (state.route === "reports") renderReports();
   if (state.route === "system") renderSystem();
 }
 
 function updateConnection(ready, overview) {
   const serviceStatus = ready ? overview?.service?.status || "active" : "unavailable";
+  const apiGeneratedAt = overview?.generated_at;
+  const nvrGeneratedAt = overview?.nvr?.snapshot?.generated_at;
   connectionDot.className = `status-dot ${serviceStatus}`;
   connectionLabel.textContent = ready ? "Serviço local ativo" : "Serviço indisponível";
   serviceBadge.className = `status-badge ${serviceStatus}`;
   serviceBadge.textContent = ready ? "Local · ativo" : "Indisponível";
-  lastUpdate.textContent = ready ? formatDate(overview.generated_at) : "Falha na atualização";
+  lastUpdate.textContent = overview
+    ? `API ${formatDate(apiGeneratedAt)} · NVR ${formatDate(nvrGeneratedAt)}`
+    : "Falha na atualização";
+  topbarUpdate.textContent = `NVR ${formatDate(nvrGeneratedAt)}`;
 }
 
 async function loadOverview() {
@@ -380,7 +565,7 @@ async function loadOverview() {
     updateConnection(true, state.overview);
   } catch (error) {
     state.error = error.name === "AbortError" ? "A API local não respondeu em 5 segundos." : "Não foi possível consultar a API local.";
-    updateConnection(false, null);
+    updateConnection(false, state.overview);
   } finally {
     window.clearTimeout(timeout);
     state.loading = false;
@@ -389,16 +574,27 @@ async function loadOverview() {
   }
 }
 
+function keepActiveRouteVisible() {
+  const activeButton = navButtons.find((button) => button.dataset.route === state.route);
+  const navigation = activeButton?.parentElement;
+  if (!activeButton || !navigation) return;
+  const target = activeButton.offsetLeft - (navigation.clientWidth - activeButton.clientWidth) / 2;
+  navigation.scrollLeft = Math.max(0, target);
+}
+
 function selectRoute(route, updateHash = true) {
   if (!ROUTES[route]) route = "overview";
   state.route = route;
   if (updateHash && window.location.hash !== `#/${route}`) window.location.hash = `#/${route}`;
+  window.scrollTo(0, 0);
   render();
+  keepActiveRouteVisible();
 }
 
 navButtons.forEach((button) => button.addEventListener("click", () => selectRoute(button.dataset.route)));
 refreshButton.addEventListener("click", loadOverview);
 window.addEventListener("hashchange", () => selectRoute(window.location.hash.replace(/^#\/?/, ""), false));
+window.addEventListener("resize", keepActiveRouteVisible);
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) loadOverview();
 });

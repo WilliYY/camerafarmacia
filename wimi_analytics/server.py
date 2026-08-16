@@ -139,6 +139,25 @@ class AnalyticsRequestHandler(BaseHTTPRequestHandler):
             if not self._session_allowed():
                 self._send_error_json(HTTPStatus.UNAUTHORIZED, "session_required", head_only)
                 return
+            if path == "/api/v1/nvr/health":
+                self._send_json(HTTPStatus.OK, self.server.bridge.read(), head_only)
+                return
+            if path == "/api/v1/network/status":
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.server.network_diagnostics.read(),
+                    head_only,
+                )
+                return
+            aggregate_routes = {
+                "/api/v1/overview",
+                "/api/v1/modules",
+                "/api/v1/reports/current",
+                "/api/v1/system/readiness",
+            }
+            if path not in aggregate_routes:
+                self._send_error_json(HTTPStatus.NOT_FOUND, "route_not_found", head_only)
+                return
             payload = build_dashboard_payload(
                 self.server.bridge,
                 self.server.panel_url,
@@ -146,14 +165,20 @@ class AnalyticsRequestHandler(BaseHTTPRequestHandler):
             )
             if path == "/api/v1/overview":
                 self._send_json(HTTPStatus.OK, payload, head_only)
-            elif path == "/api/v1/nvr/health":
-                self._send_json(HTTPStatus.OK, payload["nvr"], head_only)
             elif path == "/api/v1/modules":
                 self._send_json(HTTPStatus.OK, {"modules": payload["modules"]}, head_only)
-            elif path == "/api/v1/network/status":
-                self._send_json(HTTPStatus.OK, payload["network"], head_only)
-            else:
-                self._send_error_json(HTTPStatus.NOT_FOUND, "route_not_found", head_only)
+            elif path == "/api/v1/reports/current":
+                self._send_json(
+                    HTTPStatus.OK,
+                    payload["operations"]["report"],
+                    head_only,
+                )
+            elif path == "/api/v1/system/readiness":
+                self._send_json(
+                    HTTPStatus.OK,
+                    payload["operations"]["readiness"],
+                    head_only,
+                )
             return
 
         static_route = STATIC_ROUTES.get(path)

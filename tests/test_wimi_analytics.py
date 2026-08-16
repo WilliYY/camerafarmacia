@@ -27,6 +27,7 @@ from wimi_analytics.launcher import (
     stop_owned_server,
 )
 from wimi_analytics.network_diagnostics import WindowsNetworkDiagnostics
+from wimi_analytics.operations import build_operational_report, build_readiness
 
 
 class NvrHealthBridgeTests(unittest.TestCase):
@@ -99,7 +100,24 @@ class NvrHealthBridgeTests(unittest.TestCase):
                         "secret": "hidden",
                     },
                 },
-                "hardware": {"smart": {"status": "ok", "serial": "SECRET-SERIAL"}},
+                "hardware": {
+                    "smart": {
+                        "status": "ok",
+                        "telemetry_level": "basic_windows_status",
+                        "checked_at": datetime.now().isoformat(timespec="seconds"),
+                        "serial": "SECRET-SERIAL",
+                        "drives": [
+                            {"model": "Private model", "status": "OK"},
+                            {"model": "Private backup", "status": "Pred Fail"},
+                        ],
+                    },
+                    "kernel_144": {
+                        "count_24h": 1,
+                        "new_in_session": 0,
+                        "report_ids": ["private-report"],
+                    },
+                    "power": {"status": "ac"},
+                },
             }
         )
 
@@ -120,6 +138,15 @@ class NvrHealthBridgeTests(unittest.TestCase):
         self.assertEqual(result["snapshot"]["intelligence"]["confidence_score"], 95)
         self.assertNotIn("private_reasoning", result["snapshot"]["intelligence"])
         self.assertNotIn("secret", serialized)
+        self.assertNotIn("Private model", serialized)
+        self.assertNotIn("private-report", serialized)
+        self.assertEqual(result["snapshot"]["hardware_summary"]["drive_count"], 2)
+        self.assertEqual(
+            result["snapshot"]["hardware_summary"]["drive_warning_count"], 1
+        )
+        self.assertEqual(
+            result["snapshot"]["hardware_summary"]["kernel_144_new_in_session"], 0
+        )
         self.assertEqual(
             result["snapshot"]["metrics"]["camera_connectivity"]["farmacia"]["status"],
             "ONLINE",
@@ -181,6 +208,40 @@ class NvrHealthBridgeTests(unittest.TestCase):
         self.assertEqual(future["state"], "unknown")
         self.assertEqual(future["reason"], "clock_skew")
 
+    def test_invalid_timestamp_and_numeric_metrics_fail_closed(self):
+        self.write_snapshot(
+            {
+                "schema_version": 1,
+                "generated_at": "invalid",
+                "overall_status": "healthy",
+                "metrics": {"hd_available": True, "hd_free_gb": 800.0},
+            }
+        )
+        invalid_time = NvrHealthBridge(self.health_path).read()
+        self.assertEqual(invalid_time["state"], "unavailable")
+        self.assertIsNone(invalid_time["snapshot"])
+
+        self.write_snapshot(
+            {
+                "schema_version": 1,
+                "generated_at": datetime.now().isoformat(timespec="seconds"),
+                "overall_status": "healthy",
+                "issues": [],
+                "metrics": {
+                    "hd_available": True,
+                    "hd_free_gb": float("nan"),
+                    "process_memory_mb": float("inf"),
+                    "pending_backup_count": -1,
+                    "camera_connectivity": {},
+                },
+            }
+        )
+        invalid_metrics = NvrHealthBridge(self.health_path).read()["snapshot"]["metrics"]
+        self.assertTrue(invalid_metrics["hd_available"])
+        self.assertNotIn("hd_free_gb", invalid_metrics)
+        self.assertNotIn("process_memory_mb", invalid_metrics)
+        self.assertNotIn("pending_backup_count", invalid_metrics)
+
 
 class DashboardPayloadTests(unittest.TestCase):
     def test_unconfigured_collectors_are_explicit_and_not_reported_as_active(self):
@@ -222,6 +283,212 @@ class DashboardPayloadTests(unittest.TestCase):
         self.assertEqual(modules["network"]["status"], "limited")
         self.assertFalse(payload["network"]["can_observe_store_traffic"])
         self.assertNotIn("packets", json.dumps(payload).lower())
+
+    def test_current_operational_report_is_evidence_based_and_has_no_score(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            health_path = Path(temp_dir) / "health_status.json"
+            health_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "generated_at": datetime.now().isoformat(timespec="seconds"),
+                        "overall_status": "healthy",
+                        "issues": [],
+                        "metrics": {
+                            "hd_available": True,
+                            "hd_free_gb": 824.5,
+                            "pending_backup_count": 0,
+                            "pending_backup_gb": 0.0,
+                            "camera_connectivity": {
+                                "farmacia": {
+                                    "status": "ONLINE",
+                                    "recording_active": True,
+                                }
+                            },
+                        },
+                        "intelligence": {
+                            "status": "stable",
+                            "hardware_protection": {
+                                "heavy_maintenance_allowed": True,
+                                "reason": "Sem bloqueio.",
+                                "recording_recommendation": "continue_monitoring",
+                            },
+                        },
+                        "hardware": {
+                            "smart": {
+                                "status": "ok",
+                                "telemetry_level": "basic_windows_status",
+                                "drives": [{"model": "hidden", "status": "OK"}],
+                            },
+                            "kernel_144": {"count_24h": 1, "new_in_session": 0},
+                            "power": {"status": "ac"},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            payload = build_dashboard_payload(
+                NvrHealthBridge(health_path),
+                network={
+                    "schema_version": 1,
+                    "state": "active",
+                    "coverage": "host_configuration_only",
+                    "can_observe_store_traffic": False,
+                    "reason": "host_network_detected",
+                    "collected_at": datetime.now().isoformat(timespec="seconds"),
+                    "interfaces": [],
+                    "connectivity": {
+                        "active_interface_count": 1,
+                        "default_gateway_configured": True,
+                        "dns_configured": True,
+                    },
+                },
+            )
+
+        report = payload["operations"]["report"]
+        readiness = payload["operations"]["readiness"]
+        checks = {check["id"]: check for check in report["checks"]}
+        modules = {module["id"]: module for module in payload["modules"]}
+
+        self.assertEqual(report["state"], "current")
+        self.assertEqual(report["scope"], "nvr_and_host_only")
+        self.assertEqual(checks["cameras"]["status"], "active")
+        self.assertEqual(checks["storage"]["status"], "active")
+        self.assertEqual(checks["backups"]["status"], "active")
+        self.assertEqual(modules["reports"]["status"], "active")
+        self.assertIn("local_read_only", {item["id"] for item in readiness["strengths"]})
+        self.assertIn("vision_not_configured", {item["id"] for item in readiness["limitations"]})
+        self.assertIn("computers_not_configured", {item["id"] for item in readiness["limitations"]})
+        self.assertIn("store_network_not_observed", {item["id"] for item in readiness["limitations"]})
+        self.assertNotIn("score", json.dumps(payload).lower())
+
+
+class OperationalInsightsTests(unittest.TestCase):
+    def make_nvr(self, snapshot, state="active"):
+        return {
+            "state": state,
+            "reason": "snapshot_current" if state == "active" else "snapshot_stale",
+            "age_seconds": 0 if state == "active" else 600,
+            "snapshot": snapshot,
+        }
+
+    def active_network(self):
+        return {
+            "schema_version": 1,
+            "state": "active",
+            "coverage": "host_configuration_only",
+            "can_observe_store_traffic": False,
+            "connectivity": {
+                "active_interface_count": 1,
+                "default_gateway_configured": True,
+                "dns_configured": True,
+            },
+        }
+
+    def test_connectivity_and_recording_are_reported_separately(self):
+        snapshot = {
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "metrics": {
+                "camera_connectivity": {
+                    "farmacia": {"status": "ONLINE", "recording_active": False}
+                }
+            },
+        }
+        report = build_operational_report(self.make_nvr(snapshot), self.active_network())
+        checks = {check["id"]: check for check in report["checks"]}
+
+        self.assertEqual(checks["cameras"]["status"], "active")
+        self.assertEqual(checks["recording"]["status"], "limited")
+        self.assertEqual(checks["recording"]["value"], "Parada")
+
+    def test_drive_warning_overrides_generic_smart_ok(self):
+        snapshot = {
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "metrics": {},
+            "hardware_summary": {
+                "smart_status": "ok",
+                "drive_count": 2,
+                "drive_warning_count": 1,
+            },
+        }
+        report = build_operational_report(self.make_nvr(snapshot), self.active_network())
+        hardware = next(check for check in report["checks"] if check["id"] == "hardware")
+        self.assertEqual(hardware["status"], "warning")
+
+    def test_sanitized_storage_issue_overrides_available_flag(self):
+        snapshot = {
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "metrics": {"hd_available": True, "hd_free_gb": 50.0},
+            "issues": [
+                {
+                    "code": "HD_SPACE_LOW",
+                    "severity": "warning",
+                    "summary": "Pouco espaco no HD.",
+                }
+            ],
+        }
+        report = build_operational_report(self.make_nvr(snapshot), self.active_network())
+        checks = {check["id"]: check for check in report["checks"]}
+
+        self.assertEqual(checks["storage"]["status"], "warning")
+        self.assertEqual(checks["alerts"]["status"], "warning")
+        self.assertEqual(checks["alerts"]["value"], "1 ocorrencia")
+
+        readiness = build_readiness(self.make_nvr(snapshot), self.active_network(), [], report)
+        limitation_ids = {item["id"] for item in readiness["limitations"]}
+        strength_ids = {item["id"] for item in readiness["strengths"]}
+        self.assertEqual(readiness["status"], "warning")
+        self.assertIn("active_nvr_issues", limitation_ids)
+        self.assertNotIn("storage_available", strength_ids)
+
+    def test_critical_current_issue_marks_readiness_critical(self):
+        snapshot = {
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "metrics": {"hd_available": False},
+            "issues": [
+                {
+                    "code": "HD_UNAVAILABLE",
+                    "severity": "critical",
+                    "summary": "HD principal indisponivel.",
+                }
+            ],
+        }
+        nvr = self.make_nvr(snapshot)
+        report = build_operational_report(nvr, self.active_network())
+        readiness = build_readiness(nvr, self.active_network(), [], report)
+
+        self.assertEqual(readiness["status"], "critical")
+
+    def test_missing_network_makes_host_scoped_report_partial(self):
+        snapshot = {
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "metrics": {},
+        }
+        report = build_operational_report(
+            self.make_nvr(snapshot),
+            {"state": "unavailable", "can_observe_store_traffic": False},
+        )
+        self.assertEqual(report["state"], "partial")
+
+    def test_stale_snapshot_does_not_create_current_strengths(self):
+        snapshot = {
+            "generated_at": (datetime.now() - timedelta(minutes=10)).isoformat(
+                timespec="seconds"
+            ),
+            "metrics": {
+                "hd_available": True,
+                "pending_backup_count": 0,
+            },
+            "hardware_summary": {"kernel_144_new_in_session": 0},
+        }
+        nvr = self.make_nvr(snapshot, state="stale")
+        report = build_operational_report(nvr, self.active_network())
+        readiness = build_readiness(nvr, self.active_network(), [], report)
+        strength_ids = {item["id"] for item in readiness["strengths"]}
+
+        self.assertNotIn("storage_available", strength_ids)
+        self.assertNotIn("backups_clear", strength_ids)
+        self.assertNotIn("no_new_kernel_144", strength_ids)
 
 
 class NetworkDiagnosticsTests(unittest.TestCase):
@@ -434,6 +701,23 @@ class AnalyticsHttpServerTests(unittest.TestCase):
         self.assertEqual(network["coverage"], "host_configuration_only")
         self.assertFalse(network["can_observe_store_traffic"])
 
+        report_request = urllib.request.Request(
+            f"{self.base_url}/api/v1/reports/current",
+            headers={"Cookie": cookie},
+        )
+        with urllib.request.urlopen(report_request, timeout=2) as response:
+            report = json.loads(response.read().decode("utf-8"))
+        self.assertEqual(report["scope"], "nvr_and_host_only")
+
+        readiness_request = urllib.request.Request(
+            f"{self.base_url}/api/v1/system/readiness",
+            headers={"Cookie": cookie},
+        )
+        with urllib.request.urlopen(readiness_request, timeout=2) as response:
+            readiness = json.loads(response.read().decode("utf-8"))
+        self.assertIn("strengths", readiness)
+        self.assertIn("limitations", readiness)
+
     def test_healthz_remains_responsive_while_network_collection_is_busy(self):
         with urllib.request.urlopen(f"{self.base_url}/", timeout=2) as response:
             cookie = response.headers.get("Set-Cookie").split(";", 1)[0]
@@ -469,6 +753,22 @@ class AnalyticsHttpServerTests(unittest.TestCase):
             overview_thread.join(timeout=3)
 
         self.assertEqual(overview_result, [200])
+
+    def test_nvr_health_route_does_not_depend_on_network_collector(self):
+        with urllib.request.urlopen(f"{self.base_url}/", timeout=2) as response:
+            cookie = response.headers.get("Set-Cookie").split(";", 1)[0]
+        self.network_diagnostics.read.side_effect = RuntimeError("collector failed")
+        request = urllib.request.Request(
+            f"{self.base_url}/api/v1/nvr/health",
+            headers={"Cookie": cookie},
+        )
+
+        with urllib.request.urlopen(request, timeout=1) as response:
+            nvr = json.loads(response.read().decode("utf-8"))
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(nvr["state"], "active")
+        self.network_diagnostics.read.assert_not_called()
 
     def test_external_host_and_origin_are_rejected(self):
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=2)
@@ -575,8 +875,21 @@ class AnalyticsFrontendSafetyTests(unittest.TestCase):
         self.assertIn('fetch("/api/v1/overview"', script)
         self.assertIn('rel = "noopener noreferrer"', script)
         self.assertIn("function renderNetwork()", script)
+        self.assertIn("function renderReports()", script)
+        self.assertIn("function renderSystem()", script)
         self.assertIn('state.route === "network"', script)
+        self.assertIn('state.route === "reports"', script)
+        self.assertIn('state.route === "system"', script)
         self.assertIn("can_observe_store_traffic", script)
+        self.assertIn("operations.report", script)
+        self.assertIn("operations.readiness", script)
+        self.assertIn("window.scrollTo(0, 0)", script)
+        self.assertIn("function keepActiveRouteVisible()", script)
+        self.assertIn("priority_actions.forEach", script)
+        self.assertIn("stale-data-banner", script)
+        self.assertIn("Ocorrências da última coleta", script)
+        self.assertIn('id="topbar-update"', html)
+        self.assertIn('class="nav-state"', html)
         self.assertIn('aria-label="Navegação principal"', html)
 
 

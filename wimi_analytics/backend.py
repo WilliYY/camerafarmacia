@@ -1,7 +1,10 @@
 import json
+import math
 import time
 from datetime import datetime
 from pathlib import Path
+
+from .operations import build_operational_report, build_readiness
 
 
 SCHEMA_VERSION = 1
@@ -21,6 +24,16 @@ METRIC_FIELDS = (
     "go2rtc_restart_count",
     "kernel_144_reports_24h",
 )
+NONNEGATIVE_METRIC_FIELDS = {
+    "thread_count",
+    "process_memory_mb",
+    "local_free_gb",
+    "hd_free_gb",
+    "pending_backup_count",
+    "pending_backup_gb",
+    "go2rtc_restart_count",
+    "kernel_144_reports_24h",
+}
 CAMERA_FIELDS = (
     "status",
     "reason",
@@ -48,11 +61,23 @@ HARDWARE_PROTECTION_FIELDS = (
 
 
 def _safe_scalar(value):
-    if value is None or isinstance(value, (bool, int, float)):
+    if value is None or isinstance(value, bool):
         return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
     if isinstance(value, str):
         return value[:500]
     return None
+
+
+def _safe_nonnegative_number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value if value >= 0 else None
 
 
 def _allowlisted_dict(source, fields):
@@ -66,9 +91,51 @@ def _allowlisted_dict(source, fields):
     return result
 
 
+def _sanitize_hardware_summary(source):
+    if not isinstance(source, dict):
+        return {}
+    smart = source.get("smart") if isinstance(source.get("smart"), dict) else {}
+    kernel = (
+        source.get("kernel_144") if isinstance(source.get("kernel_144"), dict) else {}
+    )
+    power = source.get("power") if isinstance(source.get("power"), dict) else {}
+    drives = smart.get("drives") if isinstance(smart.get("drives"), list) else []
+    drive_statuses = [
+        str(drive.get("status", "")).strip().lower()
+        for drive in drives[:32]
+        if isinstance(drive, dict)
+    ]
+    drive_warning_count = sum(
+        status not in {"", "ok", "healthy"} for status in drive_statuses
+    )
+    summary = {
+        "smart_status": _safe_scalar(smart.get("status")),
+        "telemetry_level": _safe_scalar(smart.get("telemetry_level")),
+        "checked_at": _safe_scalar(smart.get("checked_at")),
+        "drive_count": len(drive_statuses),
+        "drive_warning_count": drive_warning_count,
+        "kernel_144_count_24h": _safe_nonnegative_number(kernel.get("count_24h")),
+        "kernel_144_new_in_session": _safe_nonnegative_number(
+            kernel.get("new_in_session")
+        ),
+        "power_status": _safe_scalar(power.get("status")),
+    }
+    return {key: value for key, value in summary.items() if value is not None}
+
+
 def _sanitize_snapshot(snapshot):
     metrics = snapshot.get("metrics") if isinstance(snapshot.get("metrics"), dict) else {}
-    clean_metrics = _allowlisted_dict(metrics, METRIC_FIELDS)
+    clean_metrics = {}
+    for field in METRIC_FIELDS:
+        value = metrics.get(field)
+        if field in NONNEGATIVE_METRIC_FIELDS:
+            value = _safe_nonnegative_number(value)
+        elif field == "hd_available":
+            value = value if isinstance(value, bool) else None
+        else:
+            value = _safe_scalar(value)
+        if value is not None:
+            clean_metrics[field] = value
 
     active_streams = metrics.get("active_streams")
     if isinstance(active_streams, list):
@@ -119,6 +186,9 @@ def _sanitize_snapshot(snapshot):
         if protection:
             intelligence["hardware_protection"] = protection
         clean["intelligence"] = intelligence
+    hardware_summary = _sanitize_hardware_summary(snapshot.get("hardware"))
+    if hardware_summary:
+        clean["hardware_summary"] = hardware_summary
     return clean
 
 
@@ -213,7 +283,7 @@ class NvrHealthBridge:
                 "state": "unavailable",
                 "reason": "timestamp_invalid",
                 "age_seconds": None,
-                "snapshot": _sanitize_snapshot(snapshot),
+                "snapshot": None,
             }
 
         age_seconds = round((datetime.now() - generated_at).total_seconds(), 1)
@@ -274,6 +344,17 @@ def build_dashboard_payload(
     else:
         network_module_status = "unavailable"
         network_detail = "Diagnostico local da rede indisponivel"
+    report = build_operational_report(nvr, network)
+    report_state = report.get("state")
+    if report_state == "current":
+        report_module_status = "active"
+        report_detail = "Relatorio operacional atual disponivel"
+    elif report_state == "partial":
+        report_module_status = "warning"
+        report_detail = "Relatorio disponivel com dados possivelmente antigos"
+    else:
+        report_module_status = "waiting_for_data"
+        report_detail = "Aguardando snapshot valido do NVR"
     modules = [
         {
             "id": "nvr",
@@ -308,10 +389,11 @@ def build_dashboard_payload(
         {
             "id": "reports",
             "label": "Relatorios",
-            "status": "waiting_for_data",
-            "detail": "Aguardando fontes operacionais",
+            "status": report_module_status,
+            "detail": report_detail,
         },
     ]
+    readiness = build_readiness(nvr, network, modules, report)
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -324,6 +406,10 @@ def build_dashboard_payload(
         },
         "nvr": nvr,
         "network": network,
+        "operations": {
+            "report": report,
+            "readiness": readiness,
+        },
         "modules": modules,
         "links": {
             "panel": panel_url,

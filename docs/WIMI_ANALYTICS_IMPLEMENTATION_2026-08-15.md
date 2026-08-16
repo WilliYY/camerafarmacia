@@ -13,6 +13,8 @@ como um produto unico. Internamente continuam isolados:
 - a pagina Cameras abre o visualizador go2rtc direto, sem proxy ou transcode;
 - o snapshot do NVR e filtrado antes de chegar ao navegador;
 - a pagina Rede diagnostica somente a configuracao deste PC;
+- Relatorios consolida a coleta atual sem inventar dados historicos;
+- Sistema apresenta pontos fortes, limitacoes e riscos com suas evidencias;
 - coletores ainda inexistentes nunca aparecem como ativos.
 
 ## Fluxo entregue
@@ -24,8 +26,9 @@ gerenciador.pyw
   `-- inicia wimi_analytics.server em processo separado
          |-- NvrHealthBridge le e sanitiza o snapshot
          |-- WindowsNetworkDiagnostics le configuracao local com cache
+         |-- operations.py produz relatorio e prontidao deterministas
          |-- API local somente leitura exige sessao do navegador
-         `-- dashboard exibe Cameras e estado operacional
+         `-- dashboard exibe Cameras, Ocorrencias, Relatorios e Sistema
 ```
 
 ## Rotas locais
@@ -38,6 +41,8 @@ gerenciador.pyw
 | `/api/v1/nvr/health` | saude sanitizada do NVR | sessao, Host e Origin |
 | `/api/v1/modules` | estado declarado dos modulos | sessao, Host e Origin |
 | `/api/v1/network/status` | interface, IPv4, gateway e DNS deste PC | sessao, Host e Origin |
+| `/api/v1/reports/current` | verificacoes da coleta atual | sessao, Host e Origin |
+| `/api/v1/system/readiness` | pontos fortes, limitacoes e riscos | sessao, Host e Origin |
 
 O servico recusa metodos de escrita, nao define CORS permissivo e escuta somente
 em `127.0.0.1:8765`. As portas `1984` e `29999` sao reservadas ao go2rtc e ao
@@ -52,6 +57,10 @@ controle de instancia do NVR.
 - snapshot ausente, invalido, antigo ou com relogio divergente falha fechado;
 - DTO por lista permitida remove hostname, caminhos, URL, credenciais, serial de
   disco, evidencias internas e campos desconhecidos;
+- numeros nao finitos, booleanos em metricas numericas e timestamps invalidos
+  sao rejeitados; o resumo de hardware expoe somente contagens agregadas;
+- alerta sanitizado do HD prevalece sobre o indicador simples de unidade
+  conectada, evitando apresentar armazenamento em verde durante uma ocorrencia;
 - nenhum loop de reinicio, log continuo ou download automatico foi adicionado;
 - o servidor HTTP local usa workers daemon para manter `/healthz` responsivo
   durante uma coleta, sem impedir o encerramento do processo;
@@ -71,7 +80,9 @@ controle de instancia do NVR.
 | Visao computacional | nao configurada |
 | Computadores | nao configurado |
 | Rede | diagnostico local ativo; DNS/flows da loja nao configurados |
-| Relatorios | aguardando fontes reais |
+| Ocorrencias | alertas da coleta atual; sem historico persistente |
+| Relatorios | coleta atual ativa; parcial se NVR ou rede estiver indisponivel |
+| Sistema | prontidao, pontos fortes, limitacoes e riscos ativos |
 
 Essa separacao e intencional. Ativar detector, tracking, telemetria de aplicativos
 ou DNS sem benchmark e governanca produziria risco de falso positivo e carga
@@ -80,7 +91,7 @@ desnecessaria no computador do NVR.
 ## Validacao executavel
 
 ```powershell
-python -m py_compile gerenciador.pyw wimi_analytics\__init__.py wimi_analytics\__main__.py wimi_analytics\backend.py wimi_analytics\launcher.py wimi_analytics\network_diagnostics.py wimi_analytics\server.py
+python -m py_compile gerenciador.pyw wimi_analytics\__init__.py wimi_analytics\__main__.py wimi_analytics\backend.py wimi_analytics\launcher.py wimi_analytics\network_diagnostics.py wimi_analytics\operations.py wimi_analytics\server.py
 python -m unittest discover -s tests -v
 node --check wimi_analytics\static\app.js
 python gerenciador.pyw --health-check

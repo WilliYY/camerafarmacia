@@ -8,6 +8,12 @@ do snapshot de saude, sessao de navegador, supervisor single-instance, botao no
 Tkinter e dashboard com todas as rotas planejadas. O detalhe executavel esta em
 `docs/WIMI_ANALYTICS_IMPLEMENTATION_2026-08-15.md`.
 
+Relatorios e Sistema ja possuem uma primeira versao operacional: usam apenas a
+coleta atual sanitizada para verificar NVR, alertas, cameras, gravacao, HD,
+backup, hardware e configuracao de rede deste PC. Ocorrencias mostra o snapshot
+atual. Nao ha ainda historico persistente, totais diarios ou score de
+produtividade.
+
 Essa entrega nao ativa detector, tracking, agente Windows, DNS/flows da loja,
 banco ou score de produtividade. O painel possui apenas diagnostico local e
 somente leitura da interface, IPv4, gateway e DNS configurado neste PC, sem

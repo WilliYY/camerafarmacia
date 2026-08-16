@@ -80,7 +80,9 @@ O gerenciador compara a versão local com a versão publicada no GitHub, mas só
 
 O aplicativo inicia um servico local separado em `http://127.0.0.1:8765/` e
 mostra o botao **Painel WIMI** na interface. O painel reune as rotas Cameras,
-Analytics, Computadores, Rede, Timeline, Relatorios e Sistema.
+Analytics, Computadores, Rede, Ocorrencias, Relatorios e Sistema. Relatorios
+consolida a coleta atual do NVR e deste PC; Sistema separa pontos fortes,
+limitacoes e riscos sem produzir uma nota artificial de saude.
 
 Nesta primeira fundacao funcional, o servico e somente leitura: consome uma
 versao filtrada de `sistema/logs/health_status.json`, nao importa o
@@ -90,6 +92,11 @@ instalacao e validacao proprias. A rota Rede mostra somente a configuracao local
 do PC (interface ativa, IPv4, gateway e DNS); ela nao captura pacotes nem afirma
 enxergar o trafego da loja. Cobertura completa depende de uma fonte autorizada
 no gateway, como DNS agregado ou NetFlow/IPFIX.
+
+O relatorio atual nao e historico diario: ele mostra somente evidencias da
+coleta vigente, incluindo cameras, gravacao, alertas, HD, backup, protecao de
+hardware e rede local. Historico persistente, visao computacional e telemetria
+dos computadores continuam explicitamente nao configurados.
 
 ---
 
