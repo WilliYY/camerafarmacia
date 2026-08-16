@@ -26,7 +26,10 @@ from wimi_analytics.launcher import (
     probe_server,
     stop_owned_server,
 )
-from wimi_analytics.network_diagnostics import WindowsNetworkDiagnostics
+from wimi_analytics.network_diagnostics import (
+    WindowsNetworkDiagnostics,
+    load_or_create_identifier_key,
+)
 from wimi_analytics.operations import build_operational_report, build_readiness
 
 
@@ -583,6 +586,154 @@ class NetworkDiagnosticsTests(unittest.TestCase):
         self.assertIn("Win32_NetworkAdapterConfiguration", powershell_command)
         self.assertIn("Get-NetAdapterStatistics", powershell_command)
         self.assertNotIn("Get-NetIPConfiguration", powershell_command)
+
+    def test_windows_collector_reports_bounded_lan_presence_and_local_applications(self):
+        runner = mock.Mock(
+            return_value=self.make_completed_process(
+                {
+                    "interfaces": [
+                        {
+                            "alias": "Ethernet",
+                            "status": "Up",
+                            "media_type": "802.3",
+                            "hardware_interface": True,
+                            "ipv4": ["192.168.7.6"],
+                            "gateway": ["192.168.7.1"],
+                            "dns": ["192.168.7.1"],
+                        }
+                    ],
+                    "gateway_probe": {
+                        "state": "reachable",
+                        "latency_ms": 3,
+                        "address": "192.168.7.1",
+                    },
+                    "lan_devices": [
+                        {
+                            "ip_address": "192.168.7.20",
+                            "link_layer_address": "AA-BB-CC-DD-EE-FF",
+                            "interface_alias": "Ethernet",
+                            "state": "Reachable",
+                        },
+                        {
+                            "ip_address": "192.168.7.21",
+                            "link_layer_address": "AA:BB:CC:DD:EE:FF",
+                            "interface_alias": "Ethernet",
+                            "state": "Reachable",
+                        },
+                        {
+                            "ip_address": "8.8.8.8",
+                            "link_layer_address": "11-22-33-44-55-66",
+                            "interface_alias": "Ethernet",
+                            "state": "Reachable",
+                        },
+                    ],
+                    "local_applications": [
+                        {
+                            "name": "chrome",
+                            "connection_count": 8,
+                            "remote_address": "203.0.113.10",
+                            "payload": "secret",
+                        },
+                        {"name": "pythonw", "connection_count": 2},
+                    ],
+                    "lan_visibility_state": "partial",
+                    "application_visibility_state": "available",
+                }
+            )
+        )
+        diagnostics = WindowsNetworkDiagnostics(
+            runner=runner,
+            platform_name="win32",
+            ttl_seconds=60,
+        )
+
+        result = diagnostics.read()
+        serialized = json.dumps(result)
+
+        self.assertEqual(result["gateway_probe"]["state"], "reachable")
+        self.assertEqual(result["gateway_probe"]["latency_ms"], 3.0)
+        self.assertEqual(result["lan_visibility"]["state"], "partial")
+        self.assertEqual(result["lan_visibility"]["device_count"], 1)
+        self.assertEqual(result["lan_devices"][0]["ipv4"], "192.168.7.20")
+        self.assertRegex(result["lan_devices"][0]["device_id"], r"^[0-9a-f]{16}$")
+        self.assertEqual(
+            result["local_applications"],
+            [
+                {"name": "chrome", "connection_count": 8},
+                {"name": "pythonw", "connection_count": 2},
+            ],
+        )
+        self.assertFalse(result["privacy"]["captures_content"])
+        self.assertFalse(result["privacy"]["captures_remote_endpoints"])
+        self.assertNotIn("AA-BB-CC", serialized)
+        self.assertNotIn("203.0.113.10", serialized)
+        self.assertNotIn("secret", serialized)
+        powershell_command = runner.call_args.args[0][-1]
+        self.assertIn("Get-NetNeighbor", powershell_command)
+        self.assertIn("Get-NetTCPConnection", powershell_command)
+        self.assertIn("Test-Connection", powershell_command)
+
+    def test_device_identifier_is_installation_scoped_and_survives_dhcp_change(self):
+        def payload(ipv4):
+            return {
+                "interfaces": [
+                    {
+                        "alias": "Ethernet",
+                        "status": "Up",
+                        "media_type": "802.3",
+                        "hardware_interface": True,
+                        "ipv4": ["192.168.7.6"],
+                    }
+                ],
+                "lan_devices": [
+                    {
+                        "ip_address": ipv4,
+                        "link_layer_address": "AA-BB-CC-DD-EE-FF",
+                        "interface_alias": "Ethernet",
+                        "state": "Reachable",
+                    }
+                ],
+                "lan_visibility_state": "partial",
+                "application_visibility_state": "available",
+            }
+
+        first = WindowsNetworkDiagnostics(
+            runner=mock.Mock(return_value=self.make_completed_process(payload("192.168.7.20"))),
+            platform_name="win32",
+            identifier_key=b"a" * 32,
+        ).read()["lan_devices"][0]["device_id"]
+        changed_ip = WindowsNetworkDiagnostics(
+            runner=mock.Mock(return_value=self.make_completed_process(payload("192.168.7.21"))),
+            platform_name="win32",
+            identifier_key=b"a" * 32,
+        ).read()["lan_devices"][0]["device_id"]
+        other_installation = WindowsNetworkDiagnostics(
+            runner=mock.Mock(return_value=self.make_completed_process(payload("192.168.7.20"))),
+            platform_name="win32",
+            identifier_key=b"b" * 32,
+        ).read()["lan_devices"][0]["device_id"]
+
+        self.assertEqual(first, changed_ip)
+        self.assertNotEqual(first, other_installation)
+
+    def test_identifier_key_is_protected_and_reused(self):
+        class FakeProtector:
+            def protect(self, value):
+                return b"protected:" + value[::-1]
+
+            def unprotect(self, value):
+                if not value.startswith(b"protected:"):
+                    raise ValueError("invalid")
+                return value[len(b"protected:") :][::-1]
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "network_identity.key"
+            first = load_or_create_identifier_key(path, protector=FakeProtector())
+            second = load_or_create_identifier_key(path, protector=FakeProtector())
+
+            self.assertEqual(len(first), 32)
+            self.assertEqual(first, second)
+            self.assertNotIn(first, path.read_bytes())
 
     def test_collector_uses_bounded_cache_instead_of_spawning_powershell_per_poll(self):
         runner = mock.Mock(

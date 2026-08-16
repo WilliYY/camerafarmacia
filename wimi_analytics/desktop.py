@@ -428,7 +428,7 @@ class AnalyticsDesktopWindow:
         self._section_title(
             tab,
             "Saúde de rede deste computador",
-            "Coleta agregada de configuração e conectividade. Não captura pacotes, mensagens, senhas ou navegação.",
+            "Presença da LAN e aplicativos com TCP ativo neste PC. Não captura pacotes, mensagens, senhas, páginas ou destinos remotos.",
         )
         self._labels["network_summary"] = tk.Label(
             tab,
@@ -440,8 +440,16 @@ class AnalyticsDesktopWindow:
             justify="left",
         )
         self._labels["network_summary"].pack(fill="x", padx=8, pady=(0, 12))
+        network_views = ttk.Notebook(tab, style="Wimi.TNotebook")
+        network_views.pack(fill="both", expand=True, padx=8, pady=(0, 12))
+        connection_tab = tk.Frame(network_views, bg=BG)
+        devices_tab = tk.Frame(network_views, bg=BG)
+        applications_tab = tk.Frame(network_views, bg=BG)
+        network_views.add(connection_tab, text="Conexão")
+        network_views.add(devices_tab, text="Dispositivos LAN")
+        network_views.add(applications_tab, text="Aplicativos deste PC")
         self._tree(
-            tab,
+            connection_tab,
             "network_sessions",
             (
                 ("started", "Início"),
@@ -455,7 +463,7 @@ class AnalyticsDesktopWindow:
             height=5,
         )
         self._tree(
-            tab,
+            connection_tab,
             "network",
             (
                 ("when", "Data e hora"),
@@ -469,6 +477,37 @@ class AnalyticsDesktopWindow:
             ),
             (155, 90, 105, 95, 100, 100, 115, 220),
             height=8,
+        )
+        self._tree(
+            devices_tab,
+            "network_devices",
+            (
+                ("device", "Identificador"),
+                ("ipv4", "IP local"),
+                ("interface", "Interface"),
+                ("first_seen", "Primeiro sinal"),
+                ("last_seen", "Último sinal"),
+                ("duration", "Permanência observada"),
+                ("neighbor_state", "Cache Windows"),
+                ("state", "Sessão"),
+            ),
+            (125, 115, 120, 155, 155, 150, 115, 90),
+            height=14,
+        )
+        self._tree(
+            applications_tab,
+            "network_applications",
+            (
+                ("application", "Aplicativo"),
+                ("first_seen", "Início"),
+                ("last_seen", "Último sinal"),
+                ("duration", "Permanência observada"),
+                ("connections", "Conexões atuais"),
+                ("peak", "Pico"),
+                ("state", "Sessão"),
+            ),
+            (170, 155, 155, 160, 120, 90, 90),
+            height=14,
         )
 
     def _build_evidence_tab(self):
@@ -775,6 +814,8 @@ class AnalyticsDesktopWindow:
         )
         samples = self.store.list_network_samples(limit=200)
         sessions = self.store.list_network_sessions(limit=50)
+        devices = self.store.list_network_device_sessions(limit=100)
+        applications = self.store.list_local_application_sessions(limit=100)
         traffic = self.store.summarize_network_traffic(limit=120, samples=samples[:120])
         recent_faults = samples[0].get("error_delta") if samples else None
         recent_reset = bool(samples and samples[0].get("counter_reset_detected"))
@@ -803,6 +844,37 @@ class AnalyticsDesktopWindow:
             if active_session
             else "Nenhuma sessão de rede ativa registrada"
         )
+        gateway = network.get("gateway_probe") or {}
+        gateway_state = gateway.get("state")
+        gateway_latency = gateway.get("latency_ms")
+        if gateway_state == "reachable":
+            gateway_text = (
+                f"Gateway: acessível em {gateway_latency:.0f} ms"
+                if isinstance(gateway_latency, (int, float))
+                else "Gateway: acessível"
+            )
+        elif gateway_state == "not_configured":
+            gateway_text = "Gateway: não configurado"
+        elif gateway_state == "inconclusive":
+            gateway_text = "Gateway: teste ICMP inconclusivo"
+        else:
+            gateway_text = "Gateway: medição indisponível"
+        lan_visibility = network.get("lan_visibility") or {}
+        application_visibility = network.get("application_visibility") or {}
+        if lan_visibility.get("state") == "partial":
+            lan_text = (
+                f"LAN: {lan_visibility.get('device_count', 0)} dispositivo(s) visto(s); "
+                "visão parcial do cache do Windows"
+            )
+        else:
+            lan_text = "LAN: presença de dispositivos indisponível"
+        if application_visibility.get("state") == "available":
+            application_text = (
+                "Aplicativos deste PC com TCP ativo: "
+                f"{application_visibility.get('application_count', 0)}"
+            )
+        else:
+            application_text = "Aplicativos deste PC: medição indisponível"
         self._labels["network_summary"].configure(
             text=(
                 f"{_status_text(network.get('state'))} | Conexão: {connection} | Interfaces ativas: "
@@ -812,8 +884,10 @@ class AnalyticsDesktopWindow:
                 f"Tráfego deste PC: {_data_rate_text(traffic.get('current_bytes_per_second'))} | "
                 f"Referência histórica: {_data_rate_text(traffic.get('baseline_bytes_per_second'))} | "
                 f"{anomaly_text}\n"
+                f"{gateway_text} | {lan_text}\n"
+                f"{application_text}\n"
                 f"{session_text}\n"
-                "Privacidade: conteúdo não coletado; destinos e acessos não identificados"
+                "Privacidade: conteúdo não coletado; credenciais, URLs e destinos remotos não são coletados"
             ),
             fg=(
                 GREEN
@@ -843,6 +917,55 @@ class AnalyticsDesktopWindow:
                 )
             )
         self._replace_rows(self._trees["network_sessions"], session_rows)
+        device_rows = []
+        for item in devices:
+            device_rows.append(
+                (
+                    f"device-{item.get('id')}",
+                    (
+                        f"#{str(item.get('device_id') or '')[:8]}",
+                        item.get("ipv4", "-"),
+                        item.get("interface_alias", "-"),
+                        item.get("started_at", "-"),
+                        item.get("last_seen_at", "-"),
+                        _duration_text(item.get("duration_seconds")),
+                        str(item.get("last_state") or "-").capitalize(),
+                        (
+                            "Vista agora"
+                            if item.get("active")
+                            and lan_visibility.get("state") == "partial"
+                            else "Sem confirmação"
+                            if item.get("active")
+                            else "Encerrada"
+                        ),
+                    ),
+                )
+            )
+        self._replace_rows(self._trees["network_devices"], device_rows)
+        application_rows = []
+        for item in applications:
+            application_rows.append(
+                (
+                    f"application-{item.get('id')}",
+                    (
+                        item.get("application_name", "-"),
+                        item.get("started_at", "-"),
+                        item.get("last_seen_at", "-"),
+                        _duration_text(item.get("duration_seconds")),
+                        item.get("current_connection_count", 0),
+                        item.get("peak_connection_count", 0),
+                        (
+                            "Ativa"
+                            if item.get("active")
+                            and application_visibility.get("state") == "available"
+                            else "Sem confirmação"
+                            if item.get("active")
+                            else "Encerrada"
+                        ),
+                    ),
+                )
+            )
+        self._replace_rows(self._trees["network_applications"], application_rows)
         rows = []
         for index, item in enumerate(samples):
             received_rate = item.get("received_bytes_per_second")

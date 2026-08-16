@@ -6497,7 +6497,10 @@ class CameraManagerApp:
             from wimi_analytics.collector import AnalyticsCollector
             from wimi_analytics.evidence import AnonymizedEvidenceArchive
             from wimi_analytics.face_engine import LocalFaceService
-            from wimi_analytics.network_diagnostics import WindowsNetworkDiagnostics
+            from wimi_analytics.network_diagnostics import (
+                WindowsNetworkDiagnostics,
+                load_or_create_identifier_key,
+            )
             from wimi_analytics.storage import AnalyticsStore
             from wimi_analytics.vision import VisionCoordinator
 
@@ -6519,6 +6522,17 @@ class CameraManagerApp:
                 min_interval_seconds=900,
                 max_total_bytes=256 * 1024 * 1024,
             )
+            network_identifier_key = None
+            try:
+                network_identifier_key = load_or_create_identifier_key(
+                    os.path.join(runtime_dir, "network_identity.key")
+                )
+            except Exception as error:
+                self.add_log(
+                    "[WIMI][REDE] Identidade de dispositivos sera temporaria nesta "
+                    f"sessao: {type(error).__name__}",
+                    "tag_atencao",
+                )
             vision = VisionCoordinator(
                 store=analytics_store,
                 face_service=face_service,
@@ -6530,7 +6544,10 @@ class CameraManagerApp:
             )
             collector = AnalyticsCollector(
                 NvrHealthBridge(os.path.join(LOGS_DIR, "health_status.json")),
-                WindowsNetworkDiagnostics(ttl_seconds=60),
+                WindowsNetworkDiagnostics(
+                    ttl_seconds=60,
+                    identifier_key=network_identifier_key,
+                ),
                 analytics_store,
                 interval_seconds=60,
                 runtime_status_provider=self.wimi_runtime_status,
@@ -6686,7 +6703,10 @@ class CameraManagerApp:
             "vision": {"status": vision_status, "detail": vision_detail},
             "computers": {
                 "status": "limited",
-                "detail": "Este PC monitorado localmente; agente remoto nao necessario",
+                "detail": (
+                    "Aplicativos TCP deste PC monitorados localmente; "
+                    "outros computadores exigem agente autorizado"
+                ),
             },
             "history": {
                 "status": "active" if evidence_state == "active" else "limited",

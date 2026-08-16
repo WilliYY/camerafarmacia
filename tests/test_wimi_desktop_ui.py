@@ -36,6 +36,12 @@ class FakeStore:
     def list_network_sessions(self, limit=50):
         return []
 
+    def list_network_device_sessions(self, limit=100):
+        return []
+
+    def list_local_application_sessions(self, limit=100):
+        return []
+
     def list_reports(self, limit=200):
         return []
 
@@ -258,6 +264,138 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         self.assertIn("1 h 2 min", people_values)
         self.assertIn("Tráfego deste PC: 2,0 KB/s", network_text)
         self.assertIn("conteúdo não coletado", network_text)
+
+    def test_network_view_unifies_gateway_devices_and_local_application_sessions(self):
+        class NetworkCollector(FakeCollector):
+            def snapshot(self):
+                snapshot = super().snapshot()
+                snapshot["payload"]["network"].update(
+                    {
+                        "coverage": "host_configuration_counters_and_presence",
+                        "gateway_probe": {"state": "reachable", "latency_ms": 3.0},
+                        "lan_visibility": {"state": "partial", "device_count": 1},
+                        "application_visibility": {
+                            "state": "available",
+                            "application_count": 1,
+                        },
+                    }
+                )
+                return snapshot
+
+        class NetworkStore(FakeStore):
+            def list_network_device_sessions(self, limit=100):
+                return [
+                    {
+                        "id": 1,
+                        "device_id": "0123456789abcdef",
+                        "ipv4": "192.168.7.20",
+                        "interface_alias": "Ethernet",
+                        "started_at": "2026-08-16T09:00:00",
+                        "last_seen_at": "2026-08-16T09:05:00",
+                        "duration_seconds": 300.0,
+                        "last_state": "reachable",
+                        "active": True,
+                    }
+                ]
+
+            def list_local_application_sessions(self, limit=100):
+                return [
+                    {
+                        "id": 2,
+                        "application_name": "chrome",
+                        "started_at": "2026-08-16T09:00:00",
+                        "last_seen_at": "2026-08-16T09:05:00",
+                        "duration_seconds": 300.0,
+                        "current_connection_count": 4,
+                        "peak_connection_count": 7,
+                        "active": True,
+                    }
+                ]
+
+        controller = AnalyticsDesktopWindow(
+            self.root,
+            NetworkCollector(),
+            NetworkStore(),
+            FakeVision(),
+            face_service=FakeFaceService(),
+        )
+
+        self.assertTrue(controller.show())
+        self.root.update()
+        summary = controller._labels["network_summary"].cget("text")
+        device_values = controller._trees["network_devices"].item("device-1", "values")
+        app_values = controller._trees["network_applications"].item("application-2", "values")
+
+        self.assertIn("Gateway: acessível em 3 ms", summary)
+        self.assertIn("visão parcial", summary)
+        self.assertIn("192.168.7.20", device_values)
+        self.assertIn("chrome", app_values)
+        self.assertIn("7", app_values)
+
+    def test_network_view_marks_open_sessions_unconfirmed_when_sources_fail(self):
+        class UnavailableCollector(FakeCollector):
+            def snapshot(self):
+                snapshot = super().snapshot()
+                snapshot["payload"]["network"].update(
+                    {
+                        "lan_visibility": {"state": "unavailable", "device_count": 0},
+                        "application_visibility": {
+                            "state": "unavailable",
+                            "application_count": 0,
+                        },
+                    }
+                )
+                return snapshot
+
+        class OpenSessionsStore(FakeStore):
+            def list_network_device_sessions(self, limit=100):
+                return [
+                    {
+                        "id": 1,
+                        "device_id": "0123456789abcdef",
+                        "ipv4": "192.168.7.20",
+                        "interface_alias": "Ethernet",
+                        "started_at": "2026-08-16T09:00:00",
+                        "last_seen_at": "2026-08-16T09:05:00",
+                        "duration_seconds": 300.0,
+                        "last_state": "reachable",
+                        "active": True,
+                    }
+                ]
+
+            def list_local_application_sessions(self, limit=100):
+                return [
+                    {
+                        "id": 2,
+                        "application_name": "chrome",
+                        "started_at": "2026-08-16T09:00:00",
+                        "last_seen_at": "2026-08-16T09:05:00",
+                        "duration_seconds": 300.0,
+                        "current_connection_count": 4,
+                        "peak_connection_count": 7,
+                        "active": True,
+                    }
+                ]
+
+        controller = AnalyticsDesktopWindow(
+            self.root,
+            UnavailableCollector(),
+            OpenSessionsStore(),
+            FakeVision(),
+            face_service=FakeFaceService(),
+        )
+
+        self.assertTrue(controller.show())
+        self.root.update()
+
+        self.assertIn(
+            "Sem confirmação",
+            controller._trees["network_devices"].item("device-1", "values"),
+        )
+        self.assertIn(
+            "Sem confirmação",
+            controller._trees["network_applications"].item("application-2", "values"),
+        )
 
     def test_evidence_tab_previews_anonymized_capture_and_deletes_on_request(self):
         archive = FakeEvidenceArchive(

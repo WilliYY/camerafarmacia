@@ -335,7 +335,9 @@ def build_dashboard_payload(
     network_state = network.get("state")
     if network_state == "active":
         network_module_status = "limited"
-        network_detail = "Rede deste PC visivel; DNS e flows da loja nao configurados"
+        network_detail = (
+            "Gateway, vizinhos vistos e aplicativos TCP deste PC; visao da loja parcial"
+        )
     elif network_state == "unsupported":
         network_module_status = "not_configured"
         network_detail = "Diagnostico local requer Windows"

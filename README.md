@@ -80,8 +80,8 @@ O gerenciador compara a versão local com a versão publicada no GitHub, mas só
 
 O painel principal possui duas abas superiores: **Cameras** e **Analises**.
 Analises fica dentro da mesma janela e contem Visao geral, Cameras,
-Comportamento, Rede, Relatorios e Pessoas. Alternar entre elas nao reinicia o
-NVR, o coletor, a visao ou o banco local.
+Comportamento, Rede, Evidencias, Relatorios e Pessoas. Alternar entre elas nao
+reinicia o NVR, o coletor, a visao ou o banco local.
 
 O historico persistente usa SQLite em `sistema/analytics/`, fora do HD de
 gravacoes. A visao reutiliza o preview existente, calibra de forma limitada o
@@ -103,12 +103,19 @@ pendencia persistente faz nova tentativa na proxima abertura.
 A aba Comportamento resume apenas fatos observaveis, como movimento, duracao e
 contagem de rostos. Nao classifica emocao, intencao, honestidade ou produtividade.
 
-A aba Rede identifica o tipo de conexao deste PC, velocidade do link,
-contadores, variacoes entre amostras e picos relativos ao historico local. Ela
-pode afirmar que houve trafego agregado neste computador, mas nao identifica
-destinos, sites ou conteudo acessado. Nao captura pacotes, mensagens, senhas,
-navegacao ou conteudo de outros dispositivos. Cobertura da loja inteira continua
-dependendo de fonte autorizada no gateway. O servidor
+A aba Rede identifica o tipo de conexao deste PC, velocidade do link, resposta
+do gateway, contadores, variacoes entre amostras e picos relativos ao historico
+local. Tambem registra sessoes dos dispositivos vistos no cache de vizinhos do
+Windows e dos aplicativos que mantem TCP estabelecido neste computador. O MAC
+bruto e descartado e vira somente um identificador HMAC local de 16 caracteres;
+a chave da instalacao fica cifrada pelo DPAPI do Windows.
+Ausencia no cache nao prova que um equipamento esteja offline; permanencia de
+aplicativo mede conexao observada, nao tempo de tela ou uso ativo.
+
+O recurso nao identifica destinos, sites ou conteudo acessado. Nao captura
+pacotes, mensagens, senhas, navegacao ou conteudo de outros dispositivos.
+Cobertura da loja inteira continua dependendo de telemetria autorizada no
+gateway. O servidor
 `http://127.0.0.1:8765/` permanece apenas para compatibilidade e diagnostico.
 O coletor Windows permanece limitado a 12 segundos e usa cache, evitando criar
 PowerShell continuamente quando o CIM estiver lento.
@@ -217,11 +224,13 @@ de emocao, intencao ou produtividade. A adaptacao automatica aprende somente o
 ruido visual de fundo dentro de janela e limites fixos; nao altera gravacao,
 retencao, camera, rede ou identidade.
 
-A aba Rede registra somente sessoes dos adaptadores deste computador: inicio,
-ultimo sinal, duracao medida e bytes agregados para Cabo ou Wi-Fi. Nao captura
-pacotes, destinos, paginas, aplicativos, mensagens, senhas nem conteudo de
-outros dispositivos. O SQLite permanece local e todas as escritas operacionais
-sao serializadas pelo mesmo bloqueio do processo.
+A aba Rede registra sessoes dos adaptadores deste computador, dispositivos
+vistos na LAN e aplicativos com TCP estabelecido neste PC: inicio, ultimo sinal,
+duracao observada, contagens e bytes agregados para Cabo ou Wi-Fi. Nao coleta
+endereco remoto, pacote, pagina, mensagem, senha ou conteudo. A visao da LAN e
+parcial ate existir integracao autorizada com o roteador. O SQLite permanece
+local, usa retencao operacional de 90 dias e serializa todas as escritas pelo
+mesmo bloqueio do processo.
 
 O servidor HTTP antigo continua disponivel somente para compatibilidade e
 diagnostico. Para executa-lo sem iniciar o NVR ou as cameras, use:

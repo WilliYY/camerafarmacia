@@ -61,6 +61,10 @@ Tabelas versionadas:
   minuto e somente quando houver mudanca ou amostra horaria;
 - `network_connection_sessions`: sessoes Cabo/Wi-Fi deste host com inicio,
   ultimo sinal, duracao medida e bytes agregados;
+- `network_device_sessions`: equipamentos vistos no cache de vizinhos, com IP
+  privado, identificador pseudonimo, primeiro/ultimo sinal e duracao observada;
+- `local_application_sessions`: aplicativos deste PC com TCP estabelecido,
+  inicio/ultimo sinal, duracao observada e pico de conexoes;
 - `vision_events`: inicio/fim de movimento, contagem de rostos, falha limitada e
   presenca confirmada, sem imagem;
 - `evidence_snapshots`: indice sem nome ou perfil para capturas de atendimento
@@ -86,7 +90,8 @@ exclusao manual; nenhum item guarda `profile_id`, nome ou face identificavel.
 - **Visao geral:** estado do NVR, riscos, pontos fortes e atualidade da fonte.
 - **Cameras:** conectividade, gravacao e estado da analise por camera.
 - **Comportamento:** movimento e presenca agregados, com origem e horario.
-- **Rede:** adaptadores/configuracao deste PC e historico de disponibilidade.
+- **Rede:** conexao/gateway, dispositivos vistos e aplicativos TCP deste PC em
+  subabas persistentes.
 - **Evidencias:** miniaturas descaracterizadas, expiracao e exclusao manual.
 - **Relatorios:** coletas persistidas, filtros de periodo e detalhes.
 - **Pessoas:** cadastro, ativacao e exclusao de perfis consentidos.
@@ -124,6 +129,14 @@ percorrida por teclado pelo `ttk.Notebook`.
   DNS consultado, pagina, mensagem, senha ou conteudo.
 - `network_connection_sessions` separa Cabo e Wi-Fi, encerra lacunas maiores que
   cinco minutos e nunca inventa trafego negativo apos reset de contador;
+- `network_device_sessions` recebe somente IP privado e identificador derivado;
+  o MAC bruto nao e persistido, o identificador usa HMAC com chave DPAPI local e
+  ausencia no cache nao prova dispositivo offline;
+- `local_application_sessions` mede conexao TCP estabelecida deste PC, nao tempo
+  em primeiro plano, destino, site, pagina ou conteudo;
+- falha nas fontes de vizinhos ou aplicativos nao encerra sessoes existentes;
+- entradas `Stale` nao renovam presenca e os historicos sao limitados a 5.000
+  sessoes de dispositivos e 10.000 sessoes de aplicativos;
 - a imagem de evidencia e descaracterizada em memoria, codificada, cifrada por
   DPAPI e publicada por temporario, `fsync` e troca atomica;
 - a miniatura e descriptografada apenas em memoria e a manutencao nunca percorre

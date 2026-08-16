@@ -5,6 +5,7 @@ import unittest
 from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 
 from wimi_analytics.collector import AnalyticsCollector
@@ -71,6 +72,8 @@ class AnalyticsStoreTests(unittest.TestCase):
                 "deleted_profile_hashes",
                 "maintenance_state",
                 "network_connection_sessions",
+                "network_device_sessions",
+                "local_application_sessions",
                 "evidence_snapshots",
             }.issubset(tables)
         )
@@ -123,6 +126,10 @@ class AnalyticsStoreTests(unittest.TestCase):
                 "wired_interface_count",
                 "wireless_interface_count",
                 "virtual_interface_count",
+                "gateway_state",
+                "gateway_latency_ms",
+                "lan_device_count",
+                "local_application_count",
             }.issubset(columns)
         )
 
@@ -170,7 +177,7 @@ class AnalyticsStoreTests(unittest.TestCase):
         self.assertEqual(first_summary, [])
         self.assertEqual(second_summary, [])
         self.assertEqual(migrated_events, [])
-        self.assertEqual(schema_version, 4)
+        self.assertEqual(schema_version, 5)
         self.assertNotIn(b"profile-consentido", legacy_path.read_bytes())
 
     def test_version_three_upgrade_preserves_current_presence_history(self):
@@ -329,6 +336,129 @@ class AnalyticsStoreTests(unittest.TestCase):
         self.store.record_network(network, collected_at=start + timedelta(minutes=5))
         self.assertFalse(self.store.list_network_sessions(limit=1)[0]["active"])
 
+    def test_network_inventory_tracks_device_and_local_application_sessions(self):
+        network = {
+            "state": "active",
+            "coverage": "host_configuration_counters_and_presence",
+            "connectivity": {
+                "active_interface_count": 1,
+                "primary_connection_type": "wired",
+                "wired_interface_count": 1,
+            },
+            "traffic_counters": {"received_bytes": 1000, "sent_bytes": 500},
+            "gateway_probe": {"state": "reachable", "latency_ms": 2.5},
+            "lan_visibility": {"state": "partial", "device_count": 1},
+            "lan_devices": [
+                {
+                    "device_id": "0123456789abcdef",
+                    "ipv4": "192.168.7.20",
+                    "interface_alias": "Ethernet",
+                    "state": "reachable",
+                }
+            ],
+            "application_visibility": {"state": "available", "application_count": 1},
+            "local_applications": [{"name": "chrome", "connection_count": 4}],
+        }
+        start = datetime(2026, 8, 16, 9, 0, 0)
+
+        self.store.record_network(network, collected_at=start)
+        network["local_applications"][0]["connection_count"] = 7
+        self.store.record_network(network, collected_at=start + timedelta(minutes=2))
+        network["lan_devices"] = []
+        network["lan_visibility"]["device_count"] = 0
+        network["local_applications"] = []
+        network["application_visibility"]["application_count"] = 0
+        self.store.record_network(network, collected_at=start + timedelta(minutes=4))
+
+        devices = self.store.list_network_device_sessions(limit=10)
+        applications = self.store.list_local_application_sessions(limit=10)
+        samples = self.store.list_network_samples(limit=10)
+
+        self.assertEqual(len(devices), 1)
+        self.assertEqual(devices[0]["device_id"], "0123456789abcdef")
+        self.assertEqual(devices[0]["ipv4"], "192.168.7.20")
+        self.assertFalse(devices[0]["active"])
+        self.assertEqual(devices[0]["duration_seconds"], 120.0)
+        self.assertEqual(len(applications), 1)
+        self.assertEqual(applications[0]["application_name"], "chrome")
+        self.assertEqual(applications[0]["peak_connection_count"], 7)
+        self.assertFalse(applications[0]["active"])
+        self.assertEqual(applications[0]["duration_seconds"], 120.0)
+        self.assertEqual(samples[0]["gateway_state"], "reachable")
+        self.assertEqual(samples[0]["lan_device_count"], 0)
+        self.assertEqual(samples[0]["local_application_count"], 0)
+
+    def test_unavailable_inventory_does_not_invent_session_end(self):
+        network = {
+            "state": "active",
+            "coverage": "host_configuration_counters_and_presence",
+            "connectivity": {"active_interface_count": 1},
+            "traffic_counters": {"received_bytes": 1000, "sent_bytes": 500},
+            "lan_visibility": {"state": "partial", "device_count": 1},
+            "lan_devices": [
+                {
+                    "device_id": "0123456789abcdef",
+                    "ipv4": "192.168.7.20",
+                    "interface_alias": "Ethernet",
+                    "state": "reachable",
+                }
+            ],
+            "application_visibility": {"state": "available", "application_count": 1},
+            "local_applications": [{"name": "chrome", "connection_count": 2}],
+        }
+        start = datetime(2026, 8, 16, 9, 0, 0)
+        self.store.record_network(network, collected_at=start)
+        network["lan_visibility"] = {"state": "unavailable", "device_count": 0}
+        network["lan_devices"] = []
+        network["application_visibility"] = {
+            "state": "unavailable",
+            "application_count": 0,
+        }
+        network["local_applications"] = []
+
+        self.store.record_network(network, collected_at=start + timedelta(minutes=2))
+
+        self.assertTrue(self.store.list_network_device_sessions(limit=1)[0]["active"])
+        self.assertTrue(self.store.list_local_application_sessions(limit=1)[0]["active"])
+
+    def test_network_inventory_prunes_old_ended_sessions_under_churn(self):
+        network = {
+            "state": "active",
+            "coverage": "host_configuration_counters_and_presence",
+            "connectivity": {"active_interface_count": 1},
+            "traffic_counters": {"received_bytes": 1000, "sent_bytes": 500},
+            "lan_visibility": {"state": "partial", "device_count": 1},
+            "application_visibility": {"state": "available", "application_count": 1},
+        }
+        start = datetime(2026, 8, 16, 9, 0, 0)
+        with mock.patch("wimi_analytics.storage.MAX_NETWORK_DEVICE_SESSION_ROWS", 3), mock.patch(
+            "wimi_analytics.storage.MAX_LOCAL_APPLICATION_SESSION_ROWS", 3
+        ):
+            for index in range(6):
+                network["lan_devices"] = [
+                    {
+                        "device_id": f"{index + 1:016x}",
+                        "ipv4": f"192.168.7.{20 + index}",
+                        "interface_alias": "Ethernet",
+                        "state": "reachable",
+                    }
+                ]
+                network["local_applications"] = [
+                    {"name": f"application-{index}", "connection_count": 1}
+                ]
+                self.store.record_network(
+                    network,
+                    collected_at=start + timedelta(minutes=index),
+                )
+
+        devices = self.store.list_network_device_sessions(limit=100)
+        applications = self.store.list_local_application_sessions(limit=100)
+
+        self.assertEqual(len(devices), 3)
+        self.assertEqual(len(applications), 3)
+        self.assertTrue(devices[0]["active"])
+        self.assertTrue(applications[0]["active"])
+
     def test_cleanup_is_limited_to_analytics_rows(self):
         old = datetime(2026, 4, 1, 8, 0, 0)
         current = datetime(2026, 8, 16, 8, 0, 0)
@@ -345,6 +475,20 @@ class AnalyticsStoreTests(unittest.TestCase):
                     "primary_connection_type": "wired",
                 },
                 "traffic_counters": {"received_bytes": 100, "sent_bytes": 50},
+                "lan_visibility": {"state": "partial", "device_count": 1},
+                "lan_devices": [
+                    {
+                        "device_id": "0123456789abcdef",
+                        "ipv4": "192.168.7.20",
+                        "interface_alias": "Ethernet",
+                        "state": "reachable",
+                    }
+                ],
+                "application_visibility": {
+                    "state": "available",
+                    "application_count": 1,
+                },
+                "local_applications": [{"name": "chrome", "connection_count": 1}],
             },
             collected_at=old,
         )
@@ -356,6 +500,8 @@ class AnalyticsStoreTests(unittest.TestCase):
         self.assertGreaterEqual(deleted, 2)
         self.assertEqual(self.store.list_reports(limit=10), [])
         self.assertEqual(self.store.list_network_sessions(limit=10), [])
+        self.assertEqual(self.store.list_network_device_sessions(limit=10), [])
+        self.assertEqual(self.store.list_local_application_sessions(limit=10), [])
         self.assertEqual(sentinel.read_bytes(), b"video")
 
     def test_network_counter_reset_is_reported_as_inconclusive_delta(self):

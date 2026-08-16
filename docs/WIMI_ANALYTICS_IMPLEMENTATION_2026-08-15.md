@@ -133,12 +133,13 @@ capturado.
 
 ## Evidencias anonimizadas e sessoes de rede
 
-O banco operacional inclui `evidence_snapshots` e
-`network_connection_sessions`. A primeira tabela contem somente UUID, camera,
-datas, quantidade de rostos, tamanho e caminho relativo. A segunda registra
-inicio, ultimo sinal, permanencia medida e bytes agregados de sessoes Cabo ou
-Wi-Fi deste PC. Nenhuma delas armazena nome, IP, MAC, destino, aplicativo ou
-conteudo.
+O banco operacional inclui `evidence_snapshots`,
+`network_connection_sessions`, `network_device_sessions` e
+`local_application_sessions`. A primeira tabela contem somente UUID, camera,
+datas, quantidade de rostos, tamanho e caminho relativo. As demais registram
+sessoes Cabo/Wi-Fi, dispositivos vistos no cache do Windows e aplicativos com
+TCP estabelecido neste PC. MAC bruto, destino remoto, porta, URL e conteudo nao
+sao persistidos.
 
 O mesmo ciclo YuNet/SFace fornece as caixas faciais; nao existe segunda
 inferencia nem segunda conexao com a camera. Se faltar caixa para qualquer
@@ -154,8 +155,20 @@ descriptografada apenas em memoria.
 
 Uma sessao de rede termina quando o link some, troca entre Cabo e Wi-Fi ou fica
 mais de cinco minutos sem amostra. Reinicio de contador produz delta zero em vez
-de trafego negativo. O recurso nao identifica sites, aplicativos, mensagens ou
-outros dispositivos; esse limite e deliberado e visivel no painel.
+de trafego negativo. O gateway recebe uma tentativa ICMP limitada; falta de
+resposta e inconclusiva, pois o roteador pode bloquear ping.
+
+O cache de vizinhos oferece visao passiva e parcial da LAN. Somente estados
+`Reachable`, `Delay` e `Probe` renovam presenca; `Stale` nao vira observacao nova.
+Cada MAC e convertido em HMAC-SHA256 truncado com chave local protegida por
+DPAPI. Ausencia no cache nao prova que o dispositivo esteja offline. A
+permanencia de aplicativo e o intervalo em que o Windows observou ao menos uma
+conexao TCP estabelecida, nao tempo em primeiro plano. Falha em qualquer uma
+dessas coletas preserva a sessao anterior sem inventar encerramento.
+
+Alem da retencao de 90 dias e do teto global de 256 MB, o historico mantem no
+maximo 5.000 sessoes de dispositivos e 10.000 sessoes de aplicativos. A poda
+remove somente sessoes encerradas e nunca toca nas gravacoes.
 
 ## Validacao executavel
 
@@ -177,9 +190,10 @@ queda de energia ou desconexao USB.
 Apos as correcoes finais de concorrencia, o ensaio final de 30 segundos
 confirmou duas gravacoes validas, pico total de 252 MB, CPU maxima de 7,6%,
 824,36 GB livres, zero novo `Kernel_144`, zero artefato e zero processo residual.
-A suite atual executou 169 testes com sucesso, incluindo migracao sem perder o
+A suite atual executou 177 testes com sucesso, incluindo migracao sem perder o
 historico consentido, painel embutido, anonimizacao obrigatoria, retencao visual,
-exclusao manual e sessoes Cabo/Wi-Fi sem persistir IP ou MAC.
+sessoes Cabo/Wi-Fi, inventario passivo e aplicativos locais sem persistir MAC ou
+destino remoto.
 
 O ensaio controlado desta evolucao durou 42 segundos, gerou e validou dois
 videos, atingiu pico de 243,3 MB, 66 threads e 5,7% de CPU, manteve 824,35 GB
@@ -192,7 +206,8 @@ para Ativo 2/2 e mantiveram o processo em 250,5 MB sem iniciar gravacao.
 - reconhecimento facial pode errar e nunca decide acusacao, seguranca ou medida
   trabalhista sozinho;
 - nao ha inferencia de emocao, intencao, desonestidade ou produtividade;
-- cobertura de rede permanece limitada a este PC;
+- cobertura de rede permanece parcial: este PC e equipamentos presentes no
+  cache de vizinhos; cobertura integral exige fonte autorizada no roteador;
 - SMART generico do Windows nao substitui diagnostico do fabricante;
 - o historico de `LiveKernelEvent 144`/`USBXHCI` continua sendo um risco fisico
   que software apenas detecta e correlaciona;

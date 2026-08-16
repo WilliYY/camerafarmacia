@@ -6,6 +6,11 @@
 - [x] Oferecer exclusao manual e preview somente em memoria.
 - [x] Persistir inicio, ultimo sinal, permanencia e trafego agregado por sessao
   Cabo/Wi-Fi deste computador.
+- [x] Medir gateway sem tratar bloqueio de ICMP como queda confirmada.
+- [x] Persistir dispositivos vistos na LAN sem guardar MAC bruto.
+- [x] Persistir permanencia observada de aplicativos TCP deste PC sem destino,
+  URL, pacote ou conteudo.
+- [x] Mostrar Conexao, Dispositivos LAN e Aplicativos deste PC dentro da aba Rede.
 
 - [x] SQLite persistente, limitado e fora do HD de gravacao.
 - [x] Coletor agregado de NVR e rede.

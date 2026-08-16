@@ -273,8 +273,11 @@ def _network_check(network):
             "Rede deste PC",
             "limited" if ready else "warning",
             "Configurada" if ready else "Incompleta",
-            "A coleta cobre somente este computador, sem trafego da loja.",
-            "network.coverage=host_configuration_only",
+            (
+                "Configuração, contadores, gateway, vizinhos vistos e aplicativos "
+                "TCP locais; a visão da LAN permanece parcial."
+            ),
+            f"network.coverage={network.get('coverage', 'none')}",
         )
     status = "not_configured" if state in {"not_configured", "unsupported"} else "unavailable"
     return _check(
@@ -485,7 +488,10 @@ def build_readiness(nvr, network, modules, report, runtime=None):
             _finding(
                 "store_network_not_observed",
                 "Trafego da loja nao observado",
-                "A rede exibida cobre configuracao e contadores agregados somente deste PC.",
+                (
+                    "A rede exibida inclui este PC e vizinhos do cache Windows; "
+                    "nao substitui telemetria autorizada do roteador."
+                ),
                 "network.can_observe_store_traffic=false",
             )
         )

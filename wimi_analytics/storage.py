@@ -1,4 +1,5 @@
 import hashlib
+import ipaddress
 import json
 import os
 import sqlite3
@@ -10,7 +11,7 @@ from pathlib import Path
 from statistics import median
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 MAX_PAYLOAD_BYTES = 256 * 1024
 JOURNAL_SIZE_LIMIT = 8 * 1024 * 1024
 MAX_DATABASE_BYTES = 256 * 1024 * 1024
@@ -19,6 +20,10 @@ PRESENCE_SAMPLE_SECONDS = 3.0
 TRAFFIC_SPIKE_MIN_BYTES_PER_SECOND = 5 * 1024 * 1024
 TRAFFIC_SPIKE_MULTIPLIER = 4.0
 NETWORK_SESSION_GAP_SECONDS = 300
+MAX_NETWORK_DEVICES = 64
+MAX_LOCAL_APPLICATIONS = 64
+MAX_NETWORK_DEVICE_SESSION_ROWS = 5000
+MAX_LOCAL_APPLICATION_SESSION_ROWS = 10000
 
 
 class UnsafeAnalyticsPathError(ValueError):
@@ -163,7 +168,11 @@ class AnalyticsStore:
                     received_errors INTEGER NOT NULL DEFAULT 0,
                     sent_errors INTEGER NOT NULL DEFAULT 0,
                     received_discarded INTEGER NOT NULL DEFAULT 0,
-                    sent_discarded INTEGER NOT NULL DEFAULT 0
+                    sent_discarded INTEGER NOT NULL DEFAULT 0,
+                    gateway_state TEXT NOT NULL DEFAULT 'unknown',
+                    gateway_latency_ms REAL,
+                    lan_device_count INTEGER NOT NULL DEFAULT 0,
+                    local_application_count INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS idx_network_collected
                     ON network_samples(collected_at DESC);
@@ -184,6 +193,37 @@ class AnalyticsStore:
                     ON network_connection_sessions(started_at DESC);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_network_single_open_session
                     ON network_connection_sessions((1)) WHERE ended_at IS NULL;
+
+                CREATE TABLE IF NOT EXISTS network_device_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    device_id TEXT NOT NULL,
+                    ipv4 TEXT NOT NULL,
+                    interface_alias TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    sample_count INTEGER NOT NULL,
+                    last_state TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_network_devices_started
+                    ON network_device_sessions(started_at DESC);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_network_device_single_open
+                    ON network_device_sessions(device_id) WHERE ended_at IS NULL;
+
+                CREATE TABLE IF NOT EXISTS local_application_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    application_name TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    sample_count INTEGER NOT NULL,
+                    current_connection_count INTEGER NOT NULL,
+                    peak_connection_count INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_local_applications_started
+                    ON local_application_sessions(started_at DESC);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_local_application_single_open
+                    ON local_application_sessions(application_name) WHERE ended_at IS NULL;
 
                 CREATE TABLE IF NOT EXISTS vision_events (
                     event_id TEXT PRIMARY KEY,
@@ -277,6 +317,10 @@ class AnalyticsStore:
                 "sent_errors": "INTEGER NOT NULL DEFAULT 0",
                 "received_discarded": "INTEGER NOT NULL DEFAULT 0",
                 "sent_discarded": "INTEGER NOT NULL DEFAULT 0",
+                "gateway_state": "TEXT NOT NULL DEFAULT 'unknown'",
+                "gateway_latency_ms": "REAL",
+                "lan_device_count": "INTEGER NOT NULL DEFAULT 0",
+                "local_application_count": "INTEGER NOT NULL DEFAULT 0",
             }
             for column, declaration in migrations.items():
                 if column not in existing_columns:
@@ -352,10 +396,21 @@ class AnalyticsStore:
         collected_at = collected_at or datetime.now()
         connectivity = network.get("connectivity") if isinstance(network, dict) else {}
         counters = network.get("traffic_counters") if isinstance(network, dict) else {}
+        gateway_probe = network.get("gateway_probe") if isinstance(network, dict) else {}
+        lan_visibility = network.get("lan_visibility") if isinstance(network, dict) else {}
+        application_visibility = (
+            network.get("application_visibility") if isinstance(network, dict) else {}
+        )
         if not isinstance(connectivity, dict):
             connectivity = {}
         if not isinstance(counters, dict):
             counters = {}
+        if not isinstance(gateway_probe, dict):
+            gateway_probe = {}
+        if not isinstance(lan_visibility, dict):
+            lan_visibility = {}
+        if not isinstance(application_visibility, dict):
+            application_visibility = {}
         counter_names = (
             "received_bytes",
             "sent_bytes",
@@ -382,6 +437,43 @@ class AnalyticsStore:
             "default_gateway_configured": connectivity.get("default_gateway_configured") is True,
             "dns_configured": connectivity.get("dns_configured") is True,
         }
+        gateway_state = str(gateway_probe.get("state") or "unknown").lower()
+        if gateway_state not in {
+            "reachable",
+            "inconclusive",
+            "not_configured",
+            "unavailable",
+            "unknown",
+        }:
+            gateway_state = "unknown"
+        try:
+            gateway_latency_ms = float(gateway_probe.get("latency_ms"))
+        except (TypeError, ValueError, OverflowError):
+            gateway_latency_ms = None
+        if gateway_latency_ms is not None and not 0 <= gateway_latency_ms <= 60000:
+            gateway_latency_ms = None
+        raw_devices = network.get("lan_devices") if isinstance(network, dict) else []
+        raw_applications = (
+            network.get("local_applications") if isinstance(network, dict) else []
+        )
+        aggregate.update(
+            {
+                "gateway_state": gateway_state,
+                "gateway_latency_ms": (
+                    round(gateway_latency_ms, 2)
+                    if gateway_latency_ms is not None
+                    else None
+                ),
+                "lan_device_count": min(
+                    len(raw_devices) if isinstance(raw_devices, list) else 0,
+                    MAX_NETWORK_DEVICES,
+                ),
+                "local_application_count": min(
+                    len(raw_applications) if isinstance(raw_applications, list) else 0,
+                    MAX_LOCAL_APPLICATIONS,
+                ),
+            }
+        )
         for name in counter_names:
             try:
                 value = int(counters.get(name) or 0)
@@ -391,6 +483,20 @@ class AnalyticsStore:
         fingerprint = _fingerprint(aggregate)
         with self._lock, self._connection() as connection:
             self._update_network_session(connection, aggregate, collected_at)
+            self._update_network_device_sessions(
+                connection,
+                raw_devices,
+                lan_visibility,
+                aggregate["state"],
+                collected_at,
+            )
+            self._update_local_application_sessions(
+                connection,
+                raw_applications,
+                application_visibility,
+                aggregate["state"],
+                collected_at,
+            )
             previous = connection.execute(
                 "SELECT collected_at, fingerprint FROM network_samples ORDER BY id DESC LIMIT 1"
             ).fetchone()
@@ -406,8 +512,10 @@ class AnalyticsStore:
                     wireless_interface_count, virtual_interface_count,
                     default_gateway_configured, dns_configured, coverage,
                     received_bytes, sent_bytes, received_packets, sent_packets,
-                    received_errors, sent_errors, received_discarded, sent_discarded
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    received_errors, sent_errors, received_discarded, sent_discarded,
+                    gateway_state, gateway_latency_ms, lan_device_count,
+                    local_application_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _iso(collected_at),
@@ -422,6 +530,10 @@ class AnalyticsStore:
                     int(aggregate["dns_configured"]),
                     aggregate["coverage"],
                     *(aggregate[name] for name in counter_names),
+                    aggregate["gateway_state"],
+                    aggregate["gateway_latency_ms"],
+                    aggregate["lan_device_count"],
+                    aggregate["local_application_count"],
                 ),
             )
         return True
@@ -545,6 +657,263 @@ class AnalyticsStore:
             )
         return results
 
+    def _update_network_device_sessions(
+        self,
+        connection,
+        raw_devices,
+        visibility,
+        network_state,
+        collected_at,
+    ):
+        if network_state != "active" or visibility.get("state") != "partial":
+            return
+        changes_before = connection.total_changes
+        devices = {}
+        for raw in raw_devices[:MAX_NETWORK_DEVICES] if isinstance(raw_devices, list) else []:
+            if not isinstance(raw, dict):
+                continue
+            device_id = str(raw.get("device_id") or "").strip().lower()
+            if (
+                len(device_id) != 16
+                or any(character not in "0123456789abcdef" for character in device_id)
+            ):
+                continue
+            try:
+                address = ipaddress.ip_address(str(raw.get("ipv4") or ""))
+            except ValueError:
+                continue
+            if address.version != 4 or not address.is_private:
+                continue
+            alias = " ".join(str(raw.get("interface_alias") or "").split())[:80]
+            state = str(raw.get("state") or "").lower()
+            if not alias or state not in {"reachable", "stale", "delay", "probe"}:
+                continue
+            devices[device_id] = {
+                "ipv4": str(address),
+                "interface_alias": alias,
+                "state": state,
+            }
+
+        collected_iso = _iso(collected_at)
+        open_rows = {
+            row["device_id"]: row
+            for row in connection.execute(
+                "SELECT * FROM network_device_sessions WHERE ended_at IS NULL"
+            ).fetchall()
+        }
+        observed = set()
+        for device_id, device in devices.items():
+            current = open_rows.get(device_id)
+            if current is not None:
+                elapsed = (
+                    collected_at - datetime.fromisoformat(current["last_seen_at"])
+                ).total_seconds()
+                if elapsed > NETWORK_SESSION_GAP_SECONDS:
+                    connection.execute(
+                        "UPDATE network_device_sessions SET ended_at = last_seen_at WHERE id = ?",
+                        (current["id"],),
+                    )
+                    current = None
+                elif elapsed > 0:
+                    connection.execute(
+                        """
+                        UPDATE network_device_sessions
+                        SET ipv4 = ?, interface_alias = ?, last_seen_at = ?,
+                            sample_count = sample_count + 1, last_state = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            device["ipv4"],
+                            device["interface_alias"],
+                            collected_iso,
+                            device["state"],
+                            current["id"],
+                        ),
+                    )
+                observed.add(device_id)
+                if current is not None:
+                    continue
+            connection.execute(
+                """
+                INSERT INTO network_device_sessions(
+                    device_id, ipv4, interface_alias, started_at, last_seen_at,
+                    ended_at, sample_count, last_state
+                ) VALUES (?, ?, ?, ?, ?, NULL, 1, ?)
+                """,
+                (
+                    device_id,
+                    device["ipv4"],
+                    device["interface_alias"],
+                    collected_iso,
+                    collected_iso,
+                    device["state"],
+                ),
+            )
+            observed.add(device_id)
+
+        for device_id, current in open_rows.items():
+            if device_id not in observed:
+                connection.execute(
+                    "UPDATE network_device_sessions SET ended_at = last_seen_at WHERE id = ?",
+                    (current["id"],),
+                )
+        if connection.total_changes > changes_before:
+            self._prune_network_session_rows(
+                connection,
+                "network_device_sessions",
+                MAX_NETWORK_DEVICE_SESSION_ROWS,
+            )
+
+    def _update_local_application_sessions(
+        self,
+        connection,
+        raw_applications,
+        visibility,
+        network_state,
+        collected_at,
+    ):
+        if network_state != "active" or visibility.get("state") != "available":
+            return
+        changes_before = connection.total_changes
+        applications = {}
+        items = (
+            raw_applications[:MAX_LOCAL_APPLICATIONS]
+            if isinstance(raw_applications, list)
+            else []
+        )
+        for raw in items:
+            if not isinstance(raw, dict):
+                continue
+            name = " ".join(str(raw.get("name") or "").split()).strip()[:80]
+            try:
+                connection_count = int(raw.get("connection_count") or 0)
+            except (TypeError, ValueError, OverflowError):
+                connection_count = 0
+            if name and connection_count > 0:
+                applications[name] = min(
+                    10000,
+                    applications.get(name, 0) + connection_count,
+                )
+
+        collected_iso = _iso(collected_at)
+        open_rows = {
+            row["application_name"]: row
+            for row in connection.execute(
+                "SELECT * FROM local_application_sessions WHERE ended_at IS NULL"
+            ).fetchall()
+        }
+        observed = set()
+        for name, connection_count in applications.items():
+            current = open_rows.get(name)
+            if current is not None:
+                elapsed = (
+                    collected_at - datetime.fromisoformat(current["last_seen_at"])
+                ).total_seconds()
+                if elapsed > NETWORK_SESSION_GAP_SECONDS:
+                    connection.execute(
+                        "UPDATE local_application_sessions SET ended_at = last_seen_at WHERE id = ?",
+                        (current["id"],),
+                    )
+                    current = None
+                elif elapsed > 0:
+                    connection.execute(
+                        """
+                        UPDATE local_application_sessions
+                        SET last_seen_at = ?, sample_count = sample_count + 1,
+                            current_connection_count = ?,
+                            peak_connection_count = MAX(peak_connection_count, ?)
+                        WHERE id = ?
+                        """,
+                        (collected_iso, connection_count, connection_count, current["id"]),
+                    )
+                observed.add(name)
+                if current is not None:
+                    continue
+            connection.execute(
+                """
+                INSERT INTO local_application_sessions(
+                    application_name, started_at, last_seen_at, ended_at,
+                    sample_count, current_connection_count, peak_connection_count
+                ) VALUES (?, ?, ?, NULL, 1, ?, ?)
+                """,
+                (name, collected_iso, collected_iso, connection_count, connection_count),
+            )
+            observed.add(name)
+
+        for name, current in open_rows.items():
+            if name not in observed:
+                connection.execute(
+                    "UPDATE local_application_sessions SET ended_at = last_seen_at WHERE id = ?",
+                    (current["id"],),
+                )
+        if connection.total_changes > changes_before:
+            self._prune_network_session_rows(
+                connection,
+                "local_application_sessions",
+                MAX_LOCAL_APPLICATION_SESSION_ROWS,
+            )
+
+    @staticmethod
+    def _prune_network_session_rows(connection, table, max_rows):
+        if table not in {"network_device_sessions", "local_application_sessions"}:
+            raise ValueError("invalid_network_session_table")
+        count = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        excess = max(0, int(count) - int(max_rows))
+        if excess <= 0:
+            return 0
+        cursor = connection.execute(
+            f"""
+            DELETE FROM {table}
+            WHERE id IN (
+                SELECT id FROM {table}
+                WHERE ended_at IS NOT NULL
+                ORDER BY id ASC LIMIT ?
+            )
+            """,
+            (excess,),
+        )
+        return max(0, cursor.rowcount)
+
+    def list_network_device_sessions(self, limit=100):
+        limit = max(1, min(int(limit), 1000))
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, device_id, ipv4, interface_alias, started_at,
+                       last_seen_at, ended_at, sample_count, last_state
+                FROM network_device_sessions ORDER BY id DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [self._network_presence_row(row) for row in rows]
+
+    def list_local_application_sessions(self, limit=100):
+        limit = max(1, min(int(limit), 1000))
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, application_name, started_at, last_seen_at, ended_at,
+                       sample_count, current_connection_count, peak_connection_count
+                FROM local_application_sessions ORDER BY id DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [self._network_presence_row(row) for row in rows]
+
+    @staticmethod
+    def _network_presence_row(row):
+        result = dict(row)
+        duration_end = result.get("ended_at") or result["last_seen_at"]
+        result["active"] = result.get("ended_at") is None
+        result["duration_seconds"] = max(
+            0.0,
+            (
+                datetime.fromisoformat(duration_end)
+                - datetime.fromisoformat(result["started_at"])
+            ).total_seconds(),
+        )
+        return result
+
     def record_evidence_snapshot(self, metadata):
         evidence_id = str(metadata.get("evidence_id") or "")
         relative_path = str(metadata.get("relative_path") or "")
@@ -645,7 +1014,9 @@ class AnalyticsStore:
                        wireless_interface_count, virtual_interface_count,
                        default_gateway_configured, dns_configured, coverage,
                        received_bytes, sent_bytes, received_packets, sent_packets,
-                       received_errors, sent_errors, received_discarded, sent_discarded
+                       received_errors, sent_errors, received_discarded, sent_discarded,
+                       gateway_state, gateway_latency_ms, lan_device_count,
+                       local_application_count
                 FROM network_samples ORDER BY id DESC LIMIT ?
                 """,
                 (limit,),
@@ -663,6 +1034,10 @@ class AnalyticsStore:
                 "default_gateway_configured": bool(row["default_gateway_configured"]),
                 "dns_configured": bool(row["dns_configured"]),
                 "coverage": row["coverage"],
+                "gateway_state": row["gateway_state"],
+                "gateway_latency_ms": row["gateway_latency_ms"],
+                "lan_device_count": row["lan_device_count"],
+                "local_application_count": row["local_application_count"],
             }
             for name in (
                 "received_bytes",
@@ -1149,6 +1524,25 @@ class AnalyticsStore:
                 (cutoff,),
             )
             deleted += max(0, cursor.rowcount)
+            for table in ("network_device_sessions", "local_application_sessions"):
+                cursor = connection.execute(
+                    f"""
+                    DELETE FROM {table}
+                    WHERE COALESCE(ended_at, last_seen_at) < ?
+                    """,
+                    (cutoff,),
+                )
+                deleted += max(0, cursor.rowcount)
+            deleted += self._prune_network_session_rows(
+                connection,
+                "network_device_sessions",
+                MAX_NETWORK_DEVICE_SESSION_ROWS,
+            )
+            deleted += self._prune_network_session_rows(
+                connection,
+                "local_application_sessions",
+                MAX_LOCAL_APPLICATION_SESSION_ROWS,
+            )
         with self._lock, self._connection() as connection:
             connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         return deleted
