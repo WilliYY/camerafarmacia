@@ -101,6 +101,32 @@ Agente remoto nao e necessario para este computador. Outros computadores so
 devem ser incluidos em uma etapa autorizada, com escopo, autenticacao e politica
 de privacidade proprios.
 
+## Evolucao de perfis consentidos e rede
+
+O banco operacional ganhou `profile_presence_stats`,
+`profile_presence_streams` e `profile_presence_sessions`. As tabelas guardam
+somente o identificador local, datas, contagens, tempo estimado e cameras. Uma
+sessao compacta representa uma visita e permite mesclar evento atrasado sem
+depender do historico sujeito a retencao. Nomes e vetores biometricos continuam
+separados e protegidos por DPAPI. A migracao remove eventos antigos de identidade
+e nao cria resumos a partir deles, pois a autorizacao correspondente pode ter
+sido revogada. A atualizacao normal e transacional e idempotente.
+
+O painel Pessoas mostra os perfis consentidos mais observados. O painel
+Comportamento permanece limitado a eventos observaveis e nao tenta inferir
+emocao, intencao ou produtividade. Excluir um perfil elimina tambem seu resumo e
+os eventos de presenca associados. `secure_delete`, truncamento do WAL,
+compactacao e um hash irreversivel de exclusao evitam residuos e recriacao por
+confirmacao atrasada. A interface executa esse fluxo em worker unico. Se a
+compactacao falhar, `maintenance_state` preserva a pendencia e a inicializacao
+seguinte repete a operacao antes de liberar o marcador.
+
+O historico de rede passou a classificar atividade agregada, reset de contadores,
+novos erros/descartes e picos relevantes contra a mediana recente. Coleta
+indisponivel ou troca de conexao invalida o delta seguinte, evitando pico falso.
+O escopo e somente este computador: nenhum destino, site, pacote ou conteudo e
+capturado.
+
 ## Validacao executavel
 
 ```powershell

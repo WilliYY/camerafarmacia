@@ -88,11 +88,30 @@ gravacoes. A visao reutiliza o preview existente, calibra de forma limitada o
 ruido de movimento de cada camera e nunca cria perfis faciais sozinha. Cadastro
 de identidade continua manual e consentido.
 
+A aba Pessoas ordena somente os perfis consentidos por visitas e tempo observado
+estimado. Confirmacoes simultaneas em cameras diferentes nao dobram o tempo e
+eventos repetidos sao idempotentes. O resumo permanece no banco local ate a
+exclusao do perfil; ao excluir, o resumo e os eventos associados tambem sao
+removidos com `secure_delete`, checkpoint e compactacao. Um hash irreversivel
+impede que uma confirmacao atrasada recrie o perfil; rostos desconhecidos
+continuam anonimos. Bancos antigos nao recriam ranking a partir de eventos
+historicos; eventos antigos de identidade sao descartados na migracao, evitando
+restaurar perfis cuja autorizacao possa ter sido revogada. A exclusao e a
+compactacao rodam fora do thread da interface; se a compactacao falhar, uma
+pendencia persistente faz nova tentativa na proxima abertura.
+
+A aba Comportamento resume apenas fatos observaveis, como movimento, duracao e
+contagem de rostos. Nao classifica emocao, intencao, honestidade ou produtividade.
+
 A aba Rede identifica o tipo de conexao deste PC, velocidade do link,
-contadores e variacoes entre amostras. Ela nao captura pacotes, mensagens,
-senhas, navegacao ou conteudo de outros dispositivos. Cobertura da loja inteira
-continua dependendo de fonte autorizada no gateway. O servidor
+contadores, variacoes entre amostras e picos relativos ao historico local. Ela
+pode afirmar que houve trafego agregado neste computador, mas nao identifica
+destinos, sites ou conteudo acessado. Nao captura pacotes, mensagens, senhas,
+navegacao ou conteudo de outros dispositivos. Cobertura da loja inteira continua
+dependendo de fonte autorizada no gateway. O servidor
 `http://127.0.0.1:8765/` permanece apenas para compatibilidade e diagnostico.
+O coletor Windows permanece limitado a 12 segundos e usa cache, evitando criar
+PowerShell continuamente quando o CIM estiver lento.
 
 ---
 

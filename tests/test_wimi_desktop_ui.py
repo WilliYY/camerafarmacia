@@ -1,6 +1,7 @@
 import threading
 import tkinter as tk
 import unittest
+from unittest.mock import patch
 
 from wimi_analytics.desktop import AnalyticsDesktopWindow
 
@@ -32,6 +33,23 @@ class FakeStore:
 
     def list_reports(self, limit=200):
         return []
+
+    def list_profile_presence_summary(self, limit=100):
+        return []
+
+    def summarize_network_traffic(self, limit=120, samples=None):
+        return {
+            "state": "no_data",
+            "anomaly": "insufficient_history",
+            "traffic_detected": False,
+            "current_bytes_per_second": None,
+            "baseline_bytes_per_second": None,
+            "scope": "this_host_aggregate_only",
+            "captures_content": False,
+        }
+
+    def delete_profile_presence(self, profile_id):
+        return False
 
 
 class FakeVision:
@@ -142,6 +160,232 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         self.assertTrue(controller.wait_for_workers(timeout=2))
         controller._drain_ui_actions()
         self.assertIsNone(controller.window)
+
+    def test_refresh_shows_ranked_consent_profile_and_aggregate_network_boundary(self):
+        class StoreWithSummary(FakeStore):
+            def list_profile_presence_summary(self, limit=100):
+                return [
+                    {
+                        "profile_id": "profile-1",
+                        "visit_count": 4,
+                        "observation_count": 12,
+                        "observed_seconds": 3720.0,
+                        "first_seen_at": "2026-08-15T09:00:00",
+                        "last_seen_at": "2026-08-16T10:00:00",
+                        "streams": ["farmacia", "farmacia2"],
+                    }
+                ]
+
+            def summarize_network_traffic(self, limit=120, samples=None):
+                return {
+                    "state": "active",
+                    "anomaly": "none",
+                    "traffic_detected": True,
+                    "current_bytes_per_second": 2048.0,
+                    "baseline_bytes_per_second": 1024.0,
+                    "scope": "this_host_aggregate_only",
+                    "captures_content": False,
+                }
+
+        class FaceWithProfile(FakeFaceService):
+            available = True
+            status = "ready"
+
+            def list_profiles(self):
+                return [{"profile_id": "profile-1", "display_name": "Pessoa Consentida"}]
+
+        controller = AnalyticsDesktopWindow(
+            self.root,
+            FakeCollector(),
+            StoreWithSummary(),
+            FakeVision(),
+            face_service=FaceWithProfile(),
+        )
+
+        self.assertTrue(controller.show())
+        self.root.update()
+        people_values = controller._trees["people"].item("profile-1", "values")
+        network_text = controller._labels["network_summary"].cget("text")
+
+        self.assertIn("1º", people_values)
+        self.assertIn("Pessoa Consentida", people_values)
+        self.assertIn("1 h 2 min", people_values)
+        self.assertIn("Tráfego deste PC: 2,0 KB/s", network_text)
+        self.assertIn("conteúdo não coletado", network_text)
+
+    def test_profile_deletion_also_removes_operational_presence_history(self):
+        class DeletionStore(FakeStore):
+            def __init__(self):
+                self.deleted_profiles = []
+
+            def delete_profile_presence(self, profile_id):
+                self.deleted_profiles.append(profile_id)
+                return True
+
+        class DeletionFaceService(FakeFaceService):
+            available = True
+            status = "ready"
+
+            def __init__(self):
+                self.profiles = [{"profile_id": "profile-1", "display_name": "Pessoa"}]
+
+            def list_profiles(self):
+                return list(self.profiles)
+
+            def delete_profile(self, profile_id):
+                self.profiles = [
+                    item for item in self.profiles if item["profile_id"] != profile_id
+                ]
+                return True
+
+        store = DeletionStore()
+        face_service = DeletionFaceService()
+        controller = AnalyticsDesktopWindow(
+            self.root,
+            FakeCollector(),
+            store,
+            FakeVision(),
+            face_service=face_service,
+        )
+        self.assertTrue(controller.show())
+        self.root.update()
+        controller._trees["people"].selection_set("profile-1")
+
+        with patch("wimi_analytics.desktop.messagebox.askyesno", return_value=True):
+            controller._delete_person()
+            self.assertTrue(controller.wait_for_workers(timeout=2))
+            controller._drain_ui_actions()
+
+        self.assertEqual(store.deleted_profiles, ["profile-1"])
+        self.assertEqual(face_service.list_profiles(), [])
+
+    def test_failed_biometric_delete_keeps_profile_available_for_retry(self):
+        class DeletionStore(FakeStore):
+            def __init__(self):
+                self.deleted_profiles = []
+
+            def delete_profile_presence(self, profile_id):
+                self.deleted_profiles.append(profile_id)
+                return True
+
+        class FailingFaceService(FakeFaceService):
+            available = True
+            status = "ready"
+
+            def list_profiles(self):
+                return [{"profile_id": "profile-1", "display_name": "Pessoa"}]
+
+            def delete_profile(self, profile_id):
+                raise OSError("biometric_store_busy")
+
+        store = DeletionStore()
+        face_service = FailingFaceService()
+        controller = AnalyticsDesktopWindow(
+            self.root,
+            FakeCollector(),
+            store,
+            FakeVision(),
+            face_service=face_service,
+        )
+        self.assertTrue(controller.show())
+        self.root.update()
+        controller._trees["people"].selection_set("profile-1")
+
+        with (
+            patch("wimi_analytics.desktop.messagebox.askyesno", return_value=True),
+            patch("wimi_analytics.desktop.messagebox.showerror") as showerror,
+        ):
+            controller._delete_person()
+            self.assertTrue(controller.wait_for_workers(timeout=2))
+            controller._drain_ui_actions()
+
+        self.assertEqual(store.deleted_profiles, ["profile-1"])
+        self.assertEqual(face_service.list_profiles()[0]["profile_id"], "profile-1")
+        showerror.assert_called_once()
+
+    def test_failed_operational_delete_does_not_touch_biometric_profile(self):
+        class FailingStore(FakeStore):
+            def delete_profile_presence(self, profile_id):
+                raise OSError("analytics_store_busy")
+
+        class TrackingFaceService(FakeFaceService):
+            available = True
+            status = "ready"
+
+            def __init__(self):
+                self.delete_calls = []
+
+            def list_profiles(self):
+                return [{"profile_id": "profile-1", "display_name": "Pessoa"}]
+
+            def delete_profile(self, profile_id):
+                self.delete_calls.append(profile_id)
+                return True
+
+        face_service = TrackingFaceService()
+        controller = AnalyticsDesktopWindow(
+            self.root,
+            FakeCollector(),
+            FailingStore(),
+            FakeVision(),
+            face_service=face_service,
+        )
+        self.assertTrue(controller.show())
+        self.root.update()
+        controller._trees["people"].selection_set("profile-1")
+
+        with (
+            patch("wimi_analytics.desktop.messagebox.askyesno", return_value=True),
+            patch("wimi_analytics.desktop.messagebox.showerror") as showerror,
+        ):
+            controller._delete_person()
+            self.assertTrue(controller.wait_for_workers(timeout=2))
+            controller._drain_ui_actions()
+
+        self.assertEqual(face_service.delete_calls, [])
+        showerror.assert_called_once()
+
+    def test_profile_deletion_runs_off_tk_thread(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        class BlockingStore(FakeStore):
+            def delete_profile_presence(self, profile_id):
+                started.set()
+                release.wait(2)
+                return True
+
+        class FaceService(FakeFaceService):
+            available = True
+            status = "ready"
+
+            def list_profiles(self):
+                return [{"profile_id": "profile-1", "display_name": "Pessoa"}]
+
+            def delete_profile(self, profile_id):
+                return True
+
+        controller = AnalyticsDesktopWindow(
+            self.root,
+            FakeCollector(),
+            BlockingStore(),
+            FakeVision(),
+            face_service=FaceService(),
+        )
+        self.assertTrue(controller.show())
+        self.root.update()
+        controller._trees["people"].selection_set("profile-1")
+
+        with patch("wimi_analytics.desktop.messagebox.askyesno", return_value=True):
+            controller._delete_person()
+        self.assertTrue(started.wait(1))
+        self.assertTrue(controller.deletion_running)
+        self.root.update()
+
+        release.set()
+        self.assertTrue(controller.wait_for_workers(timeout=2))
+        controller._drain_ui_actions()
+        self.assertFalse(controller.deletion_running)
 
 
 if __name__ == "__main__":

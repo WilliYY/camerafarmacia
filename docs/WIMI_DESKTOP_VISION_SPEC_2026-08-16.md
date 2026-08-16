@@ -82,6 +82,34 @@ Trocar de aba apenas muda a visualizacao. O coletor, a fila limitada, os
 previews e o banco mantem o estado. A navegacao superior tambem pode ser
 percorrida por teclado pelo `ttk.Notebook`.
 
+## Ranking consentido e trafego agregado
+
+- `profile_presence_stats` mantem por perfil consentido primeira e ultima
+  observacao, visitas, amostras e tempo observado estimado;
+- `profile_presence_streams` registra apenas em quais cameras o perfil foi
+  confirmado; nome e vetor continuam exclusivos do banco biometrico protegido;
+- `profile_presence_sessions` mantem uma linha compacta por visita e permite
+  mesclar amostras atrasadas sem depender dos eventos sujeitos a retencao;
+- o resumo e atualizado na mesma transacao do evento e ignora `event_id`
+  repetido; confirmacoes simultaneas em cameras diferentes nao dobram o tempo;
+- uma lacuna superior a 90 segundos abre uma nova visita e cada primeira amostra
+  representa 3 segundos, por isso a interface usa o termo estimado;
+- eventos atrasados mesclam somente as sessoes vizinhas do perfil afetado;
+- excluir o perfil remove o resumo e os eventos operacionais vinculados, ativa
+  `secure_delete`, trunca o WAL e compacta o banco;
+- exclusao e compactacao executam em worker unico, sem bloquear o Tkinter;
+- `maintenance_state` conserva a pendencia ate a compactacao concluir e repete
+  a tentativa na proxima inicializacao;
+- um hash irreversivel de exclusao bloqueia confirmacoes atrasadas sem reter o
+  identificador original;
+- a migracao remove eventos historicos de identidade e nao cria resumos a partir
+  deles, pois podem pertencer a perfis cuja autorizacao ja foi revogada;
+- rostos sem cadastro consentido permanecem anonimos e nao criam perfil;
+- o resumo de rede usa somente bytes por segundo, erros, descartes e reset de
+  contadores deste PC. Uma coleta indisponivel ou troca de continuidade invalida
+  o delta seguinte. Detecta atividade e picos, mas nao coleta pacote, destino,
+  DNS consultado, pagina, mensagem, senha ou conteudo.
+
 ## Validacao
 
 ```powershell

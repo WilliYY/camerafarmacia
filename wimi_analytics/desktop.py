@@ -1,5 +1,6 @@
 import queue
 import threading
+import time
 import tkinter as tk
 from collections import Counter
 from tkinter import messagebox, simpledialog, ttk
@@ -56,6 +57,30 @@ def _connection_text(value):
     }.get(str(value or "unknown"), "Não identificado")
 
 
+def _duration_text(seconds):
+    seconds = max(0, int(round(float(seconds or 0))))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours} h {minutes} min"
+    if minutes:
+        return f"{minutes} min"
+    return f"{seconds} s"
+
+
+def _data_rate_text(bytes_per_second):
+    if bytes_per_second is None:
+        return "aguardando histórico"
+    value = max(0.0, float(bytes_per_second))
+    if value >= 1024 * 1024:
+        text = f"{value / (1024 * 1024):.1f} MB/s"
+    elif value >= 1024:
+        text = f"{value / 1024:.1f} KB/s"
+    else:
+        text = f"{value:.0f} B/s"
+    return text.replace(".", ",")
+
+
 class AnalyticsDesktopWindow:
     REFRESH_MS = 3000
 
@@ -92,6 +117,10 @@ class AnalyticsDesktopWindow:
         self._enrollment_busy = False
         self._enrollment_thread = None
         self._enroll_button = None
+        self._deletion_lock = threading.Lock()
+        self._deletion_busy = False
+        self._deletion_thread = None
+        self._delete_button = None
         self._responsive_labels = []
         self._last_wraplength = None
 
@@ -343,7 +372,7 @@ class AnalyticsDesktopWindow:
         self._section_title(
             tab,
             "Eventos observáveis",
-            "Movimento, presença e duração. O sistema não infere emoção, intenção ou produtividade individual.",
+            "Movimento, presença e duração observada. O sistema não infere emoção, intenção ou produtividade individual.",
         )
         self._labels["behavior_summary"] = tk.Label(
             tab,
@@ -436,8 +465,8 @@ class AnalyticsDesktopWindow:
         tab = self._tab("Pessoas")
         self._section_title(
             tab,
-            "Perfis reconhecíveis",
-            "Cadastro local com consentimento explícito. Imagens não são salvas; somente o vetor protegido pelo Windows.",
+            "Perfis consentidos mais observados",
+            "Ranking por visitas e tempo estimado. Não há cadastro automático; imagens não são salvas.",
         )
         actions = tk.Frame(tab, bg=BG)
         actions.pack(fill="x", padx=8, pady=(0, 10))
@@ -445,7 +474,10 @@ class AnalyticsDesktopWindow:
             actions, "Cadastrar rosto", self._enroll_person, GREEN
         )
         self._enroll_button.pack(side="left")
-        self._button(actions, "Excluir selecionado", self._delete_person, RED).pack(side="left", padx=8)
+        self._delete_button = self._button(
+            actions, "Excluir selecionado", self._delete_person, RED
+        )
+        self._delete_button.pack(side="left", padx=8)
         self._labels["face_status"] = tk.Label(
             actions, text="Reconhecimento: verificando", font=("Segoe UI", 9), fg=MUTED, bg=BG
         )
@@ -453,8 +485,15 @@ class AnalyticsDesktopWindow:
         self._tree(
             tab,
             "people",
-            (("name", "Nome"), ("profile", "Identificador local")),
-            (320, 560),
+            (
+                ("rank", "Posição"),
+                ("name", "Nome"),
+                ("visits", "Visitas"),
+                ("duration", "Tempo observado"),
+                ("last_seen", "Última observação"),
+                ("cameras", "Câmeras"),
+            ),
+            (70, 190, 70, 130, 170, 210),
             height=14,
         )
 
@@ -557,10 +596,21 @@ class AnalyticsDesktopWindow:
     def _refresh_behavior(self):
         events = self.store.list_vision_events(limit=300)
         counts = Counter(item.get("event_type") for item in events)
+        motion_seconds = sum(
+            max(0.0, float(item.get("duration_seconds") or 0.0))
+            for item in events
+            if item.get("event_type") == "motion_end"
+        )
+        recognized_profiles = {
+            item.get("profile_id")
+            for item in events
+            if item.get("event_type") == "presence_confirmed" and item.get("profile_id")
+        }
         self._labels["behavior_summary"].configure(
             text=(
-                f"Movimentos: {counts['motion_start']} | Presenças reconhecidas: "
-                f"{counts['presence_confirmed']} | Alterações de rostos: {counts['face_count']}"
+                f"Últimos {len(events)} eventos | Movimentos: {counts['motion_start']} "
+                f"({_duration_text(motion_seconds)}) | Perfis consentidos observados: "
+                f"{len(recognized_profiles)} | Alterações de contagem: {counts['face_count']}"
             )
         )
         names = {
@@ -597,6 +647,7 @@ class AnalyticsDesktopWindow:
             for item in (network.get("interfaces") or [])[:3]
         )
         samples = self.store.list_network_samples(limit=200)
+        traffic = self.store.summarize_network_traffic(limit=120, samples=samples[:120])
         recent_faults = samples[0].get("error_delta") if samples else None
         recent_reset = bool(samples and samples[0].get("counter_reset_detected"))
         if recent_reset:
@@ -607,17 +658,32 @@ class AnalyticsDesktopWindow:
             fault_summary = f"+{recent_faults} erro(s)/descarte(s) desde a amostra anterior"
         else:
             fault_summary = "sem novos erros/descartes na última amostra"
+        anomaly_text = {
+            "collection_unavailable": "coleta de rede indisponível",
+            "continuity_changed": "continuidade dos contadores alterada",
+            "counter_reset": "contadores reiniciados; medição inconclusiva",
+            "link_errors": "novos erros ou descartes detectados",
+            "traffic_spike": "pico de tráfego acima do histórico local",
+            "insufficient_history": "histórico ainda insuficiente",
+            "none": "sem anomalia agregada",
+        }.get(traffic.get("anomaly"), "estado agregado desconhecido")
         self._labels["network_summary"].configure(
             text=(
                 f"{_status_text(network.get('state'))} | Conexão: {connection} | Interfaces ativas: "
                 f"{connectivity.get('active_interface_count', 0)} | "
-                f"{link_details or 'velocidade não informada'} | "
-                f"{fault_summary} | "
-                f"Cobertura: {network.get('coverage', 'nenhuma')}"
+                f"{link_details or 'velocidade não informada'}\n"
+                f"{fault_summary} | Cobertura: {network.get('coverage', 'nenhuma')}\n"
+                f"Tráfego deste PC: {_data_rate_text(traffic.get('current_bytes_per_second'))} | "
+                f"Referência histórica: {_data_rate_text(traffic.get('baseline_bytes_per_second'))} | "
+                f"{anomaly_text}\n"
+                "Privacidade: conteúdo não coletado; destinos e acessos não identificados"
             ),
             fg=(
                 GREEN
-                if network.get("state") == "active" and not recent_faults and not recent_reset
+                if network.get("state") == "active"
+                and traffic.get("state") in {"active", "idle"}
+                and not recent_faults
+                and not recent_reset
                 else YELLOW
             ),
         )
@@ -694,15 +760,70 @@ class AnalyticsDesktopWindow:
     def _refresh_people(self):
         service = self.face_service
         profiles = service.list_profiles() if service else []
+        summaries = self.store.list_profile_presence_summary(limit=100)
+        summary_by_profile = {item["profile_id"]: item for item in summaries}
+        rank_by_profile = {
+            item["profile_id"]: index
+            for index, item in enumerate(summaries, start=1)
+        }
+        profiles.sort(
+            key=lambda item: (
+                rank_by_profile.get(item["profile_id"], 10**9),
+                item["display_name"].casefold(),
+            )
+        )
         status = getattr(service, "status", "not_configured") if service else "not_configured"
+        most_observed = ""
+        if summaries:
+            top_profile = next(
+                (
+                    item["display_name"]
+                    for item in profiles
+                    if item["profile_id"] == summaries[0]["profile_id"]
+                ),
+                "",
+            )
+            if top_profile:
+                visible_name = (
+                    top_profile if len(top_profile) <= 32 else f"{top_profile[:29]}..."
+                )
+                most_observed = f" | Mais observado: {visible_name}"
         self._labels["face_status"].configure(
-            text=f"Reconhecimento: {_status_text(status)} | Perfis: {len(profiles)}",
+            text=(
+                f"Reconhecimento: {_status_text(status)} | Perfis consentidos: "
+                f"{len(profiles)}{most_observed}"
+            ),
             fg=GREEN if getattr(service, "available", False) else YELLOW,
         )
+        rows = []
+        for item in profiles:
+            profile_id = item["profile_id"]
+            summary = summary_by_profile.get(profile_id) or {}
+            rank = rank_by_profile.get(profile_id)
+            rows.append(
+                (
+                    profile_id,
+                    (
+                        f"{rank}º" if rank else "-",
+                        item["display_name"],
+                        summary.get("visit_count", 0),
+                        _duration_text(summary.get("observed_seconds", 0)),
+                        summary.get("last_seen_at") or "Ainda não observado",
+                        ", ".join(
+                            str(stream).upper() for stream in summary.get("streams", [])
+                        )
+                        or "-",
+                    ),
+                )
+            )
         self._replace_rows(
             self._trees["people"],
-            [(item["profile_id"], (item["display_name"], item["profile_id"])) for item in profiles],
+            rows,
         )
+        if self._delete_button is not None:
+            self._delete_button.configure(
+                state="disabled" if self.deletion_running else "normal"
+            )
 
     def _schedule_refresh(self):
         self._cancel_refresh()
@@ -808,10 +929,12 @@ class AnalyticsDesktopWindow:
                 self._enrollment_busy = False
 
     def wait_for_workers(self, timeout=3.0):
-        thread = self._enrollment_thread
-        if thread and thread is not threading.current_thread():
-            thread.join(max(0.1, float(timeout)))
-        return not thread or not thread.is_alive()
+        deadline = time.monotonic() + max(0.1, float(timeout))
+        threads = (self._enrollment_thread, self._deletion_thread)
+        for thread in threads:
+            if thread and thread is not threading.current_thread():
+                thread.join(max(0.0, deadline - time.monotonic()))
+        return all(not thread or not thread.is_alive() for thread in threads)
 
     def _drain_ui_actions(self):
         destroyed = False
@@ -825,24 +948,96 @@ class AnalyticsDesktopWindow:
                     self.destroy()
                     destroyed = True
                     continue
-                if action != "enrollment_complete":
+                if action == "enrollment_complete":
+                    self._finish_enrollment(payload)
                     continue
-                with self._enrollment_lock:
-                    self._enrollment_busy = False
-                if self._destroyed or self.window is None or not self.window.winfo_exists():
+                if action == "deletion_complete":
+                    self._finish_deletion(payload)
                     continue
-                if self._enroll_button is not None:
-                    self._enroll_button.configure(state="normal")
-                if payload:
-                    messagebox.showerror("Cadastro não concluído", payload, parent=self.window)
-                else:
-                    self.refresh()
-                    messagebox.showinfo(
-                        "Cadastro concluído", "Perfil facial local cadastrado.", parent=self.window
-                    )
             finally:
                 self._ui_actions.task_done()
         return destroyed
+
+    def _finish_enrollment(self, error):
+        with self._enrollment_lock:
+            self._enrollment_busy = False
+        if self._destroyed or self.window is None or not self.window.winfo_exists():
+            return
+        if self._enroll_button is not None:
+            self._enroll_button.configure(state="normal")
+        if error:
+            messagebox.showerror("Cadastro não concluído", error, parent=self.window)
+        else:
+            self.refresh()
+            messagebox.showinfo(
+                "Cadastro concluído", "Perfil facial local cadastrado.", parent=self.window
+            )
+
+    @property
+    def deletion_running(self):
+        with self._deletion_lock:
+            return self._deletion_busy
+
+    def _start_profile_deletion(self, profile_id):
+        with self._deletion_lock:
+            if self._deletion_busy:
+                return False
+            self._deletion_busy = True
+        if self._delete_button is not None:
+            self._delete_button.configure(state="disabled")
+        thread = threading.Thread(
+            target=self._profile_deletion_worker,
+            args=(str(profile_id),),
+            name="wimi-profile-deletion",
+            daemon=True,
+        )
+        self._deletion_thread = thread
+        thread.start()
+        return True
+
+    def _profile_deletion_worker(self, profile_id):
+        result = {"deleted": False, "error": False, "cleanup_error": False}
+        try:
+            self.store.delete_profile_presence(profile_id)
+            result["deleted"] = bool(self.face_service.delete_profile(profile_id))
+            result["cleanup_error"] = bool(
+                getattr(getattr(self.face_service, "store", None), "last_cleanup_error", None)
+                or getattr(self.store, "last_cleanup_error", None)
+            )
+        except Exception:
+            result["error"] = True
+        try:
+            self._ui_actions.put_nowait(("deletion_complete", result))
+        except queue.Full:
+            with self._deletion_lock:
+                self._deletion_busy = False
+
+    def _finish_deletion(self, result):
+        with self._deletion_lock:
+            self._deletion_busy = False
+        if self._destroyed or self.window is None or not self.window.winfo_exists():
+            return
+        if self._delete_button is not None:
+            self._delete_button.configure(state="normal")
+        self.refresh()
+        if result.get("error"):
+            messagebox.showerror(
+                "Exclusão não concluída",
+                "Não foi possível concluir a exclusão. O perfil permanece disponível para nova tentativa.",
+                parent=self.window,
+            )
+        elif not result.get("deleted"):
+            messagebox.showwarning(
+                "Perfil não removido",
+                "O perfil não foi encontrado no banco biométrico.",
+                parent=self.window,
+            )
+        elif result.get("cleanup_error"):
+            messagebox.showwarning(
+                "Perfil removido com atenção",
+                "O perfil não será mais reconhecido, mas a limpeza física do banco será tentada novamente na manutenção.",
+                parent=self.window,
+            )
 
     def _delete_person(self):
         selection = self._trees["people"].selection()
@@ -855,12 +1050,9 @@ class AnalyticsDesktopWindow:
             parent=self.window,
         ):
             return
-        self.face_service.delete_profile(profile_id)
-        self.refresh()
-        cleanup_error = getattr(getattr(self.face_service, "store", None), "last_cleanup_error", None)
-        if cleanup_error:
-            messagebox.showwarning(
-                "Perfil removido com atenção",
-                "O perfil não será mais reconhecido, mas a limpeza física do banco será tentada novamente na manutenção.",
+        if not self._start_profile_deletion(profile_id):
+            messagebox.showinfo(
+                "Exclusão em andamento",
+                "Aguarde a conclusão da exclusão atual.",
                 parent=self.window,
             )

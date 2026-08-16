@@ -7,12 +7,17 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
+from statistics import median
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 MAX_PAYLOAD_BYTES = 256 * 1024
 JOURNAL_SIZE_LIMIT = 8 * 1024 * 1024
 MAX_DATABASE_BYTES = 256 * 1024 * 1024
+PRESENCE_SESSION_GAP_SECONDS = 90
+PRESENCE_SAMPLE_SECONDS = 3.0
+TRAFFIC_SPIKE_MIN_BYTES_PER_SECOND = 5 * 1024 * 1024
+TRAFFIC_SPIKE_MULTIPLIER = 4.0
 
 
 class UnsafeAnalyticsPathError(ValueError):
@@ -65,6 +70,10 @@ def _fingerprint(value):
     return hashlib.sha256(payload).hexdigest()
 
 
+def _profile_hash(profile_id):
+    return hashlib.sha256(str(profile_id).encode("utf-8")).hexdigest()
+
+
 class AnalyticsStore:
     def __init__(self, path, forbidden_roots=None):
         self.path = Path(path).resolve()
@@ -74,6 +83,7 @@ class AnalyticsStore:
                 raise UnsafeAnalyticsPathError("analytics_database_inside_recording_root")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self.last_cleanup_error = None
         self._initialize()
 
     def _connect(self):
@@ -83,6 +93,7 @@ class AnalyticsStore:
         connection.execute("PRAGMA busy_timeout=5000")
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=NORMAL")
+        connection.execute("PRAGMA secure_delete=ON")
         connection.execute(f"PRAGMA journal_size_limit={JOURNAL_SIZE_LIMIT}")
         connection.execute("PRAGMA wal_autocheckpoint=250")
         page_size = connection.execute("PRAGMA page_size").fetchone()[0]
@@ -100,6 +111,18 @@ class AnalyticsStore:
 
     def _initialize(self):
         with self._lock, self._connection() as connection:
+            schema_meta_exists = connection.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'schema_meta'
+                """
+            ).fetchone() is not None
+            previous_version = 0
+            if schema_meta_exists:
+                version_row = connection.execute(
+                    "SELECT MAX(version) AS version FROM schema_meta"
+                ).fetchone()
+                previous_version = int(version_row["version"] or 0)
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -157,6 +180,51 @@ class AnalyticsStore:
                 CREATE INDEX IF NOT EXISTS idx_vision_occurred
                     ON vision_events(occurred_at DESC);
 
+                CREATE TABLE IF NOT EXISTS profile_presence_stats (
+                    profile_id TEXT PRIMARY KEY,
+                    first_seen_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    visit_count INTEGER NOT NULL,
+                    observation_count INTEGER NOT NULL,
+                    observed_seconds REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_profile_presence_rank
+                    ON profile_presence_stats(observed_seconds DESC, last_seen_at DESC);
+
+                CREATE TABLE IF NOT EXISTS profile_presence_streams (
+                    profile_id TEXT NOT NULL,
+                    stream TEXT NOT NULL,
+                    first_seen_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    observation_count INTEGER NOT NULL,
+                    PRIMARY KEY(profile_id, stream),
+                    FOREIGN KEY(profile_id) REFERENCES profile_presence_stats(profile_id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS profile_presence_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    profile_id TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT NOT NULL,
+                    observation_count INTEGER NOT NULL,
+                    sample_seconds REAL NOT NULL,
+                    FOREIGN KEY(profile_id) REFERENCES profile_presence_stats(profile_id)
+                        ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_profile_sessions_window
+                    ON profile_presence_sessions(profile_id, started_at, ended_at);
+
+                CREATE TABLE IF NOT EXISTS deleted_profile_hashes (
+                    profile_hash TEXT PRIMARY KEY,
+                    deleted_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS maintenance_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+
                 """
             )
             existing_columns = {
@@ -181,6 +249,20 @@ class AnalyticsStore:
                     connection.execute(
                         f"ALTER TABLE network_samples ADD COLUMN {column} {declaration}"
                     )
+            if previous_version < SCHEMA_VERSION:
+                event_cursor = connection.execute(
+                    "DELETE FROM vision_events WHERE event_type = 'presence_confirmed'"
+                )
+                stats_cursor = connection.execute("DELETE FROM profile_presence_stats")
+                if event_cursor.rowcount > 0 or stats_cursor.rowcount > 0:
+                    connection.execute(
+                        """
+                        INSERT OR REPLACE INTO maintenance_state(key, value)
+                        VALUES ('sensitive_compaction_pending', '1')
+                        """
+                    )
+            connection.execute("UPDATE schema_meta SET version = ?", (SCHEMA_VERSION,))
+        self._run_pending_sensitive_compaction()
 
     def record_report(self, report, readiness, collected_at=None, min_interval_seconds=900):
         collected_at = collected_at or datetime.now()
@@ -354,8 +436,15 @@ class AnalyticsStore:
             item["discarded_delta"] = None
             item["error_delta"] = None
             item["counter_reset_detected"] = False
+            item["sample_continuity_broken"] = False
             if index + 1 < len(rows):
                 older = rows[index + 1]
+                item["sample_continuity_broken"] = bool(
+                    row["state"] != "active"
+                    or older["state"] != "active"
+                    or row["primary_connection_type"]
+                    != older["primary_connection_type"]
+                )
                 tracked_counters = (
                     "received_bytes",
                     "sent_bytes",
@@ -366,16 +455,23 @@ class AnalyticsStore:
                     "received_discarded",
                     "sent_discarded",
                 )
-                item["counter_reset_detected"] = any(
-                    row[name] < older[name] for name in tracked_counters
-                )
+                if not item["sample_continuity_broken"]:
+                    item["counter_reset_detected"] = any(
+                        row[name] < older[name] for name in tracked_counters
+                    )
                 elapsed = (
                     datetime.fromisoformat(row["collected_at"])
                     - datetime.fromisoformat(older["collected_at"])
                 ).total_seconds()
                 received_delta = row["received_bytes"] - older["received_bytes"]
                 sent_delta = row["sent_bytes"] - older["sent_bytes"]
-                if elapsed > 0 and received_delta >= 0 and sent_delta >= 0:
+                if (
+                    elapsed > 0
+                    and not item["sample_continuity_broken"]
+                    and not item["counter_reset_detected"]
+                    and received_delta >= 0
+                    and sent_delta >= 0
+                ):
                     item["received_bytes_per_second"] = round(received_delta / elapsed, 2)
                     item["sent_bytes_per_second"] = round(sent_delta / elapsed, 2)
                 fault_names = (
@@ -387,6 +483,7 @@ class AnalyticsStore:
                 fault_deltas = [row[name] - older[name] for name in fault_names]
                 if (
                     elapsed > 0
+                    and not item["sample_continuity_broken"]
                     and not item["counter_reset_detected"]
                     and all(value >= 0 for value in fault_deltas)
                 ):
@@ -394,6 +491,225 @@ class AnalyticsStore:
                     item["error_delta"] = sum(fault_deltas)
             results.append(item)
         return results
+
+    def summarize_network_traffic(self, limit=120, samples=None):
+        limit = max(1, min(int(limit), 1000))
+        samples = (
+            self.list_network_samples(limit=limit)
+            if samples is None
+            else list(samples)[:limit]
+        )
+        if not samples:
+            return {
+                "state": "no_data",
+                "anomaly": "insufficient_history",
+                "traffic_detected": False,
+                "current_bytes_per_second": None,
+                "baseline_bytes_per_second": None,
+                "sample_count": 0,
+                "scope": "this_host_aggregate_only",
+                "captures_content": False,
+            }
+
+        latest = samples[0]
+        current_rate = None
+        if (
+            latest.get("received_bytes_per_second") is not None
+            and latest.get("sent_bytes_per_second") is not None
+        ):
+            current_rate = round(
+                latest["received_bytes_per_second"]
+                + latest["sent_bytes_per_second"],
+                2,
+            )
+        prior_rates = []
+        for sample in samples[1:]:
+            received = sample.get("received_bytes_per_second")
+            sent = sample.get("sent_bytes_per_second")
+            if received is None or sent is None or sample.get("counter_reset_detected"):
+                continue
+            prior_rates.append(received + sent)
+        baseline = round(float(median(prior_rates)), 2) if prior_rates else None
+        spike = bool(
+            current_rate is not None
+            and len(prior_rates) >= 3
+            and current_rate >= TRAFFIC_SPIKE_MIN_BYTES_PER_SECOND
+            and current_rate >= max(1.0, baseline or 0.0) * TRAFFIC_SPIKE_MULTIPLIER
+        )
+        recent_faults = int(latest.get("error_delta") or 0)
+        if latest.get("state") != "active":
+            state = "limited"
+            anomaly = "collection_unavailable"
+        elif latest.get("sample_continuity_broken"):
+            state = "limited"
+            anomaly = "continuity_changed"
+        elif latest.get("counter_reset_detected"):
+            state = "warning"
+            anomaly = "counter_reset"
+        elif recent_faults:
+            state = "warning"
+            anomaly = "link_errors"
+        elif spike:
+            state = "warning"
+            anomaly = "traffic_spike"
+        elif current_rate is None:
+            state = "limited"
+            anomaly = "insufficient_history"
+        else:
+            state = "active" if current_rate >= 1024 else "idle"
+            anomaly = "none"
+        return {
+            "state": state,
+            "anomaly": anomaly,
+            "traffic_detected": bool(current_rate is not None and current_rate >= 1024),
+            "current_bytes_per_second": current_rate,
+            "baseline_bytes_per_second": baseline,
+            "sample_count": len(samples),
+            "scope": "this_host_aggregate_only",
+            "captures_content": False,
+        }
+
+    def _update_presence_stats(
+        self,
+        connection,
+        profile_id,
+        stream,
+        occurred_at,
+        sample_seconds=None,
+    ):
+        profile_id = str(profile_id).strip()[:80]
+        stream = str(stream).strip()[:80]
+        if not profile_id or not stream:
+            return
+        occurred_at = _iso(occurred_at)
+        sample_seconds = max(
+            0.0,
+            min(float(sample_seconds or PRESENCE_SAMPLE_SECONDS), PRESENCE_SESSION_GAP_SECONDS),
+        )
+        occurred_datetime = datetime.fromisoformat(occurred_at)
+        window_start = _iso(
+            occurred_datetime - timedelta(seconds=PRESENCE_SESSION_GAP_SECONDS)
+        )
+        window_end = _iso(
+            occurred_datetime + timedelta(seconds=PRESENCE_SESSION_GAP_SECONDS)
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO profile_presence_stats(
+                profile_id, first_seen_at, last_seen_at, visit_count,
+                observation_count, observed_seconds
+            ) VALUES (?, ?, ?, 0, 0, 0)
+            """,
+            (profile_id, occurred_at, occurred_at),
+        )
+        current = connection.execute(
+            "SELECT * FROM profile_presence_stats WHERE profile_id = ?",
+            (profile_id,),
+        ).fetchone()
+        sessions = connection.execute(
+            """
+            SELECT id, started_at, ended_at, observation_count, sample_seconds
+            FROM profile_presence_sessions
+            WHERE profile_id = ? AND ended_at >= ? AND started_at <= ?
+            ORDER BY started_at ASC, id ASC
+            """,
+            (profile_id, window_start, window_end),
+        ).fetchall()
+        started_at = min([occurred_at] + [row["started_at"] for row in sessions])
+        ended_at = max([occurred_at] + [row["ended_at"] for row in sessions])
+        merged_sample_seconds = max(
+            [sample_seconds] + [float(row["sample_seconds"]) for row in sessions]
+        )
+        merged_observations = 1 + sum(
+            int(row["observation_count"]) for row in sessions
+        )
+        old_session_seconds = sum(
+            self._presence_session_seconds(
+                row["started_at"], row["ended_at"], row["sample_seconds"]
+            )
+            for row in sessions
+        )
+        if sessions:
+            placeholders = ",".join("?" for _ in sessions)
+            connection.execute(
+                f"DELETE FROM profile_presence_sessions WHERE id IN ({placeholders})",
+                [row["id"] for row in sessions],
+            )
+        connection.execute(
+            """
+            INSERT INTO profile_presence_sessions(
+                profile_id, started_at, ended_at, observation_count, sample_seconds
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                profile_id,
+                started_at,
+                ended_at,
+                merged_observations,
+                merged_sample_seconds,
+            ),
+        )
+        new_session_seconds = self._presence_session_seconds(
+            started_at, ended_at, merged_sample_seconds
+        )
+        connection.execute(
+            """
+            UPDATE profile_presence_stats
+            SET first_seen_at = MIN(first_seen_at, ?),
+                last_seen_at = MAX(last_seen_at, ?),
+                visit_count = visit_count - ? + 1,
+                observation_count = observation_count + 1,
+                observed_seconds = MAX(0, observed_seconds - ? + ?)
+            WHERE profile_id = ?
+            """,
+            (
+                occurred_at,
+                occurred_at,
+                len(sessions),
+                old_session_seconds,
+                new_session_seconds,
+                profile_id,
+            ),
+        )
+        stream_row = connection.execute(
+            """
+            SELECT first_seen_at, last_seen_at, observation_count
+            FROM profile_presence_streams
+            WHERE profile_id = ? AND stream = ?
+            """,
+            (profile_id, stream),
+        ).fetchone()
+        if stream_row is None:
+            connection.execute(
+                """
+                INSERT INTO profile_presence_streams(
+                    profile_id, stream, first_seen_at, last_seen_at, observation_count
+                ) VALUES (?, ?, ?, ?, 1)
+                """,
+                (profile_id, stream, occurred_at, occurred_at),
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE profile_presence_streams
+                SET first_seen_at = MIN(first_seen_at, ?),
+                    last_seen_at = CASE WHEN ? > last_seen_at THEN ? ELSE last_seen_at END,
+                    observation_count = observation_count + 1
+                WHERE profile_id = ? AND stream = ?
+                """,
+                (occurred_at, occurred_at, occurred_at, profile_id, stream),
+            )
+
+    @staticmethod
+    def _presence_session_seconds(started_at, ended_at, sample_seconds):
+        elapsed = max(
+            0.0,
+            (
+                datetime.fromisoformat(ended_at)
+                - datetime.fromisoformat(started_at)
+            ).total_seconds(),
+        )
+        return elapsed + max(0.0, float(sample_seconds))
 
     def record_vision_event(self, event):
         allowed_types = {
@@ -419,7 +735,14 @@ class AnalyticsStore:
         duration = max(0.0, float(duration)) if duration is not None else None
         profile_id = str(event.get("profile_id"))[:80] if event.get("profile_id") else None
         with self._lock, self._connection() as connection:
-            connection.execute(
+            if event_type == "presence_confirmed" and profile_id:
+                deleted_profile = connection.execute(
+                    "SELECT 1 FROM deleted_profile_hashes WHERE profile_hash = ?",
+                    (_profile_hash(profile_id),),
+                ).fetchone()
+                if deleted_profile is not None:
+                    return event_id
+            cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO vision_events(
                     event_id, occurred_at, event_type, stream, count,
@@ -428,6 +751,14 @@ class AnalyticsStore:
                 """,
                 (event_id, occurred_at, event_type, stream, count, profile_id, confidence, duration),
             )
+            if cursor.rowcount and event_type == "presence_confirmed" and profile_id:
+                self._update_presence_stats(
+                    connection,
+                    profile_id,
+                    stream,
+                    occurred_at,
+                    duration,
+                )
         return event_id
 
     def list_vision_events(self, limit=200):
@@ -438,6 +769,118 @@ class AnalyticsStore:
                 (limit,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def list_profile_presence_summary(self, limit=100):
+        limit = max(1, min(int(limit), 1000))
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT profile_id, first_seen_at, last_seen_at, visit_count,
+                       observation_count, observed_seconds
+                FROM profile_presence_stats
+                ORDER BY observed_seconds DESC, visit_count DESC, last_seen_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            profile_ids = [row["profile_id"] for row in rows]
+            streams_by_profile = {profile_id: [] for profile_id in profile_ids}
+            if profile_ids:
+                placeholders = ",".join("?" for _ in profile_ids)
+                stream_rows = connection.execute(
+                    f"""
+                    SELECT profile_id, stream
+                    FROM profile_presence_streams
+                    WHERE profile_id IN ({placeholders})
+                    ORDER BY profile_id ASC, stream ASC
+                    """,
+                    profile_ids,
+                ).fetchall()
+                for stream_row in stream_rows:
+                    streams_by_profile[stream_row["profile_id"]].append(stream_row["stream"])
+        return [
+            {
+                "profile_id": row["profile_id"],
+                "first_seen_at": row["first_seen_at"],
+                "last_seen_at": row["last_seen_at"],
+                "visit_count": row["visit_count"],
+                "observation_count": row["observation_count"],
+                "observed_seconds": round(float(row["observed_seconds"]), 1),
+                "streams": streams_by_profile.get(row["profile_id"], []),
+            }
+            for row in rows
+        ]
+
+    def delete_profile_presence(self, profile_id):
+        profile_id = str(profile_id).strip()[:80]
+        if not profile_id:
+            return False
+        profile_hash = _profile_hash(profile_id)
+        with self._lock, self._connection() as connection:
+            tombstone_cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO deleted_profile_hashes(profile_hash, deleted_at)
+                VALUES (?, ?)
+                """,
+                (profile_hash, _iso(datetime.now())),
+            )
+            event_cursor = connection.execute(
+                "DELETE FROM vision_events WHERE profile_id = ?",
+                (profile_id,),
+            )
+            stats_cursor = connection.execute(
+                "DELETE FROM profile_presence_stats WHERE profile_id = ?",
+                (profile_id,),
+            )
+            deleted = (
+                tombstone_cursor.rowcount > 0
+                or stats_cursor.rowcount > 0
+                or event_cursor.rowcount > 0
+            )
+            if deleted:
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO maintenance_state(key, value)
+                    VALUES ('sensitive_compaction_pending', '1')
+                    """
+                )
+        if deleted:
+            self._run_pending_sensitive_compaction()
+        return deleted
+
+    def _run_pending_sensitive_compaction(self):
+        with self._lock, self._connection() as connection:
+            pending = connection.execute(
+                """
+                SELECT 1 FROM maintenance_state
+                WHERE key = 'sensitive_compaction_pending'
+                """
+            ).fetchone()
+        if pending is None:
+            return True
+        if not self._compact_after_sensitive_delete():
+            return False
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                "DELETE FROM maintenance_state WHERE key = 'sensitive_compaction_pending'"
+            )
+        return True
+
+    def _compact_after_sensitive_delete(self):
+        try:
+            with self._lock:
+                connection = self._connect()
+                try:
+                    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    connection.execute("VACUUM")
+                    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                finally:
+                    connection.close()
+            self.last_cleanup_error = None
+            return True
+        except (OSError, sqlite3.Error) as error:
+            self.last_cleanup_error = str(error)[:200]
+            return False
 
     def cleanup(self, retention_days=90, now=None):
         retention_days = max(7, min(int(retention_days), 3650))
