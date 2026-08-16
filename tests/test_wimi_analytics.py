@@ -244,6 +244,31 @@ class NvrHealthBridgeTests(unittest.TestCase):
 
 
 class DashboardPayloadTests(unittest.TestCase):
+    def test_native_runtime_replaces_obsolete_not_configured_findings(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            payload = build_dashboard_payload(
+                NvrHealthBridge(Path(temp_dir) / "missing.json"),
+                runtime={
+                    "analytics": {"status": "active", "detail": "desktop", "mode": "native"},
+                    "vision": {"status": "active", "detail": "frames locais"},
+                    "computers": {"status": "limited", "detail": "somente este PC"},
+                    "history": {"status": "active", "detail": "SQLite local"},
+                },
+            )
+
+        readiness = payload["operations"]["readiness"]
+        limitation_ids = {item["id"] for item in readiness["limitations"]}
+        strength_ids = {item["id"] for item in readiness["strengths"]}
+        modules = {item["id"]: item for item in payload["modules"]}
+
+        self.assertEqual(payload["service"]["mode"], "native_local")
+        self.assertEqual(modules["vision"]["status"], "active")
+        self.assertNotIn("vision_not_configured", limitation_ids)
+        self.assertNotIn("historical_reports_not_configured", limitation_ids)
+        self.assertIn("vision_local_active", strength_ids)
+        self.assertIn("persistent_history", strength_ids)
+        self.assertIn("computers_local_only", limitation_ids)
+
     def test_unconfigured_collectors_are_explicit_and_not_reported_as_active(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             bridge = NvrHealthBridge(Path(temp_dir) / "missing.json")
@@ -512,6 +537,14 @@ class NetworkDiagnosticsTests(unittest.TestCase):
                         "ipv4": ["192.168.7.5", "invalid"],
                         "gateway": ["192.168.7.1"],
                         "dns": ["192.168.7.1", "fe80::1"],
+                        "received_bytes": 120000,
+                        "sent_bytes": 45000,
+                        "received_packets": 800,
+                        "sent_packets": 320,
+                        "received_errors": 1,
+                        "sent_errors": 0,
+                        "received_discarded": 2,
+                        "sent_discarded": 0,
                         "mac_address": "AA-BB-CC-DD-EE-FF",
                         "capture": "secret payload",
                     }
@@ -529,16 +562,20 @@ class NetworkDiagnosticsTests(unittest.TestCase):
 
         self.assertEqual(result["state"], "active")
         self.assertEqual(result["source"], "windows_cim_network_configuration")
-        self.assertEqual(result["coverage"], "host_configuration_only")
+        self.assertEqual(result["coverage"], "host_configuration_and_counters")
         self.assertFalse(result["can_observe_store_traffic"])
         self.assertEqual(result["interfaces"][0]["ipv4"], ["192.168.7.5"])
         self.assertEqual(result["interfaces"][0]["gateways"], ["192.168.7.1"])
         self.assertTrue(result["connectivity"]["default_gateway_configured"])
         self.assertTrue(result["connectivity"]["dns_configured"])
+        self.assertEqual(result["traffic_counters"]["received_bytes"], 120000)
+        self.assertEqual(result["traffic_counters"]["sent_bytes"], 45000)
+        self.assertEqual(result["traffic_counters"]["received_discarded"], 2)
         self.assertNotIn("AA-BB-CC", serialized)
         self.assertNotIn("secret payload", serialized)
         powershell_command = runner.call_args.args[0][-1]
         self.assertIn("Win32_NetworkAdapterConfiguration", powershell_command)
+        self.assertIn("Get-NetAdapterStatistics", powershell_command)
         self.assertNotIn("Get-NetIPConfiguration", powershell_command)
 
     def test_collector_uses_bounded_cache_instead_of_spawning_powershell_per_poll(self):

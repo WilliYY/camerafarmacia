@@ -34,14 +34,24 @@ def load_manager_copy():
     pil_module = types.ModuleType("PIL")
     pil_module.Image = types.ModuleType("PIL.Image")
     pil_module.ImageTk = types.ModuleType("PIL.ImageTk")
-    sys.modules["PIL"] = pil_module
-    sys.modules["PIL.Image"] = pil_module.Image
-    sys.modules["PIL.ImageTk"] = pil_module.ImageTk
-
-    loader = importlib.machinery.SourceFileLoader("nvr_manager_test", str(copied_source))
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
+    fake_modules = {
+        "PIL": pil_module,
+        "PIL.Image": pil_module.Image,
+        "PIL.ImageTk": pil_module.ImageTk,
+    }
+    previous_modules = {name: sys.modules.get(name) for name in fake_modules}
+    try:
+        sys.modules.update(fake_modules)
+        loader = importlib.machinery.SourceFileLoader("nvr_manager_test", str(copied_source))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+    finally:
+        for name, previous in previous_modules.items():
+            if previous is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
     return temp_dir, module
 
 
@@ -1691,6 +1701,93 @@ class StorageSafetyTests(unittest.TestCase):
 
         self.assertTrue(app.root.quit_called)
         self.assertTrue(app.root.destroy_called)
+
+    def test_shutdown_keeps_root_open_while_wimi_worker_is_alive(self):
+        app = self.new_app()
+        app.root = FakeRoot()
+        app.silent = True
+        app.running_monitor = True
+        app.running_sync = True
+        app.apply_prevent_sleep = lambda _enabled: None
+        app.run_stop_sequence = lambda: None
+        app.limpar_processos_ffmpeg_zumbis = lambda sync=False: None
+        app.wait_for_wimi_shutdown = lambda: False
+
+        app.graceful_shutdown()
+
+        self.assertFalse(app.root.quit_called)
+        self.assertFalse(app.root.destroy_called)
+
+    def test_power_loss_keeps_tk_open_until_wimi_releases_databases(self):
+        app = self.new_app()
+        app.root = FakeRoot()
+        app.speak = lambda _message: None
+        app.running_monitor = True
+        app.running_sync = True
+        app.run_stop_sequence = lambda: None
+        app.wait_for_wimi_shutdown = lambda attempts=1, retry_delay=0: False
+        commands = []
+        original_popen = self.module.subprocess.Popen
+        self.module.subprocess.Popen = lambda command, shell=False: commands.append(command)
+        try:
+            app.graceful_shutdown_due_to_power_loss()
+        finally:
+            self.module.subprocess.Popen = original_popen
+
+        self.assertEqual(len(commands), 1)
+        self.assertFalse(app.root.quit_called)
+        self.assertFalse(app.root.destroy_called)
+
+    def test_background_shutdown_uses_main_thread_control_queue(self):
+        class DeferredRoot(FakeRoot):
+            def __init__(self):
+                super().__init__()
+                self.after_calls = []
+
+            def after(self, delay, callback, *args):
+                self.after_calls.append((delay, callback, args))
+
+        app = self.new_app()
+        app.root = DeferredRoot()
+        app._ui_control_queue = self.module.queue.Queue(maxsize=8)
+        worker = threading.Thread(target=app.request_tk_shutdown)
+
+        worker.start()
+        worker.join(1)
+
+        self.assertFalse(app.root.quit_called)
+        self.assertEqual(app.root.after_calls, [])
+        app.drain_ui_control_queue()
+        self.assertTrue(app.root.quit_called)
+        self.assertTrue(app.root.destroy_called)
+
+    def test_wimi_integration_keeps_vision_queue_at_two_frames(self):
+        source = inspect.getsource(self.module.CameraManagerApp._start_wimi_analytics_worker)
+        self.assertIn("queue_size=2", source)
+        self.assertNotIn("queue_size=4", source)
+        self.assertNotIn("root.after", source)
+        self.assertIn("wimi_ready", source)
+
+    def test_wimi_ready_control_runs_on_queue_drain(self):
+        class DeferredRoot(FakeRoot):
+            def __init__(self):
+                super().__init__()
+                self.after_calls = []
+
+            def after(self, delay, callback, *args):
+                self.after_calls.append((delay, callback, args))
+
+        app = self.new_app()
+        app.root = DeferredRoot()
+        app._ui_control_queue = self.module.queue.Queue(maxsize=8)
+        received = []
+        app._on_wimi_analytics_ready = received.append
+        app._ui_control_queue.put_nowait(("wimi_ready", True))
+
+        app.drain_ui_control_queue()
+
+        self.assertEqual(received, [True])
+        self.assertEqual(len(app.root.after_calls), 1)
 
 
 if __name__ == "__main__":

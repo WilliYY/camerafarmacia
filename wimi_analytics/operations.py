@@ -335,7 +335,7 @@ def build_operational_report(nvr, network):
     }
 
 
-def build_readiness(nvr, network, modules, report):
+def build_readiness(nvr, network, modules, report, runtime=None):
     snapshot = nvr.get("snapshot") if isinstance(nvr, dict) else None
     metrics = snapshot.get("metrics") if isinstance(snapshot, dict) else {}
     hardware = snapshot.get("hardware_summary") if isinstance(snapshot, dict) else {}
@@ -346,17 +346,29 @@ def build_readiness(nvr, network, modules, report):
     if not isinstance(issues, list):
         issues = []
     current_issues = [issue for issue in issues if isinstance(issue, dict)] if snapshot_current else []
+    module_by_id = {
+        module.get("id"): module for module in modules if isinstance(module, dict)
+    }
+    native_mode = (
+        isinstance(runtime, dict)
+        and isinstance(runtime.get("analytics"), dict)
+        and runtime["analytics"].get("mode") == "native"
+    )
     strengths = [
         _finding(
-            "local_read_only",
-            "API local e somente leitura",
-            "O Analytics escuta no loopback e nao possui rotas de escrita.",
-            "service.mode=local_read_only",
+            "native_local" if native_mode else "local_read_only",
+            "Painel local nativo" if native_mode else "API local e somente leitura",
+            (
+                "As analises ficam dentro do aplicativo e nao abrem navegador."
+                if native_mode
+                else "O Analytics escuta no loopback e nao possui rotas de escrita."
+            ),
+            "service.mode=native_local" if native_mode else "service.mode=local_read_only",
         ),
         _finding(
             "recording_isolated",
             "Gravacao isolada do Analytics",
-            "O painel le o snapshot e nao controla FFmpeg, go2rtc ou arquivos de video.",
+            "O Analytics nao altera gravacoes nem arquivos de video; a visao reutiliza previews autorizados.",
             "architecture.analytics_read_only",
         ),
     ]
@@ -409,32 +421,71 @@ def build_readiness(nvr, network, modules, report):
             )
         )
 
-    limitations = [
-        _finding(
+    limitations = []
+    vision_status = (module_by_id.get("vision") or {}).get("status")
+    if vision_status not in {"active", "limited"}:
+        limitations.append(_finding(
             "vision_not_configured",
             "Visao computacional nao configurada",
             "Deteccao, tracking e zonas ainda nao produzem eventos validados.",
             "modules.vision=not_configured",
-        ),
-        _finding(
+        ))
+    elif vision_status == "limited":
+        limitations.append(_finding(
+            "vision_waiting_for_frames",
+            "Visao aguardando quadros",
+            "O worker esta pronto, mas precisa de preview ativo para analisar uma camera.",
+            "modules.vision=limited",
+        ))
+    else:
+        strengths.append(_finding(
+            "vision_local_active",
+            "Visao computacional local ativa",
+            "Movimento e rostos sao processados localmente sem salvar imagens.",
+            "modules.vision=active",
+        ))
+
+    computers_status = (module_by_id.get("computers") or {}).get("status")
+    if computers_status not in {"active", "limited"}:
+        limitations.append(_finding(
             "computers_not_configured",
             "Agente dos computadores nao configurado",
             "O painel nao recebe uso de aplicativos ou sessoes Windows.",
             "modules.computers=not_configured",
-        ),
-        _finding(
+        ))
+    elif computers_status == "limited":
+        limitations.append(_finding(
+            "computers_local_only",
+            "Monitoramento limitado a este PC",
+            "Nenhum agente remoto foi instalado em outros computadores.",
+            "modules.computers=limited",
+        ))
+
+    history_active = (
+        isinstance(runtime, dict)
+        and isinstance(runtime.get("history"), dict)
+        and runtime["history"].get("status") == "active"
+    )
+    if history_active:
+        strengths.append(_finding(
+            "persistent_history",
+            "Historico operacional persistente",
+            "Relatorios, rede e eventos ficam no banco local com retencao limitada.",
+            "runtime.history=active",
+        ))
+    else:
+        limitations.append(_finding(
             "historical_reports_not_configured",
             "Historico operacional nao configurado",
             "Este relatorio representa a coleta atual e nao inventa totais diarios.",
             "report.scope=nvr_and_host_only",
-        ),
-    ]
+        ))
     if not isinstance(network, dict) or network.get("can_observe_store_traffic") is not True:
         limitations.append(
             _finding(
                 "store_network_not_observed",
                 "Trafego da loja nao observado",
-                "A rede exibida cobre apenas a configuracao deste PC.",
+                "A rede exibida cobre configuracao e contadores agregados somente deste PC.",
                 "network.can_observe_store_traffic=false",
             )
         )

@@ -173,9 +173,29 @@ Para rodar silenciosamente, use:
 pythonw.exe gerenciador.pyw --silent
 ```
 
-O WIMI Analytics e iniciado em processo separado tanto no modo visual quanto no
-modo silencioso. Para executar somente o painel, sem iniciar o NVR ou as
-cameras, use:
+O WIMI Analytics agora roda integrado ao processo do NVR. No modo visual, o
+botao `Painel WIMI` abre uma janela nativa com seis abas: Visao geral, Cameras,
+Comportamento, Rede, Relatorios e Pessoas. Trocar de aba, ocultar ou reabrir a
+janela preserva a coleta e o historico; o fluxo normal nao abre navegador.
+
+O historico fica em `sistema/analytics/`, fora do HD de gravacao. A visao usa os
+quadros ja decodificados pelo preview, sem abrir outra conexao com as cameras e
+sem alterar `/api/stream.ts`. Para instalar ou verificar o runtime local fixado
+do OpenCV e os modelos com SHA-256 aprovado:
+
+```powershell
+python tools\setup_wimi_vision.py
+python tools\setup_wimi_vision.py --verify-only
+```
+
+O cadastro facial exige consentimento explicito e um quadro recente com
+exatamente um rosto. Nenhuma imagem e salva; nome e vetor ficam juntos em um
+banco biometrico separado, protegido pelo DPAPI do Windows. Movimento, contagem
+de rostos e reconhecimento sao evidencias para revisao humana, nao inferencias
+de emocao, intencao ou produtividade.
+
+O servidor HTTP antigo continua disponivel somente para compatibilidade e
+diagnostico. Para executa-lo sem iniciar o NVR ou as cameras, use:
 
 ```powershell
 python -m wimi_analytics.server

@@ -13,6 +13,7 @@ sistema/web/
 sistema/logs/
 sistema/backup_gravacoes/
 sistema/quarentena_corrompidos/
+sistema/analytics/
 .firewall_configured
 
 # Cache do Python

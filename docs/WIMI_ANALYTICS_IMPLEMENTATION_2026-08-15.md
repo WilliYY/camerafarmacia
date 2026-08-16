@@ -1,109 +1,131 @@
-# WIMI Analytics - primeira integracao funcional
+# WIMI Analytics - integracao nativa e visao local
 
-Data: 15/08/2026
+Atualizado em: 16/08/2026
 
 ## Resultado
 
-O NVR e a fundacao do WIMI Analytics agora vivem no mesmo repositorio e aparecem
-como um produto unico. Internamente continuam isolados:
+O WIMI Analytics esta integrado ao painel Tkinter do NVR. O fluxo normal nao
+inicia nem abre um site local. O botao `Painel WIMI` reutiliza uma unica janela
+nativa e preserva coleta, selecao e historico ao alternar entre seis abas:
 
-- `gerenciador.pyw` continua dono exclusivo de gravacao, go2rtc, energia e HD;
-- `wimi_analytics.server` e um processo local separado e somente leitura;
-- o botao `Painel WIMI` inicia ou reutiliza exatamente uma instancia;
-- a pagina Cameras abre o visualizador go2rtc direto, sem proxy ou transcode;
-- o snapshot do NVR e filtrado antes de chegar ao navegador;
-- a pagina Rede diagnostica somente a configuracao deste PC;
-- Relatorios consolida a coleta atual sem inventar dados historicos;
-- Sistema apresenta pontos fortes, limitacoes e riscos com suas evidencias;
-- coletores ainda inexistentes nunca aparecem como ativos.
+- Visao geral;
+- Cameras;
+- Comportamento;
+- Rede;
+- Relatorios;
+- Pessoas.
 
-## Fluxo entregue
+O servidor HTTP em `127.0.0.1:8765` permanece apenas como compatibilidade de
+diagnostico. Ele nao faz parte do fluxo normal do operador.
+
+## Arquitetura entregue
 
 ```text
 gerenciador.pyw
-  |-- grava e monitora as cameras como antes
-  |-- publica sistema/logs/health_status.json atomicamente
-  `-- inicia wimi_analytics.server em processo separado
-         |-- NvrHealthBridge le e sanitiza o snapshot
-         |-- WindowsNetworkDiagnostics le configuracao local com cache
-         |-- operations.py produz relatorio e prontidao deterministas
-         |-- API local somente leitura exige sessao do navegador
-         `-- dashboard exibe Cameras, Ocorrencias, Relatorios e Sistema
+  |-- gravacao direta: /api/stream.ts?src=NOME
+  |-- preview MJPEG existente
+  |     `-- amostra limitada para VisionCoordinator
+  |-- health_status.json sanitizado
+  `-- WIMI nativo
+        |-- AnalyticsCollector
+        |-- AnalyticsStore (relatorios, rede e eventos)
+        |-- VisionCoordinator (movimento, rosto e identidade)
+        |-- BiometricStore + DPAPI (perfis consentidos)
+        `-- AnalyticsDesktopWindow (seis abas Tkinter)
 ```
 
-## Rotas locais
+O coletor e a visao nao controlam gravacao, retencao, go2rtc, energia ou HD. O
+`gerenciador.pyw` continua sendo o unico dono desses fluxos.
 
-| Rota | Finalidade | Protecao |
-|---|---|---|
-| `/` | painel unificado | cria cookie de sessao local |
-| `/healthz` | readiness do supervisor | resposta minima, sem telemetria |
-| `/api/v1/overview` | estado sanitizado do produto | sessao, Host e Origin |
-| `/api/v1/nvr/health` | saude sanitizada do NVR | sessao, Host e Origin |
-| `/api/v1/modules` | estado declarado dos modulos | sessao, Host e Origin |
-| `/api/v1/network/status` | interface, IPv4, gateway e DNS deste PC | sessao, Host e Origin |
-| `/api/v1/reports/current` | verificacoes da coleta atual | sessao, Host e Origin |
-| `/api/v1/system/readiness` | pontos fortes, limitacoes e riscos | sessao, Host e Origin |
+## Persistencia e privacidade
 
-O servico recusa metodos de escrita, nao define CORS permissivo e escuta somente
-em `127.0.0.1:8765`. As portas `1984` e `29999` sao reservadas ao go2rtc e ao
-controle de instancia do NVR.
+- `sistema/analytics/wimi_analytics.sqlite3`: relatorios sanitizados, contadores
+  agregados de rede deste PC e transicoes de visao;
+- `sistema/analytics/wimi_biometrics.sqlite3`: perfil biometrico separado;
+- bancos com limite de tamanho, WAL limitado, `busy_timeout` e conexoes curtas;
+- retencao operacional de 90 dias, sem tocar em diretorios de video;
+- relatorio persistido por mudanca ou intervalo de seguranca, reduzindo escrita;
+- rede sem captura de pacote, DNS consultado, pagina, mensagem, senha, IP ou MAC
+  persistido;
+- perfis protegidos pelo DPAPI do usuario Windows;
+- exclusao biometrica usa `secure_delete`, `VACUUM` e truncamento do WAL;
+- nenhuma imagem de camera e gravada pelo Analytics.
 
-## Protecoes de hardware e dados
+## Visao computacional
 
-- zero acesso ao acervo de videos;
-- zero banco, cache, modelo ou fila no HD de gravacao;
-- nenhum stream e retransmitido pelo Analytics;
-- leitura limitada a 2 MiB e com retry curto para troca atomica no Windows;
-- snapshot ausente, invalido, antigo ou com relogio divergente falha fechado;
-- DTO por lista permitida remove hostname, caminhos, URL, credenciais, serial de
-  disco, evidencias internas e campos desconhecidos;
-- numeros nao finitos, booleanos em metricas numericas e timestamps invalidos
-  sao rejeitados; o resumo de hardware expoe somente contagens agregadas;
-- alerta sanitizado do HD prevalece sobre o indicador simples de unidade
-  conectada, evitando apresentar armazenamento em verde durante uma ocorrencia;
-- nenhum loop de reinicio, log continuo ou download automatico foi adicionado;
-- o servidor HTTP local usa workers daemon para manter `/healthz` responsivo
-  durante uma coleta, sem impedir o encerramento do processo;
-- diagnostico de rede usa CIM e `Get-NetAdapter` somente leitura, timeout de 4 s,
-  saida maxima de 64 KiB, cache valido de 5 min, falha em cache por no maximo
-  30 s e no maximo 16 interfaces;
-- a coleta de rede nao varre dispositivos, captura pacotes, le navegacao, grava
-  cache em disco ou expoe endereco MAC;
-- shutdown termina apenas o processo cujo handle pertence ao NVR.
+- movimento deterministico por diferenca de quadros e histerese;
+- no maximo uma amostra por segundo por camera e dois quadros no total na fila;
+- amostra reduzida antes de entrar na fila, com limite de `1280x720`;
+- YuNet/SFace executados no maximo a cada tres segundos por camera;
+- entrada facial limitada a `960x540` e oito rostos por quadro;
+- fila recupera de erro transitorio sem perder permanentemente o worker;
+- quadro de cadastro expira apos cinco segundos;
+- cadastro roda fora da thread Tk e exige consentimento e exatamente um rosto;
+- reconhecimento exige limiar, margem contra o segundo perfil e duas
+  confirmacoes consecutivas;
+- identidade nao cadastrada continua anonima e nenhum perfil e criado sozinho.
 
-## Estado dos modulos
+Os modelos locais e o runtime isolado sao instalados por
+`tools/setup_wimi_vision.py`. O manifesto fixa versoes, origem, tamanho e
+SHA-256. Esses artefatos gerados ficam fora do Git.
 
-| Modulo | Estado desta entrega |
-|---|---|
-| Cameras e gravacao | integrado por snapshot e visualizador direto |
-| Fundacao Analytics | ativa |
-| Visao computacional | nao configurada |
-| Computadores | nao configurado |
-| Rede | diagnostico local ativo; DNS/flows da loja nao configurados |
-| Ocorrencias | alertas da coleta atual; sem historico persistente |
-| Relatorios | coleta atual ativa; parcial se NVR ou rede estiver indisponivel |
-| Sistema | prontidao, pontos fortes, limitacoes e riscos ativos |
+## Protecao de operacao 24h
 
-Essa separacao e intencional. Ativar detector, tracking, telemetria de aplicativos
-ou DNS sem benchmark e governanca produziria risco de falso positivo e carga
-desnecessaria no computador do NVR.
+- a visao reutiliza o preview e nao cria uma segunda conexao RTSP/MJPEG;
+- nenhum decode ou re-encode foi adicionado ao caminho de gravacao;
+- a analise pausa durante encerramento, indisponibilidade do HD, novo
+  `Kernel_144` da sessao, memoria excessiva ou deterioracao de memoria;
+- timeout de encerramento preserva a referencia da thread ainda ativa;
+- Tkinter e destruido somente pela thread principal;
+- cadastro facial lento nao bloqueia a interface;
+- falhas de OpenCV ou SQLite por quadro recebem backoff e log limitado.
+
+## Rede e computadores
+
+O diagnostico consulta configuracao e contadores agregados dos adaptadores deste
+PC. Exibe bytes, pacotes, erros e descartes acumulados, alem de taxas calculadas
+entre amostras. Nao observa o trafego completo da loja e nao captura conteudo.
+
+Agente remoto nao e necessario para este computador. Outros computadores so
+devem ser incluidos em uma etapa autorizada, com escopo, autenticacao e politica
+de privacidade proprios.
 
 ## Validacao executavel
 
 ```powershell
-python -m py_compile gerenciador.pyw wimi_analytics\__init__.py wimi_analytics\__main__.py wimi_analytics\backend.py wimi_analytics\launcher.py wimi_analytics\network_diagnostics.py wimi_analytics\operations.py wimi_analytics\server.py
+python -m py_compile gerenciador.pyw
+python -m compileall -q wimi_analytics tools tests
 python -m unittest discover -s tests -v
-node --check wimi_analytics\static\app.js
+python tools\setup_wimi_vision.py --verify-only
 python gerenciador.pyw --health-check
+python gerenciador.pyw --smoke-test-seconds 180
 ```
 
-O teste real de camera nao e requisito desta fatia porque `/api/stream.ts`,
-go2rtc e o player existente nao foram modificados. Antes de ativar visao
-computacional, seguir o protocolo de baseline e ensaio controlado do `AGENTS.md`.
+No ensaio real de 180 segundos de 16/08/2026, as duas cameras entregaram dados,
+os dois arquivos finais foram validados por remux do FFmpeg, nao houve novo
+`Kernel_144`, o HD permaneceu disponivel e nao restaram processos nem artefatos
+temporarios. Essa evidencia nao substitui um ensaio supervisionado de 24 horas,
+queda de energia ou desconexao USB.
 
-## Limitacao de atualizacao
+Apos as correcoes finais de concorrencia, o ensaio final de 30 segundos
+confirmou duas gravacoes validas, pico total de 252 MB, CPU maxima de 7,6%,
+824,36 GB livres, zero novo `Kernel_144`, zero artefato e zero processo residual.
+A suite final executou 139 testes com sucesso.
+
+## Limites
+
+- reconhecimento facial pode errar e nunca decide acusacao, seguranca ou medida
+  trabalhista sozinho;
+- nao ha inferencia de emocao, intencao, desonestidade ou produtividade;
+- cobertura de rede permanece limitada a este PC;
+- SMART generico do Windows nao substitui diagnostico do fabricante;
+- o historico de `LiveKernelEvent 144`/`USBXHCI` continua sendo um risco fisico
+  que software apenas detecta e correlaciona;
+- estabilidade continua de 24 horas ainda requer janela supervisionada.
+
+## Atualizacao
 
 O atualizador legado baixa apenas `gerenciador.pyw` e `visualizador.html`. Esta
-integracao multi-arquivo deve ser instalada pelo checkout completo e validado do
-repositorio. Nao elevar a versao anunciada pelo atualizador ate existir um pacote
-assinado que inclua `wimi_analytics/` de forma atomica.
+entrega multi-arquivo deve ser instalada pelo checkout completo e validado do
+repositorio. Nao elevar a versao anunciada ate existir pacote assinado que
+inclua `wimi_analytics/`, modelos e runtime de forma atomica.

@@ -23,12 +23,16 @@ $adapters = @{}
 Get-NetAdapter -ErrorAction Stop |
     Where-Object { $_.Status -eq 'Up' } |
     ForEach-Object { $adapters[[int]$_.ifIndex] = $_ }
+$statistics = @{}
+Get-NetAdapterStatistics -ErrorAction SilentlyContinue |
+    ForEach-Object { $statistics[[string]$_.Name] = $_ }
 $items = @(
     Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction Stop |
         ForEach-Object {
             $config = $_
             $adapter = $adapters[[int]$config.InterfaceIndex]
             if ($null -ne $adapter) {
+                $stats = $statistics[[string]$adapter.Name]
                 [pscustomobject]@{
                     alias = $adapter.Name
                     profile = $null
@@ -37,6 +41,14 @@ $items = @(
                     ipv4 = @($config.IPAddress)
                     gateway = @($config.DefaultIPGateway)
                     dns = @($config.DNSServerSearchOrder)
+                    received_bytes = if ($null -ne $stats) { [uint64]$stats.ReceivedBytes } else { 0 }
+                    sent_bytes = if ($null -ne $stats) { [uint64]$stats.SentBytes } else { 0 }
+                    received_packets = if ($null -ne $stats) { [uint64]($stats.ReceivedUnicastPackets + $stats.ReceivedMulticastPackets + $stats.ReceivedBroadcastPackets) } else { 0 }
+                    sent_packets = if ($null -ne $stats) { [uint64]($stats.SentUnicastPackets + $stats.SentMulticastPackets + $stats.SentBroadcastPackets) } else { 0 }
+                    received_errors = if ($null -ne $stats) { [uint64]$stats.ReceivedPacketErrors } else { 0 }
+                    sent_errors = if ($null -ne $stats) { [uint64]$stats.OutboundPacketErrors } else { 0 }
+                    received_discarded = if ($null -ne $stats) { [uint64]$stats.ReceivedDiscardedPackets } else { 0 }
+                    sent_discarded = if ($null -ne $stats) { [uint64]$stats.OutboundDiscardedPackets } else { 0 }
                 }
             }
         }
@@ -69,12 +81,19 @@ def _safe_ip_list(values, ipv4_only=False):
     return result
 
 
+def _safe_counter(value):
+    try:
+        return max(0, min(int(value or 0), (1 << 63) - 1))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def _base_result(state, reason):
     return {
         "schema_version": NETWORK_SCHEMA_VERSION,
         "state": state,
         "reason": reason,
-        "coverage": "host_configuration_only",
+        "coverage": "host_configuration_and_counters",
         "can_observe_store_traffic": False,
         "source": "windows_cim_network_configuration",
         "collected_at": datetime.now().isoformat(timespec="seconds"),
@@ -83,6 +102,16 @@ def _base_result(state, reason):
             "active_interface_count": 0,
             "default_gateway_configured": False,
             "dns_configured": False,
+        },
+        "traffic_counters": {
+            "received_bytes": 0,
+            "sent_bytes": 0,
+            "received_packets": 0,
+            "sent_packets": 0,
+            "received_errors": 0,
+            "sent_errors": 0,
+            "received_discarded": 0,
+            "sent_discarded": 0,
         },
     }
 
@@ -182,6 +211,16 @@ class WindowsNetworkDiagnostics:
                     "ipv4": _safe_ip_list(raw.get("ipv4"), ipv4_only=True),
                     "gateways": _safe_ip_list(raw.get("gateway")),
                     "dns_servers": _safe_ip_list(raw.get("dns")),
+                    "traffic_counters": {
+                        "received_bytes": _safe_counter(raw.get("received_bytes")),
+                        "sent_bytes": _safe_counter(raw.get("sent_bytes")),
+                        "received_packets": _safe_counter(raw.get("received_packets")),
+                        "sent_packets": _safe_counter(raw.get("sent_packets")),
+                        "received_errors": _safe_counter(raw.get("received_errors")),
+                        "sent_errors": _safe_counter(raw.get("sent_errors")),
+                        "received_discarded": _safe_counter(raw.get("received_discarded")),
+                        "sent_discarded": _safe_counter(raw.get("sent_discarded")),
+                    },
                 }
             )
 
@@ -194,5 +233,18 @@ class WindowsNetworkDiagnostics:
             "active_interface_count": len(interfaces),
             "default_gateway_configured": any(item["gateways"] for item in interfaces),
             "dns_configured": any(item["dns_servers"] for item in interfaces),
+        }
+        result["traffic_counters"] = {
+            key: sum(item["traffic_counters"][key] for item in interfaces)
+            for key in (
+                "received_bytes",
+                "sent_bytes",
+                "received_packets",
+                "sent_packets",
+                "received_errors",
+                "sent_errors",
+                "received_discarded",
+                "sent_discarded",
+            )
         }
         return result

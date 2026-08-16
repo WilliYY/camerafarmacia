@@ -2060,17 +2060,19 @@ class LiveCameraWidget(tk.Frame):
                     last_frame_time = now
                     
                     try:
-                        image = Image.open(io.BytesIO(jpeg_data))
+                        source_image = Image.open(io.BytesIO(jpeg_data))
+                        source_image.load()
                         # Redimensiona mantendo 16:9 - mostra a imagem INTEIRA sem cortes
                         tw = self.target_width
                         th = int(tw * 9 / 16)
-                        image = image.resize((tw, th), Image.Resampling.BILINEAR)
+                        image = source_image.resize((tw, th), Image.Resampling.BILINEAR)
                         
                         # Descarta frames com corrupção visual severa (ex: magenta/verde/cinza)
                         if self.is_corrupt_frame(image):
                             continue
                             
                         if self.running:
+                            self.app.submit_vision_frame(self.stream_name, source_image)
                             self.update_image(image)
                             last_frame_received_time = time.time()
                     except Exception:
@@ -2276,6 +2278,7 @@ class CameraManagerApp:
         self.status_lock = threading.Lock()
         self._log_lock = threading.Lock()
         self._ui_log_queue = queue.Queue(maxsize=1000)
+        self._ui_control_queue = queue.Queue(maxsize=8)
         self._external_log_queue = queue.Queue(maxsize=500)
         self._lifecycle_lock = threading.RLock()
         self._startup_ready = threading.Event()
@@ -2290,11 +2293,19 @@ class CameraManagerApp:
         self._intelligence_key = None
         self._last_health_check = 0.0
         self._last_go2rtc_ok = False
-        self._analytics_handle = None
+        self._analytics_store = None
+        self._biometric_store = None
+        self._analytics_collector = None
+        self._vision_coordinator = None
+        self._face_service = None
+        self._analytics_window = None
         self._analytics_start_lock = threading.Lock()
         self._analytics_starting = False
         self._analytics_open_when_ready = False
         self._analytics_shutdown = False
+        self._analytics_runtime_error = None
+        self._vision_guard_checked_at = 0.0
+        self._vision_guard_reason = None
         self._usb_report_cache = None
         self._usb_report_cache_time = 0.0
         self._kernel_144_state_path = os.path.join(LOGS_DIR, "kernel_144_baseline.json")
@@ -2339,6 +2350,7 @@ class CameraManagerApp:
         self.setup_styles()
         self.create_widgets()
         self.root.after(200, self.drain_ui_log_queue)
+        self.root.after(100, self.drain_ui_control_queue)
         self._external_log_thread = threading.Thread(target=self.external_log_writer_loop, daemon=True)
         self._external_log_thread.start()
         self.root.after(300, self.start_wimi_analytics)
@@ -3030,7 +3042,7 @@ class CameraManagerApp:
             cursor="hand2",
             padx=10,
             pady=5,
-            command=lambda: self.start_wimi_analytics(open_browser=True),
+            command=self.open_wimi_analytics,
         )
         self.btn_wimi_panel.pack(fill="x", padx=4, pady=2)
         self.setup_button_hover(self.btn_wimi_panel, "#1F2937", "#374151")
@@ -3381,6 +3393,42 @@ class CameraManagerApp:
                 self.root.after(200, self.drain_ui_log_queue)
             except Exception:
                 pass
+
+    def drain_ui_control_queue(self):
+        close_requested = False
+        pending_actions = []
+        try:
+            for _ in range(8):
+                try:
+                    item = self._ui_control_queue.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    action, payload = item if isinstance(item, tuple) else (item, None)
+                    if action == "close_root":
+                        close_requested = True
+                    else:
+                        pending_actions.append((action, payload))
+                finally:
+                    self._ui_control_queue.task_done()
+        except Exception:
+            pass
+
+        if close_requested:
+            self.close_tk_root()
+            return
+        for action, payload in pending_actions:
+            try:
+                if action == "wimi_ready":
+                    self._on_wimi_analytics_ready(bool(payload))
+                elif action == "wimi_error":
+                    self.set_wimi_panel_status("error", str(payload or ""))
+            except Exception as error:
+                self.add_log(f"Falha ao atualizar interface WIMI: {error}", "tag_atencao")
+        try:
+            self.root.after(100, self.drain_ui_control_queue)
+        except Exception:
+            pass
 
     def queue_log_for_ui(self, msg, tag):
         if self.silent or not hasattr(self, "txt_log") or self.txt_log is None:
@@ -4536,6 +4584,7 @@ class CameraManagerApp:
         
         # 2. Finaliza as gravações ativas de forma limpa (salva buffers no disco)
         self.run_stop_sequence()
+        analytics_stopped = self.wait_for_wimi_shutdown(attempts=1, retry_delay=0)
         
         # 3. Executa o comando de desligamento do Windows (com timer de 15s para segurança)
         try:
@@ -4543,8 +4592,10 @@ class CameraManagerApp:
         except Exception:
             pass
             
-        # 4. Encerra o aplicativo
-        self.request_tk_shutdown()
+        # 4. Encerra a interface apenas se os bancos locais ja foram liberados.
+        # O Windows ainda concluira o desligamento fisico apos o temporizador.
+        if analytics_stopped:
+            self.request_tk_shutdown()
 
     def get_lifecycle_lock(self):
         lock = getattr(self, "_lifecycle_lock", None)
@@ -6363,66 +6414,257 @@ class CameraManagerApp:
         if detail:
             self.btn_wimi_panel.configure(takefocus=True)
 
-    def start_wimi_analytics(self, open_browser=False):
+    def start_wimi_analytics(self, open_panel=False):
         if getattr(self, "_analytics_shutdown", False) or getattr(self, "_shutdown_executed", False):
-            return
+            return False
         with self._analytics_start_lock:
-            self._analytics_open_when_ready = self._analytics_open_when_ready or open_browser
-            if self._analytics_starting:
-                return
-            self._analytics_starting = True
+            self._analytics_open_when_ready = self._analytics_open_when_ready or open_panel
+            if self._analytics_collector is not None:
+                ready = True
+            elif self._analytics_starting:
+                return False
+            else:
+                self._analytics_starting = True
+                ready = False
+        if ready:
+            if open_panel:
+                self.open_wimi_analytics()
+            return True
         self.set_wimi_panel_status("starting")
-        threading.Thread(target=self._start_wimi_analytics_worker, daemon=True).start()
+        threading.Thread(
+            target=self._start_wimi_analytics_worker,
+            name="wimi-runtime-start",
+            daemon=True,
+        ).start()
+        return True
 
     def _start_wimi_analytics_worker(self):
+        analytics_store = None
+        biometric_store = None
+        collector = None
+        vision = None
         try:
-            from wimi_analytics.launcher import ensure_server, stop_owned_server
+            from wimi_analytics.backend import NvrHealthBridge
+            from wimi_analytics.biometric_storage import BiometricStore
+            from wimi_analytics.collector import AnalyticsCollector
+            from wimi_analytics.face_engine import LocalFaceService
+            from wimi_analytics.network_diagnostics import WindowsNetworkDiagnostics
+            from wimi_analytics.storage import AnalyticsStore
+            from wimi_analytics.vision import VisionCoordinator
 
-            handle = ensure_server(PROJ_DIR)
+            runtime_dir = os.path.join(PROJ_DIR, "sistema", "analytics")
+            forbidden_roots = [GDRIVE_ROOT] if GDRIVE_ROOT else []
+            analytics_store = AnalyticsStore(
+                os.path.join(runtime_dir, "wimi_analytics.sqlite3"),
+                forbidden_roots=forbidden_roots,
+            )
+            biometric_store = BiometricStore(
+                os.path.join(runtime_dir, "wimi_biometrics.sqlite3"),
+                forbidden_roots=forbidden_roots,
+            )
+            face_service = LocalFaceService(biometric_store)
+            vision = VisionCoordinator(
+                store=analytics_store,
+                face_service=face_service,
+                hardware_guard=self.vision_hardware_guard,
+                sample_interval_seconds=1.0,
+                face_interval_seconds=3.0,
+                queue_size=2,
+            )
+            collector = AnalyticsCollector(
+                NvrHealthBridge(os.path.join(LOGS_DIR, "health_status.json")),
+                WindowsNetworkDiagnostics(ttl_seconds=60),
+                analytics_store,
+                interval_seconds=60,
+                runtime_status_provider=self.wimi_runtime_status,
+            )
             with self._analytics_start_lock:
-                if handle.owned or self._analytics_handle is None:
-                    self._analytics_handle = handle
-                open_browser = self._analytics_open_when_ready
-                self._analytics_open_when_ready = False
                 self._analytics_starting = False
+                open_panel = self._analytics_open_when_ready
+                self._analytics_open_when_ready = False
                 should_stop = self._analytics_shutdown or getattr(self, "_shutdown_executed", False)
+                if not should_stop:
+                    self._analytics_store = analytics_store
+                    self._biometric_store = biometric_store
+                    self._analytics_collector = collector
+                    self._vision_coordinator = vision
+                    self._face_service = face_service
+                    self._analytics_runtime_error = None
+                    vision.start()
+                    collector.start()
             if should_stop:
-                stop_owned_server(handle)
+                vision.stop(timeout=2)
+                collector.stop(timeout=5)
+                analytics_store.close()
+                biometric_store.close()
                 return
-            self.root.after(0, lambda: self._on_wimi_analytics_ready(handle.url, open_browser))
+            self._ui_control_queue.put_nowait(("wimi_ready", open_panel))
         except Exception as error:
+            if vision is not None:
+                vision.stop(timeout=2)
+            if collector is not None:
+                collector.stop(timeout=5)
+            if analytics_store is not None:
+                analytics_store.close()
+            if biometric_store is not None:
+                biometric_store.close()
             with self._analytics_start_lock:
                 self._analytics_starting = False
                 self._analytics_open_when_ready = False
+                self._analytics_runtime_error = str(error)[:300]
             message = str(error)
             self.add_log(f"WIMI Analytics indisponivel: {message}", "tag_atencao")
             try:
-                self.root.after(0, lambda: self.set_wimi_panel_status("error", message))
-            except Exception:
+                self._ui_control_queue.put_nowait(("wimi_error", message))
+            except queue.Full:
                 pass
 
-    def _on_wimi_analytics_ready(self, url, open_browser):
+    def _on_wimi_analytics_ready(self, open_panel=False):
+        if getattr(self, "_shutdown_executed", False):
+            return
         self.set_wimi_panel_status("active")
-        if open_browser:
-            import webbrowser
-            webbrowser.open(url)
+        if open_panel:
+            self.open_wimi_analytics()
+
+    def open_wimi_analytics(self):
+        if getattr(self, "_analytics_collector", None) is None:
+            self.start_wimi_analytics(open_panel=True)
+            return
+        if self._analytics_window is None:
+            from wimi_analytics.desktop import AnalyticsDesktopWindow
+
+            self._analytics_window = AnalyticsDesktopWindow(
+                self.root,
+                self._analytics_collector,
+                self._analytics_store,
+                self._vision_coordinator,
+                face_service=self._face_service,
+                camera_widgets=self.camera_widgets,
+                activate_cameras=self.activate_wimi_camera_analysis,
+            )
+        self._analytics_window.show()
+
+    def activate_wimi_camera_analysis(self):
+        for widget in getattr(self, "camera_widgets", {}).values():
+            if not widget.expanded:
+                widget.expand()
+        self.add_log("Visao local ativada nos previews abertos (maximo de 1 amostra/s por camera).")
+
+    def submit_vision_frame(self, stream, image):
+        vision = getattr(self, "_vision_coordinator", None)
+        if vision is None or getattr(self, "_analytics_shutdown", False):
+            return False
+        try:
+            return vision.submit(stream, image)
+        except Exception:
+            return False
+
+    def vision_hardware_guard(self):
+        if getattr(self, "_shutdown_executed", False) or getattr(self, "_analytics_shutdown", False):
+            return "shutdown"
+        now = time.monotonic()
+        if now - getattr(self, "_vision_guard_checked_at", 0.0) < 5.0:
+            return self._vision_guard_reason
+        reason = None
+        memory_mb = self.get_process_memory_mb()
+        if memory_mb is not None and memory_mb >= 750:
+            reason = "process_memory_high"
+        with self._health_lock:
+            health = dict(self._health_snapshot or {})
+        metrics = health.get("metrics") or {}
+        hardware = health.get("hardware_summary") or {}
+        issue_codes = {item.get("code") for item in health.get("issues") or []}
+        if metrics.get("hd_available") is False:
+            reason = reason or "recording_disk_unavailable"
+        if int(hardware.get("kernel_144_new_in_session") or 0) > 0:
+            reason = reason or "new_usbxhci_failure"
+        if issue_codes.intersection({"PROCESS_MEMORY_HIGH", "MEMORY_GROWTH_SUSPECT"}):
+            reason = reason or "resource_deterioration"
+        self._vision_guard_checked_at = now
+        self._vision_guard_reason = reason
+        return reason
+
+    def wimi_runtime_status(self):
+        vision = getattr(self, "_vision_coordinator", None)
+        face = getattr(self, "_face_service", None)
+        snapshots = vision.snapshot() if vision is not None else {}
+        active = sum(1 for item in snapshots.values() if item.get("state") == "active")
+        if vision is None or not vision.running:
+            vision_status = "warning"
+            vision_detail = "Worker local indisponivel"
+        elif active:
+            vision_status = "active" if getattr(face, "available", False) else "limited"
+            face_status = str(getattr(face, "status", "indisponivel")).replace("_", " ")
+            vision_detail = f"Movimento ativo em {active} camera(s); reconhecimento facial {face_status}"
+        else:
+            vision_status = "limited"
+            vision_detail = "Worker ativo; aguardando preview de camera"
+        return {
+            "analytics": {
+                "status": "active",
+                "detail": "Painel desktop nativo e historico local ativos",
+                "mode": "native",
+            },
+            "vision": {"status": vision_status, "detail": vision_detail},
+            "computers": {
+                "status": "limited",
+                "detail": "Este PC monitorado localmente; agente remoto nao necessario",
+            },
+            "history": {
+                "status": "active",
+                "detail": "SQLite local com retencao limitada",
+            },
+        }
 
     def stop_wimi_analytics(self):
         analytics_lock = getattr(self, "_analytics_start_lock", None)
         if analytics_lock is None:
             self._analytics_shutdown = True
-            handle = getattr(self, "_analytics_handle", None)
-            self._analytics_handle = None
         else:
             with analytics_lock:
                 self._analytics_shutdown = True
-                handle = self._analytics_handle
-                self._analytics_handle = None
-        try:
-            from wimi_analytics.launcher import stop_owned_server
-            stop_owned_server(handle)
-        except Exception:
-            pass
+        window = getattr(self, "_analytics_window", None)
+        ui_stopped = True
+        if window is not None:
+            try:
+                window.request_destroy()
+                ui_stopped = window.wait_for_workers(timeout=3)
+            except Exception:
+                ui_stopped = False
+        vision = getattr(self, "_vision_coordinator", None)
+        collector = getattr(self, "_analytics_collector", None)
+        vision_stopped = True
+        if vision is not None:
+            vision_stopped = vision.stop(timeout=3)
+        collector_stopped = True
+        if collector is not None:
+            collector_stopped = collector.stop(timeout=5)
+        stopped = ui_stopped and vision_stopped and collector_stopped
+        if stopped:
+            for store in (
+                getattr(self, "_analytics_store", None),
+                getattr(self, "_biometric_store", None),
+            ):
+                if store is not None:
+                    store.close()
+            self._analytics_window = None
+            self._vision_coordinator = None
+            self._analytics_collector = None
+            self._analytics_store = None
+            self._biometric_store = None
+            self._face_service = None
+        if not stopped:
+            self.add_log("WIMI Analytics ainda encerrando tarefas limitadas.", "tag_atencao")
+        return stopped
+
+    def wait_for_wimi_shutdown(self, attempts=3, retry_delay=1.0):
+        attempts = max(1, min(int(attempts), 5))
+        for attempt in range(attempts):
+            if self.stop_wimi_analytics():
+                return True
+            if attempt + 1 < attempts:
+                time.sleep(max(0.0, float(retry_delay)))
+        return False
 
     def click_configurar_inicializacao(self):
         try:
@@ -6853,9 +7095,9 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
             self.close_tk_root()
             return
         try:
-            self.root.after(0, self.close_tk_root)
-        except Exception:
-            self.close_tk_root()
+            self._ui_control_queue.put_nowait(("close_root", None))
+        except queue.Full:
+            pass
 
     def graceful_shutdown(self):
         if getattr(self, "_shutdown_executed", False):
@@ -6884,7 +7126,13 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         except Exception:
             pass
 
-        self.stop_wimi_analytics()
+        if not self.wait_for_wimi_shutdown():
+            self.add_log(
+                "Encerramento adiado: uma tarefa WIMI ainda está finalizando com segurança.",
+                "tag_atencao",
+            )
+            self._shutdown_executed = False
+            return
             
         time.sleep(0.5)
         # O root tambem precisa terminar no modo --silent; caso contrario a

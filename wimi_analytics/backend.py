@@ -314,6 +314,7 @@ def build_dashboard_payload(
     bridge,
     panel_url="http://127.0.0.1:8765",
     network=None,
+    runtime=None,
 ):
     nvr = bridge.read()
     if not isinstance(network, dict) or network.get("schema_version") != SCHEMA_VERSION:
@@ -393,7 +394,20 @@ def build_dashboard_payload(
             "detail": report_detail,
         },
     ]
-    readiness = build_readiness(nvr, network, modules, report)
+    if isinstance(runtime, dict):
+        module_by_id = {item["id"]: item for item in modules}
+        for module_id in ("analytics", "vision", "computers"):
+            source = runtime.get(module_id)
+            target = module_by_id.get(module_id)
+            if not isinstance(source, dict) or target is None:
+                continue
+            status = _safe_scalar(source.get("status"))
+            detail = _safe_scalar(source.get("detail"))
+            if status:
+                target["status"] = str(status)[:32]
+            if detail:
+                target["detail"] = str(detail)[:200]
+    readiness = build_readiness(nvr, network, modules, report, runtime=runtime)
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -402,7 +416,13 @@ def build_dashboard_payload(
             "name": "WIMI Analytics",
             "version": "0.1.0",
             "status": "active",
-            "mode": "local_read_only",
+            "mode": (
+                "native_local"
+                if isinstance(runtime, dict)
+                and isinstance(runtime.get("analytics"), dict)
+                and runtime["analytics"].get("mode") == "native"
+                else "local_read_only"
+            ),
         },
         "nvr": nvr,
         "network": network,
