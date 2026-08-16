@@ -145,6 +145,7 @@ class VisionCoordinator:
         self,
         store,
         face_service=None,
+        evidence_archive=None,
         motion_analyzer=None,
         hardware_guard=None,
         sample_interval_seconds=1.0,
@@ -154,6 +155,7 @@ class VisionCoordinator:
     ):
         self.store = store
         self.face_service = face_service
+        self.evidence_archive = evidence_archive
         self.motion_analyzer = motion_analyzer or MotionAnalyzer(adaptive=True)
         self.hardware_guard = hardware_guard or (lambda: None)
         self.sample_interval_seconds = max(0.0, float(sample_interval_seconds))
@@ -350,6 +352,7 @@ class VisionCoordinator:
 
         face_count = self._last_face_count.get(stream)
         identities = []
+        face_boxes = []
         face_state = "not_configured"
         face_service = self.face_service
         last_face_at = self._last_face_analysis.get(stream, -1e9)
@@ -364,6 +367,7 @@ class VisionCoordinator:
             analyzed = face_service.analyze_frame(stream, image)
             face_count = max(0, int(analyzed.get("face_count") or 0))
             identities = list(analyzed.get("identities") or [])
+            face_boxes = list(analyzed.get("face_boxes") or [])
             face_state = analyzed.get("state", "active")
             if self._last_face_count.get(stream) != face_count:
                 self._persist_event(
@@ -375,6 +379,18 @@ class VisionCoordinator:
                     }
                 )
                 self._last_face_count[stream] = face_count
+            archive = self.evidence_archive
+            if archive is not None and face_count > 0 and len(face_boxes) >= face_count:
+                try:
+                    archive.capture(
+                        stream,
+                        image,
+                        face_boxes=face_boxes,
+                        face_count=face_count,
+                        captured_at=occurred_at,
+                    )
+                except Exception:
+                    pass
             for identity in identities:
                 profile_id = str(identity.get("profile_id", ""))
                 key = (stream, profile_id)

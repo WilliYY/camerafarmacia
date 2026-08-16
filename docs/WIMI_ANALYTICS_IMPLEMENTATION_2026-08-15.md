@@ -7,12 +7,13 @@ Atualizado em: 16/08/2026
 O WIMI Analytics esta integrado ao painel Tkinter do NVR. O fluxo normal nao
 inicia nem abre um site local ou uma segunda janela. O topo possui as abas
 `Cameras` e `Analises`; a segunda preserva coleta, selecao e historico ao
-alternar entre seis subabas:
+alternar entre sete subabas:
 
 - Visao geral;
 - Cameras;
 - Comportamento;
 - Rede;
+- Evidencias;
 - Relatorios;
 - Pessoas.
 
@@ -32,7 +33,8 @@ gerenciador.pyw
         |-- AnalyticsStore (relatorios, rede e eventos)
         |-- VisionCoordinator (movimento, rosto e identidade)
         |-- BiometricStore + DPAPI (perfis consentidos)
-        `-- AnalyticsDesktopWindow (frame embutido com seis subabas Tkinter)
+        |-- AnonymizedEvidenceArchive (capturas descaracterizadas e cifradas)
+        `-- AnalyticsDesktopWindow (frame embutido com sete subabas Tkinter)
 ```
 
 O coletor e a visao nao controlam gravacao, retencao, go2rtc, energia ou HD. O
@@ -50,7 +52,9 @@ O coletor e a visao nao controlam gravacao, retencao, go2rtc, energia ou HD. O
   persistido;
 - perfis protegidos pelo DPAPI do usuario Windows;
 - exclusao biometrica usa `secure_delete`, `VACUUM` e truncamento do WAL;
-- nenhuma imagem de camera e gravada pelo Analytics.
+- nenhuma imagem facial identificavel e gravada pelo Analytics;
+- capturas de atendimento ficam descaracterizadas, cifradas e sem nome ou
+  `profile_id` em `sistema/analytics/evidence/`.
 
 ## Visao computacional
 
@@ -127,6 +131,32 @@ indisponivel ou troca de conexao invalida o delta seguinte, evitando pico falso.
 O escopo e somente este computador: nenhum destino, site, pacote ou conteudo e
 capturado.
 
+## Evidencias anonimizadas e sessoes de rede
+
+O banco operacional inclui `evidence_snapshots` e
+`network_connection_sessions`. A primeira tabela contem somente UUID, camera,
+datas, quantidade de rostos, tamanho e caminho relativo. A segunda registra
+inicio, ultimo sinal, permanencia medida e bytes agregados de sessoes Cabo ou
+Wi-Fi deste PC. Nenhuma delas armazena nome, IP, MAC, destino, aplicativo ou
+conteudo.
+
+O mesmo ciclo YuNet/SFace fornece as caixas faciais; nao existe segunda
+inferencia nem segunda conexao com a camera. Se faltar caixa para qualquer
+rosto, a captura e recusada. O quadro inteiro e pixelizado; cada regiao detectada
+recebe margem e e reduzida a cor media antes da codificacao JPEG. Somente depois o DPAPI cifra o payload, que e
+publicado por temporario, `fsync` e troca atomica.
+
+A retencao visual e independente: 10 dias, intervalo minimo de 15 minutos por
+camera e teto total de 256 MB. Ao atingir o teto, novas escritas param sem apagar
+itens ainda dentro do prazo. A manutencao diaria e a exclusao manual atuam
+somente nesse diretorio e nunca percorrem o acervo de gravacoes. A miniatura e
+descriptografada apenas em memoria.
+
+Uma sessao de rede termina quando o link some, troca entre Cabo e Wi-Fi ou fica
+mais de cinco minutos sem amostra. Reinicio de contador produz delta zero em vez
+de trafego negativo. O recurso nao identifica sites, aplicativos, mensagens ou
+outros dispositivos; esse limite e deliberado e visivel no painel.
+
 ## Validacao executavel
 
 ```powershell
@@ -147,9 +177,9 @@ queda de energia ou desconexao USB.
 Apos as correcoes finais de concorrencia, o ensaio final de 30 segundos
 confirmou duas gravacoes validas, pico total de 252 MB, CPU maxima de 7,6%,
 824,36 GB livres, zero novo `Kernel_144`, zero artefato e zero processo residual.
-A suite desta evolucao executou 144 testes com sucesso, incluindo migracao
-aditiva do banco existente, painel embutido, calibracao adaptativa e deteccao do
-tipo de conexao sem persistir IP ou MAC.
+A suite atual executou 169 testes com sucesso, incluindo migracao sem perder o
+historico consentido, painel embutido, anonimizacao obrigatoria, retencao visual,
+exclusao manual e sessoes Cabo/Wi-Fi sem persistir IP ou MAC.
 
 O ensaio controlado desta evolucao durou 42 segundos, gerou e validou dois
 videos, atingiu pico de 243,3 MB, 66 threads e 5,7% de CPU, manteve 824,35 GB

@@ -122,13 +122,23 @@ class OpenCvFaceBackend:
         self.status = "ready"
 
     def extract_embeddings(self, image):
+        return [item["embedding"] for item in self.analyze_faces(image)]
+
+    def analyze_faces(self, image):
         if not self.available:
             raise FaceEngineUnavailable(self.status)
-        width, height = image.size
-        scale = min(self.max_input_size[0] / width, self.max_input_size[1] / height, 1.0)
+        original_width, original_height = image.size
+        scale = min(
+            self.max_input_size[0] / original_width,
+            self.max_input_size[1] / original_height,
+            1.0,
+        )
         if scale < 1.0:
             image = image.resize(
-                (max(1, round(width * scale)), max(1, round(height * scale)))
+                (
+                    max(1, round(original_width * scale)),
+                    max(1, round(original_height * scale)),
+                )
             )
         rgb = image.convert("RGB")
         frame = self._np.asarray(rgb)
@@ -138,12 +148,28 @@ class OpenCvFaceBackend:
         _, faces = self._detector.detect(frame)
         if faces is None:
             return []
-        embeddings = []
+        results = []
         for face in faces[: self.max_faces]:
             aligned = self._recognizer.alignCrop(frame, face)
             feature = self._recognizer.feature(aligned)
-            embeddings.append([float(value) for value in feature.flatten()])
-        return embeddings
+            bbox = None
+            try:
+                x, y, box_width, box_height = (float(value) for value in face[:4])
+                inverse_scale = 1.0 / scale
+                x = max(0, min(round(x * inverse_scale), original_width - 1))
+                y = max(0, min(round(y * inverse_scale), original_height - 1))
+                box_width = max(1, min(round(box_width * inverse_scale), original_width - x))
+                box_height = max(1, min(round(box_height * inverse_scale), original_height - y))
+                bbox = (x, y, box_width, box_height)
+            except (TypeError, ValueError, OverflowError):
+                pass
+            results.append(
+                {
+                    "embedding": [float(value) for value in feature.flatten()],
+                    "bbox": bbox,
+                }
+            )
+        return results
 
 
 class LocalFaceService:
@@ -230,13 +256,34 @@ class LocalFaceService:
 
     def analyze_frame(self, stream, image):
         if not self.available:
-            return {"face_count": 0, "identities": [], "state": "unavailable"}
+            return {
+                "face_count": 0,
+                "face_boxes": [],
+                "identities": [],
+                "state": "unavailable",
+            }
         with self._lock:
-            embeddings = self.backend.extract_embeddings(image)
+            analyze_faces = getattr(self.backend, "analyze_faces", None)
+            if callable(analyze_faces):
+                faces = analyze_faces(image)
+            else:
+                faces = [
+                    {"embedding": embedding, "bbox": None}
+                    for embedding in self.backend.extract_embeddings(image)
+                ]
             identities = []
-            for index, embedding in enumerate(embeddings):
+            face_boxes = []
+            for index, face in enumerate(faces):
+                embedding = face["embedding"]
+                if face.get("bbox") is not None:
+                    face_boxes.append(tuple(face["bbox"]))
                 result = self.matcher.match(f"{stream}:{index}", embedding, self._profiles)
                 if result:
                     result["display_name"] = self._names.get(result["profile_id"], "Pessoa cadastrada")
                     identities.append(result)
-        return {"face_count": len(embeddings), "identities": identities, "state": "active"}
+        return {
+            "face_count": len(faces),
+            "face_boxes": face_boxes,
+            "identities": identities,
+            "state": "active",
+        }

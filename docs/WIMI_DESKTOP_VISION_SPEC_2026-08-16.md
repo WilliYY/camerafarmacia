@@ -6,8 +6,8 @@ Data: 16/08/2026
 
 Entregar as analises dentro do aplicativo Tkinter usado na farmacia, sem abrir
 um navegador. O operador deve alternar entre Visao geral, Cameras,
-Comportamento, Rede e Relatorios sem perder a coleta em memoria ou o historico
-persistido.
+Comportamento, Rede, Evidencias, Relatorios e Pessoas sem perder a coleta em
+memoria ou o historico persistido.
 
 O sistema observa somente evidencias tecnicas e operacionais. Movimento,
 presenca e identidade cadastrada sao sinais para revisao humana; nao inferem
@@ -39,7 +39,9 @@ sensivel.
    identidade usam OpenCV YuNet/SFace somente quando dependencia e modelos
    verificados estiverem presentes.
 9. Cadastro facial e manual, consentido e exige exatamente um rosto. Nenhuma
-   imagem e salva; somente o vetor biometrico protegido pelo DPAPI do Windows.
+   imagem identificavel e salva; somente o vetor biometrico protegido pelo
+   DPAPI do Windows. Capturas operacionais pixelizam o quadro inteiro e achatam
+   todos os rostos detectados antes de qualquer persistencia; nao recebem identidade.
 10. Uma identidade so e exibida apos correspondencia acima do limiar, margem
     contra o segundo candidato e confirmacao em amostras consecutivas.
 11. A visao pausa se a protecao de hardware bloquear manutencao pesada, se a
@@ -57,8 +59,12 @@ Tabelas versionadas:
   de seguranca a cada 15 minutos;
 - `network_samples`: estado agregado da rede deste PC, no maximo uma linha por
   minuto e somente quando houver mudanca ou amostra horaria;
+- `network_connection_sessions`: sessoes Cabo/Wi-Fi deste host com inicio,
+  ultimo sinal, duracao medida e bytes agregados;
 - `vision_events`: inicio/fim de movimento, contagem de rostos, falha limitada e
-  presenca confirmada, sem imagem.
+  presenca confirmada, sem imagem;
+- `evidence_snapshots`: indice sem nome ou perfil para capturas de atendimento
+  descaracterizadas e cifradas em diretorio separado.
 
 Os perfis nao ficam no banco operacional. O banco separado
 `sistema/analytics/wimi_biometrics.sqlite3` contem `biometric_profiles` e
@@ -69,12 +75,19 @@ Retencao padrao: 90 dias para amostras e eventos. A limpeza e limitada, roda no
 maximo uma vez por dia e nunca acessa diretorios de video. O WAL e limitado e
 recebe checkpoint depois da manutencao.
 
+As evidencias visuais usam retencao fixa de 10 dias, uma captura no maximo a
+cada 15 minutos por camera e teto de 256 MB. A falta de caixas completas para
+todos os rostos impede a persistencia. Ao atingir o teto, a coleta visual para
+sem remover itens ainda dentro do prazo. O painel mostra a expiracao e oferece
+exclusao manual; nenhum item guarda `profile_id`, nome ou face identificavel.
+
 ## Interface nativa
 
 - **Visao geral:** estado do NVR, riscos, pontos fortes e atualidade da fonte.
 - **Cameras:** conectividade, gravacao e estado da analise por camera.
 - **Comportamento:** movimento e presenca agregados, com origem e horario.
 - **Rede:** adaptadores/configuracao deste PC e historico de disponibilidade.
+- **Evidencias:** miniaturas descaracterizadas, expiracao e exclusao manual.
 - **Relatorios:** coletas persistidas, filtros de periodo e detalhes.
 - **Pessoas:** cadastro, ativacao e exclusao de perfis consentidos.
 
@@ -109,6 +122,12 @@ percorrida por teclado pelo `ttk.Notebook`.
   contadores deste PC. Uma coleta indisponivel ou troca de continuidade invalida
   o delta seguinte. Detecta atividade e picos, mas nao coleta pacote, destino,
   DNS consultado, pagina, mensagem, senha ou conteudo.
+- `network_connection_sessions` separa Cabo e Wi-Fi, encerra lacunas maiores que
+  cinco minutos e nunca inventa trafego negativo apos reset de contador;
+- a imagem de evidencia e descaracterizada em memoria, codificada, cifrada por
+  DPAPI e publicada por temporario, `fsync` e troca atomica;
+- a miniatura e descriptografada apenas em memoria e a manutencao nunca percorre
+  o acervo de gravacoes.
 
 ## Validacao
 

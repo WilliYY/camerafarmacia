@@ -3,6 +3,8 @@ import tkinter as tk
 import unittest
 from unittest.mock import patch
 
+from PIL import Image
+
 from wimi_analytics.desktop import AnalyticsDesktopWindow
 
 
@@ -31,6 +33,9 @@ class FakeStore:
     def list_network_samples(self, limit=200):
         return []
 
+    def list_network_sessions(self, limit=50):
+        return []
+
     def list_reports(self, limit=200):
         return []
 
@@ -57,6 +62,41 @@ class FakeVision:
         return {}
 
 
+class FakeEvidenceArchive:
+    retention_days = 10
+
+    def __init__(self, snapshots=None):
+        self.snapshots = list(snapshots or [])
+        self.deleted = []
+
+    def list_snapshots(self, limit=200):
+        return list(self.snapshots[:limit])
+
+    def status(self):
+        return {
+            "state": "active",
+            "count": len(self.snapshots),
+            "total_bytes": sum(item.get("byte_count", 0) for item in self.snapshots),
+            "retention_days": 10,
+            "identifiable_faces_stored": False,
+        }
+
+    def read_image(self, evidence_id):
+        if any(item["evidence_id"] == evidence_id for item in self.snapshots):
+            return Image.new("RGB", (320, 180), "#345678")
+        return None
+
+    def delete(self, evidence_id):
+        before = len(self.snapshots)
+        self.snapshots = [
+            item for item in self.snapshots if item["evidence_id"] != evidence_id
+        ]
+        if len(self.snapshots) != before:
+            self.deleted.append(evidence_id)
+            return True
+        return False
+
+
 class FakeFaceService:
     available = False
     status = "models_missing"
@@ -77,24 +117,29 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         if hasattr(self, "root"):
             self.root.destroy()
 
-    def test_reuses_one_native_window_and_preserves_six_tabs(self):
+    def test_reuses_one_native_window_and_preserves_seven_tabs(self):
         controller = AnalyticsDesktopWindow(
             self.root,
             FakeCollector(),
             FakeStore(),
             FakeVision(),
             face_service=FakeFaceService(),
+            evidence_archive=FakeEvidenceArchive(),
         )
 
         self.assertTrue(controller.show())
         first_window = controller.window
         self.root.update()
-        self.assertEqual(len(controller.notebook.tabs()), 6)
+        self.assertEqual(len(controller.notebook.tabs()), 7)
+        self.assertIn(
+            "Evidências",
+            [controller.notebook.tab(tab, "text") for tab in controller.notebook.tabs()],
+        )
 
         controller.hide()
         self.assertTrue(controller.show())
         self.assertIs(controller.window, first_window)
-        self.assertEqual(len(controller.notebook.tabs()), 6)
+        self.assertEqual(len(controller.notebook.tabs()), 7)
 
         controller.destroy()
         self.assertIsNone(controller.window)
@@ -108,6 +153,7 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
             FakeStore(),
             FakeVision(),
             face_service=FakeFaceService(),
+            evidence_archive=FakeEvidenceArchive(),
             parent=panel,
         )
 
@@ -117,7 +163,7 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
 
         self.assertIsInstance(embedded_frame, tk.Frame)
         self.assertIs(embedded_frame.winfo_toplevel(), self.root)
-        self.assertEqual(len(controller.notebook.tabs()), 6)
+        self.assertEqual(len(controller.notebook.tabs()), 7)
 
         controller.hide()
         self.assertTrue(controller.show())
@@ -212,6 +258,62 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         self.assertIn("1 h 2 min", people_values)
         self.assertIn("Tráfego deste PC: 2,0 KB/s", network_text)
         self.assertIn("conteúdo não coletado", network_text)
+
+    def test_evidence_tab_previews_anonymized_capture_and_deletes_on_request(self):
+        archive = FakeEvidenceArchive(
+            [
+                {
+                    "evidence_id": "evidence-1",
+                    "captured_at": "2026-08-16T10:00:00",
+                    "expires_at": "2026-08-26T10:00:00",
+                    "stream": "farmacia",
+                    "category": "service_observation",
+                    "byte_count": 32768,
+                    "face_count": 2,
+                    "anonymization": "face_regions_pixelated",
+                }
+            ]
+        )
+        controller = AnalyticsDesktopWindow(
+            self.root,
+            FakeCollector(),
+            FakeStore(),
+            FakeVision(),
+            face_service=FakeFaceService(),
+            evidence_archive=archive,
+        )
+
+        self.assertTrue(controller.show())
+        self.root.update()
+        self.assertIn("10 dias", controller._labels["evidence_status"].cget("text"))
+        self.assertIn("✕", controller._evidence_delete_button.cget("text"))
+        controller._trees["evidence"].selection_set("evidence-1")
+        controller._show_selected_evidence()
+        self.assertIsNotNone(controller._evidence_photo)
+
+        archive.snapshots = []
+        controller._refresh_evidence()
+        self.assertIsNone(controller._evidence_photo)
+        archive.snapshots = [
+            {
+                "evidence_id": "evidence-1",
+                "captured_at": "2026-08-16T10:00:00",
+                "expires_at": "2026-08-26T10:00:00",
+                "stream": "farmacia",
+                "category": "service_observation",
+                "byte_count": 32768,
+                "face_count": 2,
+                "anonymization": "full_frame_pixelated_faces_flattened",
+            }
+        ]
+        controller._refresh_evidence()
+        controller._trees["evidence"].selection_set("evidence-1")
+
+        with patch("wimi_analytics.desktop.messagebox.askyesno", return_value=True):
+            controller._delete_evidence()
+
+        self.assertEqual(archive.deleted, ["evidence-1"])
+        self.assertEqual(controller._trees["evidence"].get_children(), ())
 
     def test_profile_deletion_also_removes_operational_presence_history(self):
         class DeletionStore(FakeStore):

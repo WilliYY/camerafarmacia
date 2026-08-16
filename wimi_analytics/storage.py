@@ -10,7 +10,7 @@ from pathlib import Path
 from statistics import median
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 MAX_PAYLOAD_BYTES = 256 * 1024
 JOURNAL_SIZE_LIMIT = 8 * 1024 * 1024
 MAX_DATABASE_BYTES = 256 * 1024 * 1024
@@ -18,6 +18,7 @@ PRESENCE_SESSION_GAP_SECONDS = 90
 PRESENCE_SAMPLE_SECONDS = 3.0
 TRAFFIC_SPIKE_MIN_BYTES_PER_SECOND = 5 * 1024 * 1024
 TRAFFIC_SPIKE_MULTIPLIER = 4.0
+NETWORK_SESSION_GAP_SECONDS = 300
 
 
 class UnsafeAnalyticsPathError(ValueError):
@@ -167,6 +168,23 @@ class AnalyticsStore:
                 CREATE INDEX IF NOT EXISTS idx_network_collected
                     ON network_samples(collected_at DESC);
 
+                CREATE TABLE IF NOT EXISTS network_connection_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    connection_type TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    sample_count INTEGER NOT NULL,
+                    received_bytes INTEGER NOT NULL,
+                    sent_bytes INTEGER NOT NULL,
+                    last_received_counter INTEGER NOT NULL,
+                    last_sent_counter INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_network_sessions_started
+                    ON network_connection_sessions(started_at DESC);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_network_single_open_session
+                    ON network_connection_sessions((1)) WHERE ended_at IS NULL;
+
                 CREATE TABLE IF NOT EXISTS vision_events (
                     event_id TEXT PRIMARY KEY,
                     occurred_at TEXT NOT NULL,
@@ -225,6 +243,22 @@ class AnalyticsStore:
                     value TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS evidence_snapshots (
+                    evidence_id TEXT PRIMARY KEY,
+                    captured_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    stream TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    relative_path TEXT NOT NULL UNIQUE,
+                    byte_count INTEGER NOT NULL,
+                    face_count INTEGER NOT NULL,
+                    anonymization TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_evidence_captured
+                    ON evidence_snapshots(captured_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_evidence_expires
+                    ON evidence_snapshots(expires_at);
+
                 """
             )
             existing_columns = {
@@ -249,7 +283,7 @@ class AnalyticsStore:
                     connection.execute(
                         f"ALTER TABLE network_samples ADD COLUMN {column} {declaration}"
                     )
-            if previous_version < SCHEMA_VERSION:
+            if previous_version < 3:
                 event_cursor = connection.execute(
                     "DELETE FROM vision_events WHERE event_type = 'presence_confirmed'"
                 )
@@ -356,6 +390,7 @@ class AnalyticsStore:
             aggregate[name] = max(0, min(value, (1 << 63) - 1))
         fingerprint = _fingerprint(aggregate)
         with self._lock, self._connection() as connection:
+            self._update_network_session(connection, aggregate, collected_at)
             previous = connection.execute(
                 "SELECT collected_at, fingerprint FROM network_samples ORDER BY id DESC LIMIT 1"
             ).fetchone()
@@ -390,6 +425,215 @@ class AnalyticsStore:
                 ),
             )
         return True
+
+    def _update_network_session(self, connection, aggregate, collected_at):
+        collected_iso = _iso(collected_at)
+        active = bool(
+            aggregate["state"] == "active"
+            and aggregate["active_interface_count"] > 0
+        )
+        connection_type = aggregate["primary_connection_type"]
+        received_counter = int(aggregate["received_bytes"])
+        sent_counter = int(aggregate["sent_bytes"])
+        current = connection.execute(
+            """
+            SELECT * FROM network_connection_sessions
+            WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1
+            """
+        ).fetchone()
+
+        if current is not None:
+            last_seen = datetime.fromisoformat(current["last_seen_at"])
+            elapsed = (collected_at - last_seen).total_seconds()
+            same_connection = current["connection_type"] == connection_type
+            if not active or not same_connection or elapsed > NETWORK_SESSION_GAP_SECONDS:
+                connection.execute(
+                    """
+                    UPDATE network_connection_sessions
+                    SET ended_at = last_seen_at WHERE id = ?
+                    """,
+                    (current["id"],),
+                )
+                current = None
+            elif elapsed <= 0:
+                return
+            else:
+                received_delta = max(
+                    0, received_counter - int(current["last_received_counter"])
+                )
+                sent_delta = max(0, sent_counter - int(current["last_sent_counter"]))
+                received_total = min(
+                    (1 << 63) - 1,
+                    int(current["received_bytes"]) + received_delta,
+                )
+                sent_total = min(
+                    (1 << 63) - 1,
+                    int(current["sent_bytes"]) + sent_delta,
+                )
+                connection.execute(
+                    """
+                    UPDATE network_connection_sessions
+                    SET last_seen_at = ?, sample_count = sample_count + 1,
+                        received_bytes = ?, sent_bytes = ?,
+                        last_received_counter = ?, last_sent_counter = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        collected_iso,
+                        received_total,
+                        sent_total,
+                        received_counter,
+                        sent_counter,
+                        current["id"],
+                    ),
+                )
+                return
+
+        if active:
+            connection.execute(
+                """
+                INSERT INTO network_connection_sessions(
+                    connection_type, started_at, last_seen_at, ended_at,
+                    sample_count, received_bytes, sent_bytes,
+                    last_received_counter, last_sent_counter
+                ) VALUES (?, ?, ?, NULL, 1, 0, 0, ?, ?)
+                """,
+                (
+                    connection_type,
+                    collected_iso,
+                    collected_iso,
+                    received_counter,
+                    sent_counter,
+                ),
+            )
+
+    def list_network_sessions(self, limit=50):
+        limit = max(1, min(int(limit), 500))
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, connection_type, started_at, last_seen_at, ended_at,
+                       sample_count, received_bytes, sent_bytes
+                FROM network_connection_sessions ORDER BY id DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        results = []
+        for row in rows:
+            ended_at = row["ended_at"]
+            duration_end = ended_at or row["last_seen_at"]
+            duration = max(
+                0.0,
+                (
+                    datetime.fromisoformat(duration_end)
+                    - datetime.fromisoformat(row["started_at"])
+                ).total_seconds(),
+            )
+            results.append(
+                {
+                    "id": row["id"],
+                    "connection_type": row["connection_type"],
+                    "started_at": row["started_at"],
+                    "last_seen_at": row["last_seen_at"],
+                    "ended_at": ended_at,
+                    "active": ended_at is None,
+                    "duration_seconds": duration,
+                    "sample_count": row["sample_count"],
+                    "received_bytes": row["received_bytes"],
+                    "sent_bytes": row["sent_bytes"],
+                }
+            )
+        return results
+
+    def record_evidence_snapshot(self, metadata):
+        evidence_id = str(metadata.get("evidence_id") or "")
+        relative_path = str(metadata.get("relative_path") or "")
+        relative = Path(relative_path)
+        if (
+            not evidence_id
+            or len(evidence_id) > 80
+            or not relative_path
+            or len(relative_path) > 160
+            or relative.is_absolute()
+            or ".." in relative.parts
+        ):
+            raise ValueError("invalid_evidence_metadata")
+        captured_at = _iso(metadata.get("captured_at"))
+        expires_at = _iso(metadata.get("expires_at"))
+        if datetime.fromisoformat(expires_at) <= datetime.fromisoformat(captured_at):
+            raise ValueError("invalid_evidence_expiration")
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO evidence_snapshots(
+                    evidence_id, captured_at, expires_at, stream, category,
+                    relative_path, byte_count, face_count, anonymization
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    evidence_id,
+                    captured_at,
+                    expires_at,
+                    str(metadata.get("stream") or "unknown")[:80],
+                    str(metadata.get("category") or "service_observation")[:40],
+                    relative.as_posix(),
+                    max(0, int(metadata.get("byte_count") or 0)),
+                    max(0, min(int(metadata.get("face_count") or 0), 32)),
+                    str(metadata.get("anonymization") or "unknown")[:64],
+                ),
+            )
+        return evidence_id
+
+    def list_evidence_snapshots(self, limit=200, expires_before=None):
+        limit = max(1, min(int(limit), 2500))
+        query = """
+            SELECT evidence_id, captured_at, expires_at, stream, category,
+                   relative_path, byte_count, face_count, anonymization
+            FROM evidence_snapshots
+        """
+        parameters = []
+        if expires_before is not None:
+            query += " WHERE expires_at <= ?"
+            parameters.append(_iso(expires_before))
+        query += " ORDER BY captured_at DESC LIMIT ?"
+        parameters.append(limit)
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_evidence_snapshot(self, evidence_id):
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT evidence_id, captured_at, expires_at, stream, category,
+                       relative_path, byte_count, face_count, anonymization
+                FROM evidence_snapshots WHERE evidence_id = ?
+                """,
+                (str(evidence_id),),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def summarize_evidence_storage(self):
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS item_count,
+                       COALESCE(SUM(byte_count), 0) AS total_bytes
+                FROM evidence_snapshots
+                """
+            ).fetchone()
+        return {
+            "count": max(0, int(row["item_count"] or 0)),
+            "total_bytes": max(0, int(row["total_bytes"] or 0)),
+        }
+
+    def delete_evidence_snapshot(self, evidence_id):
+        with self._lock, self._connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM evidence_snapshots WHERE evidence_id = ?",
+                (str(evidence_id),),
+            )
+        return cursor.rowcount > 0
 
     def list_network_samples(self, limit=100):
         limit = max(1, min(int(limit), 1000))
@@ -897,6 +1141,14 @@ class AnalyticsStore:
                     (cutoff,),
                 )
                 deleted += max(0, cursor.rowcount)
+            cursor = connection.execute(
+                """
+                DELETE FROM network_connection_sessions
+                WHERE COALESCE(ended_at, last_seen_at) < ?
+                """,
+                (cutoff,),
+            )
+            deleted += max(0, cursor.rowcount)
         with self._lock, self._connection() as connection:
             connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         return deleted

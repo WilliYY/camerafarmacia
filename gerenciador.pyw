@@ -2298,6 +2298,7 @@ class CameraManagerApp:
         self._analytics_collector = None
         self._vision_coordinator = None
         self._face_service = None
+        self._evidence_archive = None
         self._analytics_window = None
         self._analytics_start_lock = threading.Lock()
         self._analytics_starting = False
@@ -6489,10 +6490,12 @@ class CameraManagerApp:
         biometric_store = None
         collector = None
         vision = None
+        evidence_archive = None
         try:
             from wimi_analytics.backend import NvrHealthBridge
             from wimi_analytics.biometric_storage import BiometricStore
             from wimi_analytics.collector import AnalyticsCollector
+            from wimi_analytics.evidence import AnonymizedEvidenceArchive
             from wimi_analytics.face_engine import LocalFaceService
             from wimi_analytics.network_diagnostics import WindowsNetworkDiagnostics
             from wimi_analytics.storage import AnalyticsStore
@@ -6509,9 +6512,17 @@ class CameraManagerApp:
                 forbidden_roots=forbidden_roots,
             )
             face_service = LocalFaceService(biometric_store)
+            evidence_archive = AnonymizedEvidenceArchive(
+                analytics_store,
+                os.path.join(runtime_dir, "evidence"),
+                retention_days=10,
+                min_interval_seconds=900,
+                max_total_bytes=256 * 1024 * 1024,
+            )
             vision = VisionCoordinator(
                 store=analytics_store,
                 face_service=face_service,
+                evidence_archive=evidence_archive,
                 hardware_guard=self.vision_hardware_guard,
                 sample_interval_seconds=1.0,
                 face_interval_seconds=3.0,
@@ -6523,6 +6534,7 @@ class CameraManagerApp:
                 analytics_store,
                 interval_seconds=60,
                 runtime_status_provider=self.wimi_runtime_status,
+                daily_maintenance=evidence_archive.cleanup,
             )
             with self._analytics_start_lock:
                 self._analytics_starting = False
@@ -6535,6 +6547,7 @@ class CameraManagerApp:
                     self._analytics_collector = collector
                     self._vision_coordinator = vision
                     self._face_service = face_service
+                    self._evidence_archive = evidence_archive
                     self._analytics_runtime_error = None
                     vision.start()
                     collector.start()
@@ -6595,6 +6608,7 @@ class CameraManagerApp:
                 self._analytics_store,
                 self._vision_coordinator,
                 face_service=self._face_service,
+                evidence_archive=getattr(self, "_evidence_archive", None),
                 camera_widgets=self.camera_widgets,
                 activate_cameras=self.activate_wimi_camera_analysis,
                 parent=self.analytics_page,
@@ -6644,6 +6658,7 @@ class CameraManagerApp:
     def wimi_runtime_status(self):
         vision = getattr(self, "_vision_coordinator", None)
         face = getattr(self, "_face_service", None)
+        evidence = getattr(self, "_evidence_archive", None)
         snapshots = vision.snapshot() if vision is not None else {}
         active = sum(1 for item in snapshots.values() if item.get("state") == "active")
         calibrating = sum(1 for item in snapshots.values() if item.get("state") == "calibrating")
@@ -6660,6 +6675,8 @@ class CameraManagerApp:
         else:
             vision_status = "limited"
             vision_detail = "Worker ativo; aguardando preview de camera"
+        evidence_status = evidence.status() if evidence is not None else {}
+        evidence_state = evidence_status.get("state", "not_configured")
         return {
             "analytics": {
                 "status": "active",
@@ -6672,8 +6689,11 @@ class CameraManagerApp:
                 "detail": "Este PC monitorado localmente; agente remoto nao necessario",
             },
             "history": {
-                "status": "active",
-                "detail": "SQLite local com retencao limitada",
+                "status": "active" if evidence_state == "active" else "limited",
+                "detail": (
+                    "SQLite local e capturas anonimizadas com retencao de 10 dias; "
+                    f"{evidence_status.get('count', 0)} captura(s)"
+                ),
             },
         }
 
@@ -6714,6 +6734,7 @@ class CameraManagerApp:
             self._analytics_store = None
             self._biometric_store = None
             self._face_service = None
+            self._evidence_archive = None
         if not stopped:
             self.add_log("WIMI Analytics ainda encerrando tarefas limitadas.", "tag_atencao")
         return stopped

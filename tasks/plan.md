@@ -8,3 +8,5 @@
 6. Adicionar OpenCV opcional, modelos verificados e cadastro facial consentido.
 7. Validar isoladamente, depois executar ensaio real controlado.
 8. Revisar seguranca, documentar, commitar e publicar.
+9. Integrar evidencias anonimizadas com retencao de 10 dias e exclusao manual.
+10. Persistir sessoes Cabo/Wi-Fi deste host e unificar os resumos no painel.

@@ -37,6 +37,7 @@ class FakeFaceService:
         self.calls += 1
         return {
             "face_count": 1,
+            "face_boxes": [(8, 6, 20, 20)],
             "identities": [
                 {
                     "profile_id": "profile-1",
@@ -53,6 +54,23 @@ class FakeProtector:
 
     def unprotect(self, value):
         return bytes(byte ^ 0xA5 for byte in value)
+
+
+class FakeEvidenceArchive:
+    def __init__(self):
+        self.captures = []
+
+    def capture(self, stream, image, face_boxes, face_count, captured_at=None):
+        self.captures.append(
+            {
+                "stream": stream,
+                "size": image.size,
+                "face_boxes": list(face_boxes),
+                "face_count": face_count,
+                "captured_at": captured_at,
+            }
+        )
+        return "evidence-1"
 
 
 class FakeFaceBackend:
@@ -246,6 +264,33 @@ class BiometricStoreTests(unittest.TestCase):
             finally:
                 connection.close()
 
+    def test_face_analysis_returns_boxes_without_persisting_face_images(self):
+        class BoxBackend(FakeFaceBackend):
+            def analyze_faces(self, image):
+                return [
+                    {
+                        "embedding": [1.0, 0.0, 0.0],
+                        "bbox": (10, 12, 24, 28),
+                    }
+                ]
+
+        with tempfile.TemporaryDirectory() as temp:
+            store = BiometricStore(Path(temp) / "biometric.sqlite3")
+            service = LocalFaceService(
+                store,
+                backend=BoxBackend(),
+                protector=FakeProtector(),
+            )
+
+            result = service.analyze_frame(
+                "farmacia", Image.new("RGB", (64, 64), "white")
+            )
+
+            self.assertEqual(result["face_count"], 1)
+            self.assertEqual(result["face_boxes"], [(10, 12, 24, 28)])
+            self.assertEqual(store.list_profiles(include_payload=True), [])
+            store.close()
+
 
 class VisionCoordinatorTests(unittest.TestCase):
     def test_processes_existing_frame_without_writing_images(self):
@@ -270,6 +315,28 @@ class VisionCoordinatorTests(unittest.TestCase):
             self.assertEqual(snapshot["motion"], "active")
             self.assertTrue(any(event["event_type"] == "motion_start" for event in store.events))
             self.assertEqual(set(Path(temp).iterdir()), before)
+
+    def test_forwards_only_detected_face_regions_to_anonymized_archive(self):
+        evidence = FakeEvidenceArchive()
+        coordinator = VisionCoordinator(
+            store=FakeVisionStore(),
+            face_service=FakeFaceService(),
+            evidence_archive=evidence,
+            motion_analyzer=MotionAnalyzer(start_frames=1, end_frames=1),
+            sample_interval_seconds=0,
+            face_interval_seconds=0,
+        )
+        captured_at = datetime(2026, 8, 16, 10, 0, 0)
+        image = Image.new("RGB", (64, 36), "black")
+
+        result = coordinator.process_frame_now(
+            "farmacia", image, occurred_at=captured_at, monotonic_now=1
+        )
+
+        self.assertEqual(len(evidence.captures), 1)
+        self.assertEqual(evidence.captures[0]["face_boxes"], [(8, 6, 20, 20)])
+        self.assertEqual(evidence.captures[0]["captured_at"], captured_at)
+        self.assertNotIn("face_boxes", result)
 
     def test_hardware_guard_pauses_analysis_before_face_work(self):
         store = FakeVisionStore()

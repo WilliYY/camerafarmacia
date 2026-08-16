@@ -5,6 +5,8 @@ import tkinter as tk
 from collections import Counter
 from tkinter import messagebox, simpledialog, ttk
 
+from PIL import Image, ImageTk
+
 
 BG = "#0B0D12"
 SURFACE = "#141821"
@@ -81,6 +83,17 @@ def _data_rate_text(bytes_per_second):
     return text.replace(".", ",")
 
 
+def _byte_size_text(byte_count):
+    value = max(0.0, float(byte_count or 0))
+    if value >= 1024 * 1024:
+        text = f"{value / (1024 * 1024):.1f} MB"
+    elif value >= 1024:
+        text = f"{value / 1024:.1f} KB"
+    else:
+        text = f"{value:.0f} B"
+    return text.replace(".", ",")
+
+
 class AnalyticsDesktopWindow:
     REFRESH_MS = 3000
 
@@ -91,6 +104,7 @@ class AnalyticsDesktopWindow:
         store,
         vision,
         face_service=None,
+        evidence_archive=None,
         camera_widgets=None,
         activate_cameras=None,
         parent=None,
@@ -102,6 +116,7 @@ class AnalyticsDesktopWindow:
         self.store = store
         self.vision = vision
         self.face_service = face_service
+        self.evidence_archive = evidence_archive
         self.camera_widgets = camera_widgets if camera_widgets is not None else {}
         self.activate_cameras = activate_cameras
         self.window = None
@@ -121,6 +136,10 @@ class AnalyticsDesktopWindow:
         self._deletion_busy = False
         self._deletion_thread = None
         self._delete_button = None
+        self._evidence_delete_button = None
+        self._evidence_preview = None
+        self._evidence_photo = None
+        self._evidence_preview_id = None
         self._responsive_labels = []
         self._last_wraplength = None
 
@@ -238,6 +257,7 @@ class AnalyticsDesktopWindow:
         self._build_cameras_tab()
         self._build_behavior_tab()
         self._build_network_tab()
+        self._build_evidence_tab()
         self._build_reports_tab()
         self._build_people_tab()
         window.bind("<Configure>", self._on_resize, add="+")
@@ -322,7 +342,14 @@ class AnalyticsDesktopWindow:
         self._section_title(tab, "Estado operacional", "Resumo persistente do NVR, hardware e módulos locais.")
         summary = tk.Frame(tab, bg=SURFACE, highlightbackground=BORDER, highlightthickness=1)
         summary.pack(fill="x", padx=8, pady=(0, 12))
-        for key, title in (("overall", "NVR"), ("hardware", "Hardware"), ("report", "Relatório")):
+        for key, title in (
+            ("overall", "NVR"),
+            ("hardware", "Hardware"),
+            ("cameras_summary", "Câmeras"),
+            ("events_summary", "Eventos"),
+            ("evidence_summary", "Evidências"),
+            ("network_overview", "Rede"),
+        ):
             area = tk.Frame(summary, bg=SURFACE)
             area.pack(side="left", fill="both", expand=True, padx=16, pady=14)
             tk.Label(area, text=title, font=("Segoe UI", 9), fg=MUTED, bg=SURFACE).pack(anchor="w")
@@ -415,6 +442,20 @@ class AnalyticsDesktopWindow:
         self._labels["network_summary"].pack(fill="x", padx=8, pady=(0, 12))
         self._tree(
             tab,
+            "network_sessions",
+            (
+                ("started", "Início"),
+                ("last_seen", "Último sinal"),
+                ("connection", "Conexão"),
+                ("duration", "Permanência"),
+                ("traffic", "Tráfego agregado"),
+                ("state", "Estado"),
+            ),
+            (155, 155, 100, 110, 170, 95),
+            height=5,
+        )
+        self._tree(
+            tab,
             "network",
             (
                 ("when", "Data e hora"),
@@ -427,8 +468,61 @@ class AnalyticsDesktopWindow:
                 ("coverage", "Cobertura"),
             ),
             (155, 90, 105, 95, 100, 100, 115, 220),
-            height=14,
+            height=8,
         )
+
+    def _build_evidence_tab(self):
+        tab = self._tab("Evidências")
+        self._section_title(
+            tab,
+            "Capturas de atendimento anonimizadas",
+            "Os rostos são descaracterizados antes da gravação. Exclusão automática após 10 dias; nenhuma captura contém nome ou perfil biométrico.",
+        )
+        actions = tk.Frame(tab, bg=BG)
+        actions.pack(fill="x", padx=8, pady=(0, 10))
+        self._evidence_delete_button = self._button(
+            actions, "✕ Excluir", self._delete_evidence, RED
+        )
+        self._evidence_delete_button.pack(side="left")
+        self._labels["evidence_status"] = tk.Label(
+            actions,
+            text="Retenção: 10 dias | aguardando capturas",
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg=BG,
+        )
+        self._labels["evidence_status"].pack(side="left", padx=12)
+
+        body = tk.PanedWindow(tab, orient="horizontal", bg=BG, sashwidth=5, bd=0)
+        body.pack(fill="both", expand=True, padx=8, pady=(0, 12))
+        left = tk.Frame(body, bg=BG)
+        right = tk.Frame(body, bg=SURFACE, highlightbackground=BORDER, highlightthickness=1)
+        body.add(left, minsize=620)
+        body.add(right, minsize=280)
+        evidence_tree = self._tree(
+            left,
+            "evidence",
+            (
+                ("captured", "Capturada em"),
+                ("camera", "Câmera"),
+                ("faces", "Rostos anonimizados"),
+                ("expires", "Exclusão automática"),
+                ("size", "Tamanho"),
+            ),
+            (160, 120, 135, 165, 90),
+            height=13,
+        )
+        evidence_tree.bind("<<TreeviewSelect>>", self._show_selected_evidence)
+        self._evidence_preview = tk.Label(
+            right,
+            text="Selecione uma captura",
+            font=("Segoe UI", 10),
+            fg=MUTED,
+            bg=SURFACE,
+            compound="top",
+            anchor="center",
+        )
+        self._evidence_preview.pack(fill="both", expand=True, padx=12, pady=12)
 
     def _build_reports_tab(self):
         tab = self._tab("Relatórios")
@@ -513,23 +607,56 @@ class AnalyticsDesktopWindow:
             text=(f"Coleta local com atenção: {error}" if error else "Coleta local ativa e persistente"),
             fg=RED if error else GREEN,
         )
-        self._refresh_overview(payload)
-        self._refresh_cameras(payload)
-        self._refresh_behavior()
+        vision_snapshot = self.vision.snapshot()
+        events = self.store.list_vision_events(limit=500)
+        evidence_snapshots = (
+            self.evidence_archive.list_snapshots(limit=200)
+            if self.evidence_archive is not None
+            else []
+        )
+        evidence_status = (
+            self.evidence_archive.status()
+            if self.evidence_archive is not None
+            else {}
+        )
+        self._refresh_overview(
+            payload,
+            vision=vision_snapshot,
+            events=events,
+            evidence=evidence_status,
+        )
+        self._refresh_cameras(payload, vision=vision_snapshot)
+        self._refresh_behavior(events=events)
         self._refresh_network(payload)
+        self._refresh_evidence(
+            snapshots=evidence_snapshots,
+            status=evidence_status,
+        )
         self._refresh_reports()
         self._refresh_people()
 
-    def _refresh_overview(self, payload):
+    def _refresh_overview(self, payload, vision=None, events=None, evidence=None):
         nvr = payload.get("nvr") or {}
         snapshot = nvr.get("snapshot") or {}
-        operations = payload.get("operations") or {}
-        report = operations.get("report") or {}
         hardware = snapshot.get("hardware_summary") or {}
+        vision = self.vision.snapshot() if vision is None else vision
+        events = self.store.list_vision_events(limit=500) if events is None else events
+        evidence = (
+            self.evidence_archive.status()
+            if evidence is None and self.evidence_archive is not None
+            else evidence or {}
+        )
+        network = payload.get("network") or {}
+        active_cameras = sum(1 for item in vision.values() if item.get("state") == "active")
         values = {
             "overall": _status_text(snapshot.get("overall_status") or nvr.get("state")),
             "hardware": _status_text(hardware.get("smart_status") or "unknown"),
-            "report": _status_text(report.get("state") or "waiting_for_data"),
+            "cameras_summary": f"{active_cameras}/{len(vision)} ativas" if vision else "Aguardando",
+            "events_summary": f"{len(events)} recentes",
+            "evidence_summary": f"{evidence.get('count', 0)} em 10 dias",
+            "network_overview": _connection_text(
+                (network.get("connectivity") or {}).get("primary_connection_type")
+            ),
         }
         for key, text in values.items():
             color = GREEN if text in {"Ativo", "Atual", "Saudável"} else YELLOW
@@ -544,8 +671,8 @@ class AnalyticsDesktopWindow:
             )
         self._replace_rows(self._trees["modules"], rows)
 
-    def _refresh_cameras(self, payload):
-        vision = self.vision.snapshot()
+    def _refresh_cameras(self, payload, vision=None):
+        vision = self.vision.snapshot() if vision is None else vision
         nvr_metrics = ((payload.get("nvr") or {}).get("snapshot") or {}).get("metrics") or {}
         connectivity = nvr_metrics.get("camera_connectivity") or {}
         names = sorted(set(self.camera_widgets) | set(connectivity) | set(vision))
@@ -593,8 +720,8 @@ class AnalyticsDesktopWindow:
             fg=GREEN if active_count and not calibrating_count else YELLOW,
         )
 
-    def _refresh_behavior(self):
-        events = self.store.list_vision_events(limit=300)
+    def _refresh_behavior(self, events=None):
+        events = self.store.list_vision_events(limit=500) if events is None else events
         counts = Counter(item.get("event_type") for item in events)
         motion_seconds = sum(
             max(0.0, float(item.get("duration_seconds") or 0.0))
@@ -647,6 +774,7 @@ class AnalyticsDesktopWindow:
             for item in (network.get("interfaces") or [])[:3]
         )
         samples = self.store.list_network_samples(limit=200)
+        sessions = self.store.list_network_sessions(limit=50)
         traffic = self.store.summarize_network_traffic(limit=120, samples=samples[:120])
         recent_faults = samples[0].get("error_delta") if samples else None
         recent_reset = bool(samples and samples[0].get("counter_reset_detected"))
@@ -667,6 +795,14 @@ class AnalyticsDesktopWindow:
             "insufficient_history": "histórico ainda insuficiente",
             "none": "sem anomalia agregada",
         }.get(traffic.get("anomaly"), "estado agregado desconhecido")
+        active_session = next((item for item in sessions if item.get("active")), None)
+        session_text = (
+            f"Sessão atual: {_connection_text(active_session.get('connection_type'))} desde "
+            f"{active_session.get('started_at')} | permanência medida: "
+            f"{_duration_text(active_session.get('duration_seconds'))}"
+            if active_session
+            else "Nenhuma sessão de rede ativa registrada"
+        )
         self._labels["network_summary"].configure(
             text=(
                 f"{_status_text(network.get('state'))} | Conexão: {connection} | Interfaces ativas: "
@@ -676,6 +812,7 @@ class AnalyticsDesktopWindow:
                 f"Tráfego deste PC: {_data_rate_text(traffic.get('current_bytes_per_second'))} | "
                 f"Referência histórica: {_data_rate_text(traffic.get('baseline_bytes_per_second'))} | "
                 f"{anomaly_text}\n"
+                f"{session_text}\n"
                 "Privacidade: conteúdo não coletado; destinos e acessos não identificados"
             ),
             fg=(
@@ -687,6 +824,25 @@ class AnalyticsDesktopWindow:
                 else YELLOW
             ),
         )
+        session_rows = []
+        for item in sessions:
+            traffic_bytes = int(item.get("received_bytes") or 0) + int(
+                item.get("sent_bytes") or 0
+            )
+            session_rows.append(
+                (
+                    str(item.get("id")),
+                    (
+                        item.get("started_at", "-"),
+                        item.get("last_seen_at", "-"),
+                        _connection_text(item.get("connection_type")),
+                        _duration_text(item.get("duration_seconds")),
+                        _byte_size_text(traffic_bytes),
+                        "Ativa" if item.get("active") else "Encerrada",
+                    ),
+                )
+            )
+        self._replace_rows(self._trees["network_sessions"], session_rows)
         rows = []
         for index, item in enumerate(samples):
             received_rate = item.get("received_bytes_per_second")
@@ -718,6 +874,88 @@ class AnalyticsDesktopWindow:
                 )
             )
         self._replace_rows(self._trees["network"], rows)
+
+    def _refresh_evidence(self, snapshots=None, status=None):
+        archive = self.evidence_archive
+        if archive is None:
+            self._labels["evidence_status"].configure(
+                text="Retenção: 10 dias | arquivo indisponível",
+                fg=YELLOW,
+            )
+            self._replace_rows(self._trees["evidence"], [])
+            return
+        snapshots = archive.list_snapshots(limit=200) if snapshots is None else snapshots
+        status = archive.status() if status is None else status
+        self._labels["evidence_status"].configure(
+            text=(
+                f"Retenção: {status.get('retention_days', 10)} dias | "
+                f"{len(snapshots)} captura(s) | {_byte_size_text(status.get('total_bytes'))} | "
+                "rostos identificáveis: não"
+            ),
+            fg=GREEN if status.get("state") == "active" else YELLOW,
+        )
+        rows = [
+            (
+                item["evidence_id"],
+                (
+                    item.get("captured_at", "-"),
+                    str(item.get("stream") or "-").upper(),
+                    item.get("face_count", 0),
+                    item.get("expires_at", "-"),
+                    _byte_size_text(item.get("byte_count")),
+                ),
+            )
+            for item in snapshots
+        ]
+        self._replace_rows(self._trees["evidence"], rows)
+        evidence_ids = {item["evidence_id"] for item in snapshots}
+        if self._evidence_preview_id and self._evidence_preview_id not in evidence_ids:
+            self._evidence_preview_id = None
+            self._evidence_photo = None
+            self._evidence_preview.configure(image="", text="Selecione uma captura")
+
+    def _show_selected_evidence(self, _event=None):
+        selection = self._trees["evidence"].selection()
+        if not selection or self.evidence_archive is None:
+            return
+        image = self.evidence_archive.read_image(selection[0])
+        if image is None:
+            self._evidence_preview_id = None
+            self._evidence_photo = None
+            self._evidence_preview.configure(
+                image="",
+                text="Captura indisponível ou não pôde ser descriptografada",
+            )
+            return
+        image.thumbnail((420, 300), Image.Resampling.LANCZOS)
+        self._evidence_preview_id = selection[0]
+        self._evidence_photo = ImageTk.PhotoImage(image)
+        self._evidence_preview.configure(
+            image=self._evidence_photo,
+            text="Rostos anonimizados antes do armazenamento",
+        )
+
+    def _delete_evidence(self):
+        selection = self._trees["evidence"].selection()
+        if not selection or self.evidence_archive is None:
+            return
+        if not messagebox.askyesno(
+            "Excluir captura",
+            "Excluir definitivamente a captura anonimizada selecionada?",
+            parent=self.window,
+        ):
+            return
+        if not self.evidence_archive.delete(selection[0]):
+            messagebox.showwarning(
+                "Captura não removida",
+                "Não foi possível remover a captura agora.",
+                parent=self.window,
+            )
+            return
+        self._evidence_photo = None
+        self._evidence_preview_id = None
+        self._evidence_preview.configure(image="", text="Selecione uma captura")
+        self._refresh_evidence()
 
     def _refresh_reports(self):
         reports = self.store.list_reports(limit=200)

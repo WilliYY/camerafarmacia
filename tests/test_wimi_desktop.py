@@ -70,6 +70,8 @@ class AnalyticsStoreTests(unittest.TestCase):
                 "profile_presence_sessions",
                 "deleted_profile_hashes",
                 "maintenance_state",
+                "network_connection_sessions",
+                "evidence_snapshots",
             }.issubset(tables)
         )
         self.assertNotIn("face_profiles", tables)
@@ -168,8 +170,32 @@ class AnalyticsStoreTests(unittest.TestCase):
         self.assertEqual(first_summary, [])
         self.assertEqual(second_summary, [])
         self.assertEqual(migrated_events, [])
-        self.assertEqual(schema_version, 3)
+        self.assertEqual(schema_version, 4)
         self.assertNotIn(b"profile-consentido", legacy_path.read_bytes())
+
+    def test_version_three_upgrade_preserves_current_presence_history(self):
+        occurred_at = datetime(2026, 8, 16, 9, 0, 0)
+        self.store.record_vision_event(
+            {
+                "event_id": "current-presence",
+                "event_type": "presence_confirmed",
+                "stream": "farmacia",
+                "profile_id": "profile-current",
+                "occurred_at": occurred_at,
+            }
+        )
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute("UPDATE schema_meta SET version = 3")
+            connection.commit()
+
+        reopened = AnalyticsStore(self.db_path)
+        try:
+            summaries = reopened.list_profile_presence_summary()
+        finally:
+            reopened.close()
+
+        self.assertEqual(len(summaries), 1)
+        self.assertEqual(summaries[0]["profile_id"], "profile-current")
 
     def test_report_writes_only_on_change_or_safety_interval(self):
         report = self.sample_report()
@@ -262,12 +288,65 @@ class AnalyticsStoreTests(unittest.TestCase):
         self.assertEqual(samples[0]["discarded_delta"], 5)
         self.assertEqual(samples[0]["error_delta"], 5)
 
+    def test_network_sessions_track_start_duration_traffic_and_connection_changes(self):
+        network = {
+            "state": "active",
+            "coverage": "host_configuration_and_counters",
+            "connectivity": {
+                "active_interface_count": 1,
+                "primary_connection_type": "wired",
+                "wired_interface_count": 1,
+            },
+            "traffic_counters": {"received_bytes": 1000, "sent_bytes": 500},
+        }
+        start = datetime(2026, 8, 16, 9, 0, 0)
+
+        self.store.record_network(network, collected_at=start)
+        network["traffic_counters"] = {"received_bytes": 7000, "sent_bytes": 2500}
+        self.store.record_network(network, collected_at=start + timedelta(minutes=2))
+        network["connectivity"] = {
+            "active_interface_count": 1,
+            "primary_connection_type": "wireless",
+            "wireless_interface_count": 1,
+        }
+        network["traffic_counters"] = {"received_bytes": 9000, "sent_bytes": 3500}
+        self.store.record_network(network, collected_at=start + timedelta(minutes=3))
+
+        sessions = self.store.list_network_sessions(limit=10)
+
+        self.assertEqual(len(sessions), 2)
+        self.assertEqual(sessions[0]["connection_type"], "wireless")
+        self.assertTrue(sessions[0]["active"])
+        self.assertEqual(sessions[0]["started_at"], "2026-08-16T09:03:00")
+        self.assertEqual(sessions[1]["connection_type"], "wired")
+        self.assertFalse(sessions[1]["active"])
+        self.assertEqual(sessions[1]["duration_seconds"], 120.0)
+        self.assertEqual(sessions[1]["received_bytes"], 6000)
+        self.assertEqual(sessions[1]["sent_bytes"], 2000)
+
+        network["state"] = "unavailable"
+        network["connectivity"] = {"active_interface_count": 0}
+        self.store.record_network(network, collected_at=start + timedelta(minutes=5))
+        self.assertFalse(self.store.list_network_sessions(limit=1)[0]["active"])
+
     def test_cleanup_is_limited_to_analytics_rows(self):
         old = datetime(2026, 4, 1, 8, 0, 0)
         current = datetime(2026, 8, 16, 8, 0, 0)
         self.store.record_report(self.sample_report(), self.sample_readiness(), collected_at=old)
         self.store.record_vision_event(
             {"event_type": "motion_start", "stream": "farmacia", "occurred_at": old.isoformat()}
+        )
+        self.store.record_network(
+            {
+                "state": "active",
+                "coverage": "host_configuration_and_counters",
+                "connectivity": {
+                    "active_interface_count": 1,
+                    "primary_connection_type": "wired",
+                },
+                "traffic_counters": {"received_bytes": 100, "sent_bytes": 50},
+            },
+            collected_at=old,
         )
         sentinel = self.root / "video.ts"
         sentinel.write_bytes(b"video")
@@ -276,6 +355,7 @@ class AnalyticsStoreTests(unittest.TestCase):
 
         self.assertGreaterEqual(deleted, 2)
         self.assertEqual(self.store.list_reports(limit=10), [])
+        self.assertEqual(self.store.list_network_sessions(limit=10), [])
         self.assertEqual(sentinel.read_bytes(), b"video")
 
     def test_network_counter_reset_is_reported_as_inconclusive_delta(self):
@@ -630,6 +710,75 @@ class AnalyticsCollectorTests(unittest.TestCase):
             self.assertEqual(payload["operations"]["report"]["state"], "current")
             self.assertEqual(len(store.list_reports(limit=10)), 1)
             self.assertEqual(len(store.list_network_samples(limit=10)), 1)
+            store.close()
+
+    def test_daily_maintenance_runs_once_without_changing_collection_payload(self):
+        class FakeBridge:
+            def read(self):
+                return {"state": "unavailable", "reason": "test", "snapshot": None}
+
+        class FakeNetwork:
+            def read(self):
+                return {
+                    "state": "unavailable",
+                    "coverage": "none",
+                    "connectivity": {"active_interface_count": 0},
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = AnalyticsStore(Path(temp_dir) / "analytics.sqlite3")
+            calls = []
+            collector = AnalyticsCollector(
+                FakeBridge(),
+                FakeNetwork(),
+                store,
+                daily_maintenance=lambda now=None: calls.append(now),
+            )
+
+            first = collector.collect_once()
+            second = collector.collect_once()
+
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(first["service"], second["service"])
+            store.close()
+
+    def test_failed_daily_maintenance_retries_and_preserves_warning_until_success(self):
+        class FakeBridge:
+            def read(self):
+                return {"state": "unavailable", "reason": "test", "snapshot": None}
+
+        class FakeNetwork:
+            def read(self):
+                return {
+                    "state": "unavailable",
+                    "coverage": "none",
+                    "connectivity": {"active_interface_count": 0},
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = AnalyticsStore(Path(temp_dir) / "analytics.sqlite3")
+            calls = []
+
+            def maintenance(now=None):
+                calls.append(now)
+                if len(calls) == 1:
+                    return {"deleted": 0, "failed": 1}
+                return {"deleted": 1, "failed": 0}
+
+            collector = AnalyticsCollector(
+                FakeBridge(),
+                FakeNetwork(),
+                store,
+                daily_maintenance=maintenance,
+                maintenance_retry_seconds=0,
+            )
+
+            collector.collect_once()
+            self.assertIn("daily_maintenance_incomplete", collector.snapshot()["last_error"])
+            collector.collect_once()
+
+            self.assertEqual(len(calls), 2)
+            self.assertIsNone(collector.snapshot()["last_error"])
             store.close()
 
 

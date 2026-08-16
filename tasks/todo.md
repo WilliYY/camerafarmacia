@@ -1,5 +1,12 @@
 # Tarefas
 
+- [x] Unificar cameras, eventos, evidencias e rede na Visao geral.
+- [x] Descaracterizar rostos antes de salvar capturas de atendimento.
+- [x] Limitar capturas a 10 dias, 15 minutos por camera e 256 MB.
+- [x] Oferecer exclusao manual e preview somente em memoria.
+- [x] Persistir inicio, ultimo sinal, permanencia e trafego agregado por sessao
+  Cabo/Wi-Fi deste computador.
+
 - [x] SQLite persistente, limitado e fora do HD de gravacao.
 - [x] Coletor agregado de NVR e rede.
 - [x] Painel Tkinter nativo sem navegador.

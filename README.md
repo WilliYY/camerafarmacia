@@ -189,8 +189,8 @@ pythonw.exe gerenciador.pyw --silent
 ```
 
 O WIMI Analytics roda integrado ao processo do NVR. No modo visual, use as abas
-superiores `Cameras` e `Analises`; a segunda contem seis subabas: Visao geral,
-Cameras, Comportamento, Rede, Relatorios e Pessoas. Trocar de aba preserva a
+superiores `Cameras` e `Analises`; a segunda contem sete subabas: Visao geral,
+Cameras, Comportamento, Rede, Evidencias, Relatorios e Pessoas. Trocar de aba preserva a
 coleta, os previews e o historico; o fluxo normal nao abre navegador nem uma
 segunda janela.
 
@@ -205,12 +205,23 @@ python tools\setup_wimi_vision.py --verify-only
 ```
 
 O cadastro facial exige consentimento explicito e um quadro recente com
-exatamente um rosto. Nenhuma imagem e salva; nome e vetor ficam juntos em um
-banco biometrico separado, protegido pelo DPAPI do Windows. Movimento, contagem
+exatamente um rosto. Nenhuma imagem identificavel e salva: nome e vetor ficam
+juntos em um banco biometrico separado, protegido pelo DPAPI do Windows.
+Capturas de atendimento usam apenas deteccoes com caixas completas, pixelizam o
+quadro inteiro e achatam todos os rostos detectados antes da persistencia. Sao cifradas com DPAPI e
+ficam limitadas a 256 MB. O painel informa a exclusao automatica em 10 dias e
+oferece exclusao manual; as capturas nao recebem nome nem `profile_id`.
+Movimento, contagem
 de rostos e reconhecimento sao evidencias para revisao humana, nao inferencias
 de emocao, intencao ou produtividade. A adaptacao automatica aprende somente o
 ruido visual de fundo dentro de janela e limites fixos; nao altera gravacao,
 retencao, camera, rede ou identidade.
+
+A aba Rede registra somente sessoes dos adaptadores deste computador: inicio,
+ultimo sinal, duracao medida e bytes agregados para Cabo ou Wi-Fi. Nao captura
+pacotes, destinos, paginas, aplicativos, mensagens, senhas nem conteudo de
+outros dispositivos. O SQLite permanece local e todas as escritas operacionais
+sao serializadas pelo mesmo bloqueio do processo.
 
 O servidor HTTP antigo continua disponivel somente para compatibilidade e
 diagnostico. Para executa-lo sem iniciar o NVR ou as cameras, use:

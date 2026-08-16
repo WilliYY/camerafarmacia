@@ -1,6 +1,6 @@
 import copy
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 from .backend import build_dashboard_payload
@@ -14,18 +14,24 @@ class AnalyticsCollector:
         store,
         interval_seconds=60,
         runtime_status_provider=None,
+        daily_maintenance=None,
+        maintenance_retry_seconds=900,
     ):
         self.bridge = bridge
         self.network_diagnostics = network_diagnostics
         self.store = store
         self.interval_seconds = max(15, int(interval_seconds))
         self.runtime_status_provider = runtime_status_provider
+        self.daily_maintenance = daily_maintenance
+        self.maintenance_retry_seconds = max(0, int(maintenance_retry_seconds))
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread = None
         self._payload = None
         self._last_error = None
         self._last_cleanup_date = None
+        self._maintenance_retry_at = None
+        self._maintenance_error = None
 
     def collect_once(self):
         network = self.network_diagnostics.read()
@@ -52,12 +58,32 @@ class AnalyticsCollector:
         collected_at = datetime.now()
         self.store.record_report(report, readiness, collected_at=collected_at)
         self.store.record_network(network, collected_at=collected_at)
-        if self._last_cleanup_date != collected_at.date():
-            self.store.cleanup(retention_days=90, now=collected_at)
-            self._last_cleanup_date = collected_at.date()
+        maintenance_due = self._last_cleanup_date != collected_at.date() and (
+            self._maintenance_retry_at is None
+            or collected_at >= self._maintenance_retry_at
+        )
+        if maintenance_due:
+            try:
+                self.store.cleanup(retention_days=90, now=collected_at)
+                if self.daily_maintenance is not None:
+                    maintenance_result = self.daily_maintenance(now=collected_at)
+                    if (
+                        isinstance(maintenance_result, dict)
+                        and int(maintenance_result.get("failed") or 0) > 0
+                    ):
+                        raise OSError("daily_maintenance_incomplete")
+            except Exception as error:
+                self._maintenance_error = f"maintenance: {str(error)[:240]}"
+                self._maintenance_retry_at = collected_at + timedelta(
+                    seconds=self.maintenance_retry_seconds
+                )
+            else:
+                self._last_cleanup_date = collected_at.date()
+                self._maintenance_retry_at = None
+                self._maintenance_error = None
         with self._lock:
             self._payload = payload
-            self._last_error = None
+            self._last_error = self._maintenance_error
         return copy.deepcopy(payload)
 
     def snapshot(self):
