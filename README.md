@@ -78,25 +78,21 @@ O gerenciador compara a versão local com a versão publicada no GitHub, mas só
 
 ### 8. Painel Unificado WIMI Analytics
 
-O aplicativo inicia um servico local separado em `http://127.0.0.1:8765/` e
-mostra o botao **Painel WIMI** na interface. O painel reune as rotas Cameras,
-Analytics, Computadores, Rede, Ocorrencias, Relatorios e Sistema. Relatorios
-consolida a coleta atual do NVR e deste PC; Sistema separa pontos fortes,
-limitacoes e riscos sem produzir uma nota artificial de saude.
+O painel principal possui duas abas superiores: **Cameras** e **Analises**.
+Analises fica dentro da mesma janela e contem Visao geral, Cameras,
+Comportamento, Rede, Relatorios e Pessoas. Alternar entre elas nao reinicia o
+NVR, o coletor, a visao ou o banco local.
 
-Nesta primeira fundacao funcional, o servico e somente leitura: consome uma
-versao filtrada de `sistema/logs/health_status.json`, nao importa o
-`gerenciador.pyw`, nao controla gravacoes e nao escreve no HD de videos. Visao
-computacional e agente Windows aparecem como nao configurados ate passarem por
-instalacao e validacao proprias. A rota Rede mostra somente a configuracao local
-do PC (interface ativa, IPv4, gateway e DNS); ela nao captura pacotes nem afirma
-enxergar o trafego da loja. Cobertura completa depende de uma fonte autorizada
-no gateway, como DNS agregado ou NetFlow/IPFIX.
+O historico persistente usa SQLite em `sistema/analytics/`, fora do HD de
+gravacoes. A visao reutiliza o preview existente, calibra de forma limitada o
+ruido de movimento de cada camera e nunca cria perfis faciais sozinha. Cadastro
+de identidade continua manual e consentido.
 
-O relatorio atual nao e historico diario: ele mostra somente evidencias da
-coleta vigente, incluindo cameras, gravacao, alertas, HD, backup, protecao de
-hardware e rede local. Historico persistente, visao computacional e telemetria
-dos computadores continuam explicitamente nao configurados.
+A aba Rede identifica o tipo de conexao deste PC, velocidade do link,
+contadores e variacoes entre amostras. Ela nao captura pacotes, mensagens,
+senhas, navegacao ou conteudo de outros dispositivos. Cobertura da loja inteira
+continua dependendo de fonte autorizada no gateway. O servidor
+`http://127.0.0.1:8765/` permanece apenas para compatibilidade e diagnostico.
 
 ---
 
@@ -173,10 +169,11 @@ Para rodar silenciosamente, use:
 pythonw.exe gerenciador.pyw --silent
 ```
 
-O WIMI Analytics agora roda integrado ao processo do NVR. No modo visual, o
-botao `Painel WIMI` abre uma janela nativa com seis abas: Visao geral, Cameras,
-Comportamento, Rede, Relatorios e Pessoas. Trocar de aba, ocultar ou reabrir a
-janela preserva a coleta e o historico; o fluxo normal nao abre navegador.
+O WIMI Analytics roda integrado ao processo do NVR. No modo visual, use as abas
+superiores `Cameras` e `Analises`; a segunda contem seis subabas: Visao geral,
+Cameras, Comportamento, Rede, Relatorios e Pessoas. Trocar de aba preserva a
+coleta, os previews e o historico; o fluxo normal nao abre navegador nem uma
+segunda janela.
 
 O historico fica em `sistema/analytics/`, fora do HD de gravacao. A visao usa os
 quadros ja decodificados pelo preview, sem abrir outra conexao com as cameras e
@@ -192,7 +189,9 @@ O cadastro facial exige consentimento explicito e um quadro recente com
 exatamente um rosto. Nenhuma imagem e salva; nome e vetor ficam juntos em um
 banco biometrico separado, protegido pelo DPAPI do Windows. Movimento, contagem
 de rostos e reconhecimento sao evidencias para revisao humana, nao inferencias
-de emocao, intencao ou produtividade.
+de emocao, intencao ou produtividade. A adaptacao automatica aprende somente o
+ruido visual de fundo dentro de janela e limites fixos; nao altera gravacao,
+retencao, camera, rede ou identidade.
 
 O servidor HTTP antigo continua disponivel somente para compatibilidade e
 diagnostico. Para executa-lo sem iniciar o NVR ou as cameras, use:

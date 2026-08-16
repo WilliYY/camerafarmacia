@@ -71,6 +71,50 @@ class AnalyticsStoreTests(unittest.TestCase):
         with self.assertRaises(UnsafeAnalyticsPathError):
             AnalyticsStore(recording_root / "analytics.sqlite3", forbidden_roots=[recording_root])
 
+    def test_adds_connection_columns_to_existing_network_history(self):
+        legacy_path = self.root / "legacy" / "analytics.sqlite3"
+        legacy_path.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(legacy_path)) as connection:
+            with connection:
+                connection.execute(
+                    """
+                    CREATE TABLE network_samples (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        collected_at TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        fingerprint TEXT NOT NULL,
+                        active_interface_count INTEGER NOT NULL,
+                        default_gateway_configured INTEGER NOT NULL,
+                        dns_configured INTEGER NOT NULL,
+                        coverage TEXT NOT NULL,
+                        received_bytes INTEGER NOT NULL DEFAULT 0,
+                        sent_bytes INTEGER NOT NULL DEFAULT 0,
+                        received_packets INTEGER NOT NULL DEFAULT 0,
+                        sent_packets INTEGER NOT NULL DEFAULT 0,
+                        received_errors INTEGER NOT NULL DEFAULT 0,
+                        sent_errors INTEGER NOT NULL DEFAULT 0,
+                        received_discarded INTEGER NOT NULL DEFAULT 0,
+                        sent_discarded INTEGER NOT NULL DEFAULT 0
+                    )
+                    """
+                )
+
+        migrated = AnalyticsStore(legacy_path)
+        migrated.close()
+        with closing(sqlite3.connect(legacy_path)) as connection:
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(network_samples)")
+            }
+
+        self.assertTrue(
+            {
+                "primary_connection_type",
+                "wired_interface_count",
+                "wireless_interface_count",
+                "virtual_interface_count",
+            }.issubset(columns)
+        )
+
     def test_report_writes_only_on_change_or_safety_interval(self):
         report = self.sample_report()
         readiness = self.sample_readiness()
@@ -116,6 +160,10 @@ class AnalyticsStoreTests(unittest.TestCase):
             ],
             "connectivity": {
                 "active_interface_count": 1,
+                "primary_connection_type": "wired",
+                "wired_interface_count": 1,
+                "wireless_interface_count": 0,
+                "virtual_interface_count": 0,
                 "default_gateway_configured": True,
                 "dns_configured": True,
             },
@@ -139,6 +187,7 @@ class AnalyticsStoreTests(unittest.TestCase):
         changed = json.loads(json.dumps(network))
         changed["traffic_counters"]["received_bytes"] += 60000
         changed["traffic_counters"]["sent_bytes"] += 30000
+        changed["traffic_counters"]["received_discarded"] += 5
         self.assertTrue(
             self.store.record_network(changed, collected_at=now + timedelta(minutes=11))
         )
@@ -150,8 +199,12 @@ class AnalyticsStoreTests(unittest.TestCase):
         self.assertNotIn("AA:BB", serialized)
         self.assertNotIn("1.1.1.1", serialized)
         self.assertEqual(samples[0]["active_interface_count"], 1)
+        self.assertEqual(samples[0]["primary_connection_type"], "wired")
+        self.assertEqual(samples[0]["wired_interface_count"], 1)
         self.assertEqual(samples[0]["received_bytes_per_second"], 90.91)
         self.assertEqual(samples[0]["sent_bytes_per_second"], 45.45)
+        self.assertEqual(samples[0]["discarded_delta"], 5)
+        self.assertEqual(samples[0]["error_delta"], 5)
 
     def test_cleanup_is_limited_to_analytics_rows(self):
         old = datetime(2026, 4, 1, 8, 0, 0)
@@ -168,6 +221,37 @@ class AnalyticsStoreTests(unittest.TestCase):
         self.assertGreaterEqual(deleted, 2)
         self.assertEqual(self.store.list_reports(limit=10), [])
         self.assertEqual(sentinel.read_bytes(), b"video")
+
+    def test_network_counter_reset_is_reported_as_inconclusive_delta(self):
+        network = {
+            "state": "active",
+            "coverage": "host_configuration_and_counters",
+            "connectivity": {"active_interface_count": 1},
+            "traffic_counters": {
+                "received_bytes": 1000,
+                "sent_bytes": 500,
+                "received_packets": 10,
+                "sent_packets": 5,
+                "received_errors": 0,
+                "sent_errors": 0,
+                "received_discarded": 8,
+                "sent_discarded": 0,
+            },
+        }
+        now = datetime(2026, 8, 16, 11, 0, 0)
+        self.assertTrue(self.store.record_network(network, collected_at=now))
+        reset = json.loads(json.dumps(network))
+        reset["traffic_counters"]["received_bytes"] = 20
+        reset["traffic_counters"]["received_discarded"] = 0
+        self.assertTrue(
+            self.store.record_network(reset, collected_at=now + timedelta(minutes=1))
+        )
+
+        latest = self.store.list_network_samples(limit=2)[0]
+
+        self.assertTrue(latest["counter_reset_detected"])
+        self.assertIsNone(latest["received_bytes_per_second"])
+        self.assertIsNone(latest["error_delta"])
 
 
 class AnalyticsCollectorTests(unittest.TestCase):

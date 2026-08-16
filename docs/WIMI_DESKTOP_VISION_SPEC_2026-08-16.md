@@ -16,14 +16,16 @@ sensivel.
 
 ## Decisoes
 
-1. O botao Painel WIMI abre uma janela nativa filha do painel principal.
+1. O painel principal possui abas superiores Cameras e Analises. A interface
+   WIMI e embutida na segunda aba e nao cria outra janela.
 2. O servidor HTTP local continua disponivel apenas para compatibilidade e
    diagnostico, mas nao e iniciado nem aberto pelo fluxo normal da interface.
 3. O historico usa SQLite em `sistema/analytics/wimi_analytics.sqlite3`, sempre
    no disco local do Windows e nunca no HD de gravacoes.
 4. Relatorios persistem somente DTOs sanitizados. URLs, credenciais, caminhos,
    hostname, modelo/serial de disco e quadros de camera nao entram no banco.
-5. A rede e coletada a cada 60 segundos como configuracao agregada deste PC.
+5. A rede e coletada a cada 60 segundos como configuracao agregada deste PC,
+   incluindo tipo de conexao, velocidade, contadores e variacao entre amostras.
    Nao ha captura de pacote, payload, pagina, senha, mensagem ou varredura da
    rede da loja.
 6. A visao reutiliza quadros que o preview Tkinter ja decodificou. Nao abre uma
@@ -31,9 +33,11 @@ sensivel.
    `/api/stream.ts` usado pela gravacao.
 7. A fila de visao possui no maximo dois quadros no total e aceita no maximo uma
    amostra por segundo por camera. Quadros antigos sao descartados.
-8. Movimento funciona com Pillow e nao depende de modelo. Rosto e identidade
-   usam OpenCV YuNet/SFace somente quando dependencia e modelos verificados
-   estiverem presentes.
+8. Movimento funciona com Pillow e nao depende de modelo. Cada camera passa por
+   calibracao local limitada antes dos alertas; o limiar adaptativo tem piso,
+   teto, janela finita e nao aprende mudancas grandes como ruido. Rosto e
+   identidade usam OpenCV YuNet/SFace somente quando dependencia e modelos
+   verificados estiverem presentes.
 9. Cadastro facial e manual, consentido e exige exatamente um rosto. Nenhuma
    imagem e salva; somente o vetor biometrico protegido pelo DPAPI do Windows.
 10. Uma identidade so e exibida apos correspondencia acima do limiar, margem
@@ -74,8 +78,9 @@ recebe checkpoint depois da manutencao.
 - **Relatorios:** coletas persistidas, filtros de periodo e detalhes.
 - **Pessoas:** cadastro, ativacao e exclusao de perfis consentidos.
 
-Trocar de aba apenas muda a visualizacao. O coletor, a fila limitada e o banco
-mantem o estado. Fechar e reabrir a janela nao reinicia o NVR nem apaga dados.
+Trocar de aba apenas muda a visualizacao. O coletor, a fila limitada, os
+previews e o banco mantem o estado. A navegacao superior tambem pode ser
+percorrida por teclado pelo `ttk.Notebook`.
 
 ## Validacao
 
@@ -89,6 +94,11 @@ python gerenciador.pyw --smoke-test-seconds 180
 O ensaio real de 180 segundos de 16/08/2026 gravou as duas cameras, validou os
 dois arquivos finais por remux, manteve o HD disponivel, nao criou novo
 `Kernel_144` e terminou sem processos ou temporarios residuais.
+
+Nesta evolucao, um ensaio adicional de 42 segundos validou dois videos sem novo
+`Kernel_144` e sem residuos. A visao real tambem colocou as duas cameras Online,
+concluiu a calibracao adaptativa em cerca de 30 segundos e chegou a Ativo 2/2,
+com memoria abaixo de 251 MB.
 
 Antes do teste real: confirmar uma unica instancia, baseline de discos,
 processos e Kernel_144. Interromper se surgir novo Kernel_144, se o HD sair, se

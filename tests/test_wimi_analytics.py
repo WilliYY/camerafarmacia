@@ -534,6 +534,9 @@ class NetworkDiagnosticsTests(unittest.TestCase):
                         "profile": "Rede interna",
                         "status": "Up",
                         "link_speed": "1 Gbps",
+                        "media_type": "802.3",
+                        "physical_media_type": "802.3",
+                        "hardware_interface": True,
                         "ipv4": ["192.168.7.5", "invalid"],
                         "gateway": ["192.168.7.1"],
                         "dns": ["192.168.7.1", "fe80::1"],
@@ -566,6 +569,9 @@ class NetworkDiagnosticsTests(unittest.TestCase):
         self.assertFalse(result["can_observe_store_traffic"])
         self.assertEqual(result["interfaces"][0]["ipv4"], ["192.168.7.5"])
         self.assertEqual(result["interfaces"][0]["gateways"], ["192.168.7.1"])
+        self.assertEqual(result["interfaces"][0]["connection_type"], "wired")
+        self.assertEqual(result["connectivity"]["primary_connection_type"], "wired")
+        self.assertEqual(result["connectivity"]["wired_interface_count"], 1)
         self.assertTrue(result["connectivity"]["default_gateway_configured"])
         self.assertTrue(result["connectivity"]["dns_configured"])
         self.assertEqual(result["traffic_counters"]["received_bytes"], 120000)

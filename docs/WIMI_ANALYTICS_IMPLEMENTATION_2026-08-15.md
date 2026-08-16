@@ -5,8 +5,9 @@ Atualizado em: 16/08/2026
 ## Resultado
 
 O WIMI Analytics esta integrado ao painel Tkinter do NVR. O fluxo normal nao
-inicia nem abre um site local. O botao `Painel WIMI` reutiliza uma unica janela
-nativa e preserva coleta, selecao e historico ao alternar entre seis abas:
+inicia nem abre um site local ou uma segunda janela. O topo possui as abas
+`Cameras` e `Analises`; a segunda preserva coleta, selecao e historico ao
+alternar entre seis subabas:
 
 - Visao geral;
 - Cameras;
@@ -31,7 +32,7 @@ gerenciador.pyw
         |-- AnalyticsStore (relatorios, rede e eventos)
         |-- VisionCoordinator (movimento, rosto e identidade)
         |-- BiometricStore + DPAPI (perfis consentidos)
-        `-- AnalyticsDesktopWindow (seis abas Tkinter)
+        `-- AnalyticsDesktopWindow (frame embutido com seis subabas Tkinter)
 ```
 
 O coletor e a visao nao controlam gravacao, retencao, go2rtc, energia ou HD. O
@@ -53,7 +54,8 @@ O coletor e a visao nao controlam gravacao, retencao, go2rtc, energia ou HD. O
 
 ## Visao computacional
 
-- movimento deterministico por diferenca de quadros e histerese;
+- movimento deterministico por diferenca de quadros, histerese e calibracao
+  adaptativa limitada por camera;
 - no maximo uma amostra por segundo por camera e dois quadros no total na fila;
 - amostra reduzida antes de entrar na fila, com limite de `1280x720`;
 - YuNet/SFace executados no maximo a cada tres segundos por camera;
@@ -63,7 +65,9 @@ O coletor e a visao nao controlam gravacao, retencao, go2rtc, energia ou HD. O
 - cadastro roda fora da thread Tk e exige consentimento e exatamente um rosto;
 - reconhecimento exige limiar, margem contra o segundo perfil e duas
   confirmacoes consecutivas;
-- identidade nao cadastrada continua anonima e nenhum perfil e criado sozinho.
+- identidade nao cadastrada continua anonima e nenhum perfil e criado sozinho;
+- a calibracao aprende somente variacao visual pequena, possui janela finita,
+  piso/teto de limiar e timeout; nunca controla gravacao ou retencao.
 
 Os modelos locais e o runtime isolado sao instalados por
 `tools/setup_wimi_vision.py`. O manifesto fixa versoes, origem, tamanho e
@@ -83,8 +87,15 @@ SHA-256. Esses artefatos gerados ficam fora do Git.
 ## Rede e computadores
 
 O diagnostico consulta configuracao e contadores agregados dos adaptadores deste
-PC. Exibe bytes, pacotes, erros e descartes acumulados, alem de taxas calculadas
-entre amostras. Nao observa o trafego completo da loja e nao captura conteudo.
+PC. Exibe cabo/Wi-Fi/virtual, velocidade, bytes, pacotes, erros e descartes,
+alem de taxas e variacoes calculadas entre amostras. Nao observa o trafego
+completo da loja e nao captura conteudo.
+
+Na validacao local de 16/08/2026, o Windows informou uma interface `Ethernet`
+por cabo a `1 Gbps`, com gateway e DNS configurados. Em uma amostra de dez
+segundos nao houve aumento de erros ou descartes; os contadores acumulados
+anteriores continuam visiveis como historico, sem serem tratados como falha
+nova.
 
 Agente remoto nao e necessario para este computador. Outros computadores so
 devem ser incluidos em uma etapa autorizada, com escopo, autenticacao e politica
@@ -110,7 +121,15 @@ queda de energia ou desconexao USB.
 Apos as correcoes finais de concorrencia, o ensaio final de 30 segundos
 confirmou duas gravacoes validas, pico total de 252 MB, CPU maxima de 7,6%,
 824,36 GB livres, zero novo `Kernel_144`, zero artefato e zero processo residual.
-A suite final executou 139 testes com sucesso.
+A suite desta evolucao executou 144 testes com sucesso, incluindo migracao
+aditiva do banco existente, painel embutido, calibracao adaptativa e deteccao do
+tipo de conexao sem persistir IP ou MAC.
+
+O ensaio controlado desta evolucao durou 42 segundos, gerou e validou dois
+videos, atingiu pico de 243,3 MB, 66 threads e 5,7% de CPU, manteve 824,35 GB
+livres e terminou sem novo `Kernel_144`, processo ou artefato residual. Em um
+ensaio visual separado, as duas cameras ficaram Online, passaram de Calibrando
+para Ativo 2/2 e mantiveram o processo em 250,5 MB sem iniciar gravacao.
 
 ## Limites
 

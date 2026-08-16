@@ -1789,6 +1789,46 @@ class StorageSafetyTests(unittest.TestCase):
         self.assertEqual(received, [True])
         self.assertEqual(len(app.root.after_calls), 1)
 
+    def test_wimi_panel_is_embedded_and_selects_the_main_analytics_tab(self):
+        import wimi_analytics.desktop as desktop_module
+
+        captured = {}
+
+        class FakeNotebook:
+            def select(self, page):
+                captured["selected"] = page
+
+        class FakeAnalyticsPanel:
+            def __init__(self, *args, **kwargs):
+                captured["parent"] = kwargs.get("parent")
+
+            def show(self):
+                captured["shown"] = True
+                return True
+
+        app = self.new_app()
+        app.root = FakeRoot()
+        app.main_notebook = FakeNotebook()
+        app.analytics_page = object()
+        app.analytics_placeholder = None
+        app._analytics_collector = object()
+        app._analytics_store = object()
+        app._vision_coordinator = object()
+        app._face_service = object()
+        app._analytics_window = None
+        app.camera_widgets = {}
+        app.activate_wimi_camera_analysis = lambda: None
+        original = desktop_module.AnalyticsDesktopWindow
+        desktop_module.AnalyticsDesktopWindow = FakeAnalyticsPanel
+        try:
+            app.open_wimi_analytics()
+        finally:
+            desktop_module.AnalyticsDesktopWindow = original
+
+        self.assertIs(captured["selected"], app.analytics_page)
+        self.assertIs(captured["parent"], app.analytics_page)
+        self.assertTrue(captured["shown"])
+
 
 if __name__ == "__main__":
     unittest.main()

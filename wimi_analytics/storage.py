@@ -125,6 +125,10 @@ class AnalyticsStore:
                     state TEXT NOT NULL,
                     fingerprint TEXT NOT NULL,
                     active_interface_count INTEGER NOT NULL,
+                    primary_connection_type TEXT NOT NULL DEFAULT 'unknown',
+                    wired_interface_count INTEGER NOT NULL DEFAULT 0,
+                    wireless_interface_count INTEGER NOT NULL DEFAULT 0,
+                    virtual_interface_count INTEGER NOT NULL DEFAULT 0,
                     default_gateway_configured INTEGER NOT NULL,
                     dns_configured INTEGER NOT NULL,
                     coverage TEXT NOT NULL,
@@ -158,19 +162,24 @@ class AnalyticsStore:
             existing_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(network_samples)")
             }
-            for column in (
-                "received_bytes",
-                "sent_bytes",
-                "received_packets",
-                "sent_packets",
-                "received_errors",
-                "sent_errors",
-                "received_discarded",
-                "sent_discarded",
-            ):
+            migrations = {
+                "primary_connection_type": "TEXT NOT NULL DEFAULT 'unknown'",
+                "wired_interface_count": "INTEGER NOT NULL DEFAULT 0",
+                "wireless_interface_count": "INTEGER NOT NULL DEFAULT 0",
+                "virtual_interface_count": "INTEGER NOT NULL DEFAULT 0",
+                "received_bytes": "INTEGER NOT NULL DEFAULT 0",
+                "sent_bytes": "INTEGER NOT NULL DEFAULT 0",
+                "received_packets": "INTEGER NOT NULL DEFAULT 0",
+                "sent_packets": "INTEGER NOT NULL DEFAULT 0",
+                "received_errors": "INTEGER NOT NULL DEFAULT 0",
+                "sent_errors": "INTEGER NOT NULL DEFAULT 0",
+                "received_discarded": "INTEGER NOT NULL DEFAULT 0",
+                "sent_discarded": "INTEGER NOT NULL DEFAULT 0",
+            }
+            for column, declaration in migrations.items():
                 if column not in existing_columns:
                     connection.execute(
-                        f"ALTER TABLE network_samples ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                        f"ALTER TABLE network_samples ADD COLUMN {column} {declaration}"
                     )
 
     def record_report(self, report, readiness, collected_at=None, min_interval_seconds=900):
@@ -245,6 +254,15 @@ class AnalyticsStore:
             "state": str(network.get("state", "unavailable"))[:32],
             "coverage": str(network.get("coverage", "none"))[:64],
             "active_interface_count": max(0, int(connectivity.get("active_interface_count") or 0)),
+            "primary_connection_type": (
+                str(connectivity.get("primary_connection_type") or "unknown")
+                if str(connectivity.get("primary_connection_type") or "unknown")
+                in {"wired", "wireless", "virtual", "unknown"}
+                else "unknown"
+            ),
+            "wired_interface_count": max(0, min(int(connectivity.get("wired_interface_count") or 0), 16)),
+            "wireless_interface_count": max(0, min(int(connectivity.get("wireless_interface_count") or 0), 16)),
+            "virtual_interface_count": max(0, min(int(connectivity.get("virtual_interface_count") or 0), 16)),
             "default_gateway_configured": connectivity.get("default_gateway_configured") is True,
             "dns_configured": connectivity.get("dns_configured") is True,
         }
@@ -267,16 +285,22 @@ class AnalyticsStore:
                 """
                 INSERT INTO network_samples(
                     collected_at, state, fingerprint, active_interface_count,
+                    primary_connection_type, wired_interface_count,
+                    wireless_interface_count, virtual_interface_count,
                     default_gateway_configured, dns_configured, coverage,
                     received_bytes, sent_bytes, received_packets, sent_packets,
                     received_errors, sent_errors, received_discarded, sent_discarded
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _iso(collected_at),
                     aggregate["state"],
                     fingerprint,
                     aggregate["active_interface_count"],
+                    aggregate["primary_connection_type"],
+                    aggregate["wired_interface_count"],
+                    aggregate["wireless_interface_count"],
+                    aggregate["virtual_interface_count"],
                     int(aggregate["default_gateway_configured"]),
                     int(aggregate["dns_configured"]),
                     aggregate["coverage"],
@@ -291,6 +315,8 @@ class AnalyticsStore:
             rows = connection.execute(
                 """
                 SELECT collected_at, state, active_interface_count,
+                       primary_connection_type, wired_interface_count,
+                       wireless_interface_count, virtual_interface_count,
                        default_gateway_configured, dns_configured, coverage,
                        received_bytes, sent_bytes, received_packets, sent_packets,
                        received_errors, sent_errors, received_discarded, sent_discarded
@@ -304,6 +330,10 @@ class AnalyticsStore:
                 "collected_at": row["collected_at"],
                 "state": row["state"],
                 "active_interface_count": row["active_interface_count"],
+                "primary_connection_type": row["primary_connection_type"],
+                "wired_interface_count": row["wired_interface_count"],
+                "wireless_interface_count": row["wireless_interface_count"],
+                "virtual_interface_count": row["virtual_interface_count"],
                 "default_gateway_configured": bool(row["default_gateway_configured"]),
                 "dns_configured": bool(row["dns_configured"]),
                 "coverage": row["coverage"],
@@ -321,8 +351,24 @@ class AnalyticsStore:
                 item[name] = row[name]
             item["received_bytes_per_second"] = None
             item["sent_bytes_per_second"] = None
+            item["discarded_delta"] = None
+            item["error_delta"] = None
+            item["counter_reset_detected"] = False
             if index + 1 < len(rows):
                 older = rows[index + 1]
+                tracked_counters = (
+                    "received_bytes",
+                    "sent_bytes",
+                    "received_packets",
+                    "sent_packets",
+                    "received_errors",
+                    "sent_errors",
+                    "received_discarded",
+                    "sent_discarded",
+                )
+                item["counter_reset_detected"] = any(
+                    row[name] < older[name] for name in tracked_counters
+                )
                 elapsed = (
                     datetime.fromisoformat(row["collected_at"])
                     - datetime.fromisoformat(older["collected_at"])
@@ -332,6 +378,20 @@ class AnalyticsStore:
                 if elapsed > 0 and received_delta >= 0 and sent_delta >= 0:
                     item["received_bytes_per_second"] = round(received_delta / elapsed, 2)
                     item["sent_bytes_per_second"] = round(sent_delta / elapsed, 2)
+                fault_names = (
+                    "received_errors",
+                    "sent_errors",
+                    "received_discarded",
+                    "sent_discarded",
+                )
+                fault_deltas = [row[name] - older[name] for name in fault_names]
+                if (
+                    elapsed > 0
+                    and not item["counter_reset_detected"]
+                    and all(value >= 0 for value in fault_deltas)
+                ):
+                    item["discarded_delta"] = fault_deltas[2] + fault_deltas[3]
+                    item["error_delta"] = sum(fault_deltas)
             results.append(item)
         return results
 

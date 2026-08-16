@@ -81,6 +81,32 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         controller.destroy()
         self.assertIsNone(controller.window)
 
+    def test_embeds_in_existing_panel_without_creating_a_second_window(self):
+        panel = tk.Frame(self.root)
+        panel.pack(fill="both", expand=True)
+        controller = AnalyticsDesktopWindow(
+            self.root,
+            FakeCollector(),
+            FakeStore(),
+            FakeVision(),
+            face_service=FakeFaceService(),
+            parent=panel,
+        )
+
+        self.assertTrue(controller.show())
+        embedded_frame = controller.window
+        self.root.update()
+
+        self.assertIsInstance(embedded_frame, tk.Frame)
+        self.assertIs(embedded_frame.winfo_toplevel(), self.root)
+        self.assertEqual(len(controller.notebook.tabs()), 6)
+
+        controller.hide()
+        self.assertTrue(controller.show())
+        self.assertIs(controller.window, embedded_frame)
+        controller.destroy()
+        self.assertIsNone(controller.window)
+
     def test_enrollment_runs_off_tk_thread_and_destroy_is_queued(self):
         started = threading.Event()
         release = threading.Event()

@@ -17,13 +17,43 @@ class MotionAnalyzer:
         changed_ratio_threshold=0.04,
         start_frames=2,
         end_frames=3,
+        adaptive=False,
+        calibration_samples=8,
+        adaptation_window=60,
+        adaptive_margin=0.015,
+        adaptive_max_threshold=0.18,
     ):
         self.size = (max(16, int(width)), max(9, int(height)))
         self.pixel_threshold = max(0, min(int(pixel_threshold), 254))
         self.changed_ratio_threshold = max(0.001, min(float(changed_ratio_threshold), 1.0))
         self.start_frames = max(1, int(start_frames))
         self.end_frames = max(1, int(end_frames))
+        self.adaptive = bool(adaptive)
+        self.calibration_samples = max(3, min(int(calibration_samples), 60))
+        self.adaptation_window = max(
+            self.calibration_samples,
+            min(int(adaptation_window), 300),
+        )
+        self.adaptive_margin = max(0.005, min(float(adaptive_margin), 0.10))
+        self.adaptive_max_threshold = max(
+            self.changed_ratio_threshold,
+            min(float(adaptive_max_threshold), 0.50),
+        )
         self._states = {}
+
+    def _motion_threshold(self, state):
+        samples = list(state["noise_samples"])
+        if not samples:
+            return self.changed_ratio_threshold
+        ordered = sorted(samples)
+        baseline = ordered[len(ordered) // 2]
+        deviations = sorted(abs(value - baseline) for value in samples)
+        deviation = deviations[len(deviations) // 2]
+        learned = baseline + max(self.adaptive_margin, deviation * 4.0)
+        return min(
+            self.adaptive_max_threshold,
+            max(self.changed_ratio_threshold, learned),
+        )
 
     def analyze(self, stream, image, occurred_at=None):
         occurred_at = occurred_at or datetime.now()
@@ -36,15 +66,40 @@ class MotionAnalyzer:
                 "positive": 0,
                 "negative": 0,
                 "started_at": None,
+                "noise_samples": deque(maxlen=self.adaptation_window),
+                "calibration_observations": 0,
             },
         )
         event = None
         changed_ratio = 0.0
+        calibrated = not self.adaptive
+        effective_threshold = self.changed_ratio_threshold
         if state["previous"] is not None:
             histogram = ImageChops.difference(state["previous"], current).histogram()
             total = sum(histogram) or 1
             changed_ratio = sum(histogram[self.pixel_threshold + 1 :]) / total
-            changed = changed_ratio >= self.changed_ratio_threshold
+            if self.adaptive:
+                state["calibration_observations"] += 1
+                calibrated_before = (
+                    len(state["noise_samples"]) >= self.calibration_samples
+                    or state["calibration_observations"] >= self.calibration_samples * 3
+                )
+                if not calibrated_before:
+                    if changed_ratio <= self.adaptive_max_threshold:
+                        state["noise_samples"].append(changed_ratio)
+                    changed = False
+                else:
+                    effective_threshold = self._motion_threshold(state)
+                    changed = changed_ratio >= effective_threshold
+                    if not state["motion"] and not changed:
+                        state["noise_samples"].append(changed_ratio)
+                calibrated = (
+                    len(state["noise_samples"]) >= self.calibration_samples
+                    or state["calibration_observations"] >= self.calibration_samples * 3
+                )
+                effective_threshold = self._motion_threshold(state)
+            else:
+                changed = changed_ratio >= effective_threshold
             if changed:
                 state["positive"] += 1
                 state["negative"] = 0
@@ -76,6 +131,11 @@ class MotionAnalyzer:
         return {
             "motion": "active" if state["motion"] else "idle",
             "changed_ratio": round(changed_ratio, 4),
+            "motion_threshold": round(effective_threshold, 4),
+            "calibrated": calibrated,
+            "adaptation_state": (
+                "disabled" if not self.adaptive else "adaptive" if calibrated else "calibrating"
+            ),
             "event": event,
         }
 
@@ -94,7 +154,7 @@ class VisionCoordinator:
     ):
         self.store = store
         self.face_service = face_service
-        self.motion_analyzer = motion_analyzer or MotionAnalyzer()
+        self.motion_analyzer = motion_analyzer or MotionAnalyzer(adaptive=True)
         self.hardware_guard = hardware_guard or (lambda: None)
         self.sample_interval_seconds = max(0.0, float(sample_interval_seconds))
         self.face_interval_seconds = max(0.0, float(face_interval_seconds))
@@ -333,11 +393,13 @@ class VisionCoordinator:
 
         result = {
             "stream": stream,
-            "state": "active",
+            "state": "active" if motion["calibrated"] else "calibrating",
             "pause_reason": None,
             "last_analyzed_at": occurred_at.isoformat(timespec="seconds"),
             "motion": motion["motion"],
             "changed_ratio": motion["changed_ratio"],
+            "motion_threshold": motion["motion_threshold"],
+            "adaptation_state": motion["adaptation_state"],
             "face_state": face_state,
             "face_count": face_count,
             "identities": identities,

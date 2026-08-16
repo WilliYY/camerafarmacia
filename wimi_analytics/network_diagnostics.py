@@ -38,6 +38,9 @@ $items = @(
                     profile = $null
                     status = $adapter.Status
                     link_speed = $adapter.LinkSpeed
+                    media_type = [string]$adapter.MediaType
+                    physical_media_type = [string]$adapter.PhysicalMediaType
+                    hardware_interface = [bool]$adapter.HardwareInterface
                     ipv4 = @($config.IPAddress)
                     gateway = @($config.DefaultIPGateway)
                     dns = @($config.DNSServerSearchOrder)
@@ -88,6 +91,20 @@ def _safe_counter(value):
         return 0
 
 
+def _connection_type(raw):
+    if raw.get("hardware_interface") is False:
+        return "virtual"
+    evidence = " ".join(
+        str(raw.get(key) or "").lower()
+        for key in ("alias", "media_type", "physical_media_type")
+    )
+    if any(token in evidence for token in ("802.11", "wi-fi", "wifi", "wireless", "wlan")):
+        return "wireless"
+    if any(token in evidence for token in ("802.3", "ethernet", "gigabit", "fast ethernet")):
+        return "wired"
+    return "unknown"
+
+
 def _base_result(state, reason):
     return {
         "schema_version": NETWORK_SCHEMA_VERSION,
@@ -100,6 +117,10 @@ def _base_result(state, reason):
         "interfaces": [],
         "connectivity": {
             "active_interface_count": 0,
+            "primary_connection_type": "unknown",
+            "wired_interface_count": 0,
+            "wireless_interface_count": 0,
+            "virtual_interface_count": 0,
             "default_gateway_configured": False,
             "dns_configured": False,
         },
@@ -208,6 +229,7 @@ class WindowsNetworkDiagnostics:
                     "profile": _safe_text(raw.get("profile")),
                     "status": "up",
                     "link_speed": _safe_text(raw.get("link_speed"), 40),
+                    "connection_type": _connection_type(raw),
                     "ipv4": _safe_ip_list(raw.get("ipv4"), ipv4_only=True),
                     "gateways": _safe_ip_list(raw.get("gateway")),
                     "dns_servers": _safe_ip_list(raw.get("dns")),
@@ -229,8 +251,22 @@ class WindowsNetworkDiagnostics:
 
         result = _base_result("active", "host_network_detected")
         result["interfaces"] = interfaces
+        primary = next(
+            (item for item in interfaces if item["gateways"]),
+            interfaces[0],
+        )
         result["connectivity"] = {
             "active_interface_count": len(interfaces),
+            "primary_connection_type": primary["connection_type"],
+            "wired_interface_count": sum(
+                1 for item in interfaces if item["connection_type"] == "wired"
+            ),
+            "wireless_interface_count": sum(
+                1 for item in interfaces if item["connection_type"] == "wireless"
+            ),
+            "virtual_interface_count": sum(
+                1 for item in interfaces if item["connection_type"] == "virtual"
+            ),
             "default_gateway_configured": any(item["gateways"] for item in interfaces),
             "dns_configured": any(item["dns_servers"] for item in interfaces),
         }

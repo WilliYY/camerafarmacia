@@ -111,6 +111,39 @@ class MotionAnalyzerTests(unittest.TestCase):
         self.assertEqual(result["event"]["event_type"], "motion_start")
         self.assertIsNone(other["event"])
 
+    def test_adaptive_mode_learns_bounded_camera_noise_before_emitting_motion(self):
+        analyzer = MotionAnalyzer(
+            width=64,
+            height=36,
+            pixel_threshold=10,
+            changed_ratio_threshold=0.04,
+            start_frames=1,
+            end_frames=1,
+            adaptive=True,
+            calibration_samples=4,
+            adaptation_window=12,
+            adaptive_margin=0.02,
+            adaptive_max_threshold=0.20,
+        )
+        quiet = Image.new("RGB", (64, 36), "black")
+        camera_noise = quiet.copy()
+        for x in range(5):
+            for y in range(36):
+                camera_noise.putpixel((x, y), (255, 255, 255))
+
+        analyzer.analyze("farmacia", quiet)
+        results = []
+        for index in range(6):
+            frame = camera_noise if index % 2 == 0 else quiet
+            results.append(analyzer.analyze("farmacia", frame))
+
+        self.assertTrue(results[-1]["calibrated"])
+        self.assertGreater(results[-1]["motion_threshold"], 0.04)
+        self.assertTrue(all(item["event"] is None for item in results))
+
+        movement = analyzer.analyze("farmacia", Image.new("RGB", (64, 36), "white"))
+        self.assertEqual(movement["event"]["event_type"], "motion_start")
+
 
 class IdentityMatcherTests(unittest.TestCase):
     def test_requires_margin_and_two_consecutive_matches(self):

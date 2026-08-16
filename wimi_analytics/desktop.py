@@ -31,6 +31,7 @@ def _status_text(value):
         "not_configured": "Não configurado",
         "waiting_for_data": "Aguardando dados",
         "ready": "Pronto",
+        "calibrating": "Calibrando",
         "idle": "Sem movimento",
         "unknown": "Desconhecido",
     }.get(str(value), str(value or "-").replace("_", " ").title())
@@ -46,6 +47,15 @@ def _event_text(value):
     }.get(value, value)
 
 
+def _connection_text(value):
+    return {
+        "wired": "Cabo",
+        "wireless": "Wi-Fi",
+        "virtual": "Virtual",
+        "unknown": "Não identificado",
+    }.get(str(value or "unknown"), "Não identificado")
+
+
 class AnalyticsDesktopWindow:
     REFRESH_MS = 3000
 
@@ -58,8 +68,11 @@ class AnalyticsDesktopWindow:
         face_service=None,
         camera_widgets=None,
         activate_cameras=None,
+        parent=None,
     ):
         self.root = root
+        self.parent = parent
+        self.embedded = parent is not None
         self.collector = collector
         self.store = store
         self.vision = vision
@@ -79,16 +92,22 @@ class AnalyticsDesktopWindow:
         self._enrollment_busy = False
         self._enrollment_thread = None
         self._enroll_button = None
+        self._responsive_labels = []
+        self._last_wraplength = None
 
     def show(self):
         if self._destroyed:
             return False
         if self.window is None or not self.window.winfo_exists():
             self._build()
+        elif self.embedded:
+            if not self.window.winfo_manager():
+                self.window.pack(fill="both", expand=True)
         else:
             self.window.deiconify()
-        self.window.lift()
-        self.window.focus_force()
+        if not self.embedded:
+            self.window.lift()
+            self.window.focus_force()
         self._drain_ui_actions()
         self.refresh()
         self._schedule_refresh()
@@ -97,7 +116,10 @@ class AnalyticsDesktopWindow:
     def hide(self):
         self._cancel_refresh()
         if self.window is not None and self.window.winfo_exists():
-            self.window.withdraw()
+            if self.embedded:
+                self.window.pack_forget()
+            else:
+                self.window.withdraw()
 
     def destroy(self):
         if threading.current_thread() is not threading.main_thread():
@@ -119,12 +141,16 @@ class AnalyticsDesktopWindow:
             pass
 
     def _build(self):
-        window = tk.Toplevel(self.root)
-        window.title("WIMI Analytics - Análise local do NVR")
-        window.geometry("1180x760")
-        window.minsize(980, 650)
-        window.configure(bg=BG)
-        window.protocol("WM_DELETE_WINDOW", self.hide)
+        if self.embedded:
+            window = tk.Frame(self.parent, bg=BG)
+            window.pack(fill="both", expand=True)
+        else:
+            window = tk.Toplevel(self.root)
+            window.title("WIMI Analytics - Análise local do NVR")
+            window.geometry("1180x760")
+            window.minsize(980, 650)
+            window.configure(bg=BG)
+            window.protocol("WM_DELETE_WINDOW", self.hide)
         self.window = window
 
         style = ttk.Style(window)
@@ -157,13 +183,13 @@ class AnalyticsDesktopWindow:
         )
         style.map("Wimi.Treeview", background=[("selected", "#17406E")])
 
-        header = tk.Frame(window, bg=BG, height=76)
-        header.pack(fill="x", padx=22, pady=(18, 8))
+        header = tk.Frame(window, bg=BG, height=62 if self.embedded else 76)
+        header.pack(fill="x", padx=18 if self.embedded else 22, pady=(10 if self.embedded else 18, 6))
         header.pack_propagate(False)
         tk.Label(
             header,
             text="WIMI Analytics",
-            font=("Segoe UI", 20, "bold"),
+            font=("Segoe UI", 17 if self.embedded else 20, "bold"),
             fg=TEXT,
             bg=BG,
         ).pack(anchor="w")
@@ -177,13 +203,15 @@ class AnalyticsDesktopWindow:
         self._labels["header_status"].pack(anchor="w", pady=(3, 0))
 
         self.notebook = ttk.Notebook(window, style="Wimi.TNotebook")
-        self.notebook.pack(fill="both", expand=True, padx=18, pady=(0, 18))
+        self.notebook.pack(fill="both", expand=True, padx=14 if self.embedded else 18, pady=(0, 12 if self.embedded else 18))
+        self.notebook.enable_traversal()
         self._build_overview_tab()
         self._build_cameras_tab()
         self._build_behavior_tab()
         self._build_network_tab()
         self._build_reports_tab()
         self._build_people_tab()
+        window.bind("<Configure>", self._on_resize, add="+")
 
     def _tab(self, title):
         frame = tk.Frame(self.notebook, bg=BG)
@@ -201,7 +229,7 @@ class AnalyticsDesktopWindow:
             bg=BG,
         ).pack(anchor="w")
         if subtitle:
-            tk.Label(
+            subtitle_label = tk.Label(
                 area,
                 text=subtitle,
                 font=("Segoe UI", 9),
@@ -209,7 +237,20 @@ class AnalyticsDesktopWindow:
                 bg=BG,
                 justify="left",
                 wraplength=920,
-            ).pack(anchor="w", pady=(3, 0))
+            )
+            subtitle_label.pack(anchor="w", pady=(3, 0))
+            self._responsive_labels.append(subtitle_label)
+
+    def _on_resize(self, event):
+        if event.widget is not self.window:
+            return
+        wraplength = max(420, min(1180, int(event.width) - 90))
+        if wraplength == self._last_wraplength:
+            return
+        self._last_wraplength = wraplength
+        for label in self._responsive_labels:
+            if label.winfo_exists():
+                label.configure(wraplength=wraplength)
 
     def _tree(self, parent, key, columns, widths, height=12):
         wrapper = tk.Frame(parent, bg=BG)
@@ -349,13 +390,14 @@ class AnalyticsDesktopWindow:
             (
                 ("when", "Data e hora"),
                 ("state", "Estado"),
+                ("connection", "Conexão"),
                 ("interfaces", "Interfaces ativas"),
                 ("received", "Recepção"),
                 ("sent", "Envio"),
                 ("errors", "Erros/desc. acum."),
                 ("coverage", "Cobertura"),
             ),
-            (165, 100, 110, 110, 110, 120, 250),
+            (155, 90, 105, 95, 100, 100, 115, 220),
             height=14,
         )
 
@@ -501,9 +543,15 @@ class AnalyticsDesktopWindow:
         face = self.face_service
         status = getattr(face, "status", "not_configured") if face else "not_configured"
         active_count = sum(1 for value in vision.values() if value.get("state") == "active")
+        calibrating_count = sum(
+            1 for value in vision.values() if value.get("state") == "calibrating"
+        )
         self._labels["vision_status"].configure(
-            text=f"Análise ativa: {active_count}/{len(names)} | Rostos: {_status_text(status)}",
-            fg=GREEN if active_count else YELLOW,
+            text=(
+                f"Análise ativa: {active_count}/{len(names)} | "
+                f"Calibrando: {calibrating_count} | Rostos: {_status_text(status)}"
+            ),
+            fg=GREEN if active_count and not calibrating_count else YELLOW,
         )
 
     def _refresh_behavior(self):
@@ -539,32 +587,66 @@ class AnalyticsDesktopWindow:
     def _refresh_network(self, payload):
         network = payload.get("network") or {}
         connectivity = network.get("connectivity") or {}
+        connection = _connection_text(connectivity.get("primary_connection_type"))
+        link_details = ", ".join(
+            " ".join(
+                part
+                for part in (item.get("alias"), item.get("link_speed"))
+                if part
+            )
+            for item in (network.get("interfaces") or [])[:3]
+        )
+        samples = self.store.list_network_samples(limit=200)
+        recent_faults = samples[0].get("error_delta") if samples else None
+        recent_reset = bool(samples and samples[0].get("counter_reset_detected"))
+        if recent_reset:
+            fault_summary = "contadores reiniciados; variação inconclusiva"
+        elif recent_faults is None:
+            fault_summary = "comparação aguardando próxima amostra"
+        elif recent_faults:
+            fault_summary = f"+{recent_faults} erro(s)/descarte(s) desde a amostra anterior"
+        else:
+            fault_summary = "sem novos erros/descartes na última amostra"
         self._labels["network_summary"].configure(
             text=(
-                f"{_status_text(network.get('state'))} | Interfaces ativas: "
+                f"{_status_text(network.get('state'))} | Conexão: {connection} | Interfaces ativas: "
                 f"{connectivity.get('active_interface_count', 0)} | "
+                f"{link_details or 'velocidade não informada'} | "
+                f"{fault_summary} | "
                 f"Cobertura: {network.get('coverage', 'nenhuma')}"
             ),
-            fg=GREEN if network.get("state") == "active" else YELLOW,
+            fg=(
+                GREEN
+                if network.get("state") == "active" and not recent_faults and not recent_reset
+                else YELLOW
+            ),
         )
         rows = []
-        for index, item in enumerate(self.store.list_network_samples(limit=200)):
+        for index, item in enumerate(samples):
             received_rate = item.get("received_bytes_per_second")
             sent_rate = item.get("sent_bytes_per_second")
             errors = sum(
                 int(item.get(key) or 0)
                 for key in ("received_errors", "sent_errors", "received_discarded", "sent_discarded")
             )
+            error_delta = item.get("error_delta")
+            if item.get("counter_reset_detected"):
+                error_text = f"{errors} | reiniciado"
+            elif error_delta is not None:
+                error_text = f"{errors} | +{error_delta}"
+            else:
+                error_text = f"{errors} | aguardando"
             rows.append(
                 (
                     f"network-{index}",
                     (
                         item.get("collected_at", "-"),
                         _status_text(item.get("state")),
+                        _connection_text(item.get("primary_connection_type")),
                         item.get("active_interface_count", 0),
                         f"{received_rate * 8 / 1000:.1f} kbit/s" if received_rate is not None else "Aguardando",
                         f"{sent_rate * 8 / 1000:.1f} kbit/s" if sent_rate is not None else "Aguardando",
-                        errors,
+                        error_text,
                         item.get("coverage", "-"),
                     ),
                 )

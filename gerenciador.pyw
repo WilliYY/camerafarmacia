@@ -2667,6 +2667,20 @@ class CameraManagerApp:
         style.theme_use("clam")
         style.configure(".", background=BG_COLOR, foreground=TEXT_COLOR)
         style.configure("TLabel", background=BG_COLOR, foreground=TEXT_COLOR, font=("Segoe UI", 10))
+        style.configure("Main.TNotebook", background=BG_COLOR, borderwidth=0, tabmargins=(14, 0, 0, 0))
+        style.configure(
+            "Main.TNotebook.Tab",
+            background="#111827",
+            foreground="#9CA3AF",
+            padding=(20, 9),
+            borderwidth=0,
+            font=("Segoe UI", 10, "bold"),
+        )
+        style.map(
+            "Main.TNotebook.Tab",
+            background=[("selected", "#1F2937"), ("active", "#172033")],
+            foreground=[("selected", TEXT_COLOR), ("active", "#D1D5DB")],
+        )
         
         # Estilo escuro para o Combobox do TTK
         style.configure(
@@ -2796,9 +2810,36 @@ class CameraManagerApp:
         )
         self.hdr_pill_brain.pack(side="right", padx=(6, 0))
 
+        self.main_notebook = ttk.Notebook(self.root, style="Main.TNotebook")
+        self.main_notebook.pack(fill="both", expand=True, padx=10, pady=(1, 5))
+        self.main_notebook.enable_traversal()
+        self.camera_page = tk.Frame(self.main_notebook, bg=BG_COLOR)
+        self.analytics_page = tk.Frame(self.main_notebook, bg=BG_COLOR)
+        self.main_notebook.add(self.camera_page, text="  Câmeras  ")
+        self.main_notebook.add(self.analytics_page, text="  Análises  ")
+        self.main_notebook.bind("<<NotebookTabChanged>>", self.on_main_tab_changed)
+
+        self.analytics_placeholder = tk.Frame(self.analytics_page, bg=BG_COLOR)
+        self.analytics_placeholder.pack(fill="both", expand=True)
+        tk.Label(
+            self.analytics_placeholder,
+            text="Análises operacionais",
+            font=("Segoe UI", 18, "bold"),
+            fg=TEXT_COLOR,
+            bg=BG_COLOR,
+        ).pack(pady=(80, 8))
+        self.lbl_analytics_placeholder = tk.Label(
+            self.analytics_placeholder,
+            text="Preparando histórico, rede e visão local...",
+            font=("Segoe UI", 10),
+            fg=TEXT_MUTED,
+            bg=BG_COLOR,
+        )
+        self.lbl_analytics_placeholder.pack()
+
         # Container principal dividido em duas colunas (Esquerda e Direita)
-        split_container = tk.Frame(self.root, bg=BG_COLOR)
-        split_container.pack(fill="both", expand=True, padx=10, pady=5)
+        split_container = tk.Frame(self.camera_page, bg=BG_COLOR)
+        split_container.pack(fill="both", expand=True, pady=5)
         
         left_col = tk.Frame(split_container, bg=BG_COLOR, width=430)
         left_col.pack(side="left", fill="both", expand=False)
@@ -2883,7 +2924,7 @@ class CameraManagerApp:
         for idx, stream in enumerate(self.streams):
             # Wrapper
             card_wrapper = tk.Frame(self.cameras_main_frame, bg=BG_COLOR, bd=0)
-            card_wrapper.pack(side="top", fill="x", pady=5)
+            card_wrapper.pack(side="top", fill="x", pady=3)
             
             # Stripe lateral (verde esmeralda para câmeras)
             accent_bar = tk.Frame(card_wrapper, bg="#10B981", width=4)
@@ -2897,7 +2938,7 @@ class CameraManagerApp:
                 highlightbackground="#1F2232", 
                 highlightthickness=1, 
                 padx=15, 
-                pady=10
+                pady=7
             )
             card.pack(side="left", fill="x", expand=True)
             self.setup_card_hover_glow(card, "#10B981")
@@ -2911,17 +2952,17 @@ class CameraManagerApp:
                 fg=ACCENT_COLOR,
                 bg=CARD_COLOR,
             )
-            lbl_title.pack(anchor="w", pady=(0, 6))
+            lbl_title.pack(anchor="w", pady=(0, 4))
             
             # Novo Grid de Status (Pílulas/Badges)
-            grid_frame = tk.Frame(card, bg=CARD_COLOR, pady=6)
-            grid_frame.pack(fill="x", pady=(2, 6))
+            grid_frame = tk.Frame(card, bg=CARD_COLOR, pady=3)
+            grid_frame.pack(fill="x", pady=(1, 3))
             grid_frame.columnconfigure((0, 1, 2), weight=1)
             
             # Coluna 0: Sinal
             col_sinal = tk.Frame(grid_frame, bg=CARD_COLOR)
             col_sinal.grid(row=0, column=0, sticky="nsew")
-            tk.Label(col_sinal, text="SINAL", font=("Segoe UI", 7, "bold"), fg=TEXT_MUTED, bg=CARD_COLOR).pack(anchor="center", pady=(0, 4))
+            tk.Label(col_sinal, text="SINAL", font=("Segoe UI", 7, "bold"), fg=TEXT_MUTED, bg=CARD_COLOR).pack(anchor="center", pady=(0, 2))
             
             sinal_badge_frame = tk.Frame(col_sinal, bg=CARD_COLOR)
             sinal_badge_frame.pack(anchor="center")
@@ -2933,7 +2974,7 @@ class CameraManagerApp:
             # Coluna 1: Gravação
             col_grav = tk.Frame(grid_frame, bg=CARD_COLOR)
             col_grav.grid(row=0, column=1, sticky="nsew")
-            tk.Label(col_grav, text="GRAVAÇÃO", font=("Segoe UI", 7, "bold"), fg=TEXT_MUTED, bg=CARD_COLOR).pack(anchor="center", pady=(0, 4))
+            tk.Label(col_grav, text="GRAVAÇÃO", font=("Segoe UI", 7, "bold"), fg=TEXT_MUTED, bg=CARD_COLOR).pack(anchor="center", pady=(0, 2))
             
             grav_badge_frame = tk.Frame(col_grav, bg=CARD_COLOR)
             grav_badge_frame.pack(anchor="center")
@@ -2945,7 +2986,7 @@ class CameraManagerApp:
             # Coluna 2: Transmissão
             col_web = tk.Frame(grid_frame, bg=CARD_COLOR)
             col_web.grid(row=0, column=2, sticky="nsew")
-            tk.Label(col_web, text="TRANSMISSÃO", font=("Segoe UI", 7, "bold"), fg=TEXT_MUTED, bg=CARD_COLOR).pack(anchor="center", pady=(0, 4))
+            tk.Label(col_web, text="TRANSMISSÃO", font=("Segoe UI", 7, "bold"), fg=TEXT_MUTED, bg=CARD_COLOR).pack(anchor="center", pady=(0, 2))
             
             web_badge_frame = tk.Frame(col_web, bg=CARD_COLOR)
             web_badge_frame.pack(anchor="center")
@@ -2963,15 +3004,15 @@ class CameraManagerApp:
                 anchor="w",
                 justify="left",
             )
-            lbl_activity.pack(fill="x", pady=(1, 2))
+            lbl_activity.pack(fill="x", pady=(0, 1))
             
             # Linha divisória sutil
             divider = tk.Frame(card, bg="#1F2232", height=1)
-            divider.pack(fill="x", pady=6)
+            divider.pack(fill="x", pady=4)
             
             # Última gravação/Sync (com fonte monospace menor e visual limpo)
             lbl_sync = tk.Label(card, text="Buscando...", font=("Consolas", 8), fg=TEXT_MUTED, bg=CARD_COLOR, justify="left", wraplength=380)
-            lbl_sync.pack(fill="x", pady=(2, 0), anchor="w")
+            lbl_sync.pack(fill="x", pady=(0, 0), anchor="w")
             
             # Salva referências para atualização
             self.camera_cards[stream] = {
@@ -3029,23 +3070,6 @@ class CameraManagerApp:
         )
         self.btn_open_folder.pack(fill="x", padx=4, pady=2)
         self.setup_button_hover(self.btn_open_folder, "#1F2937", "#374151")
-
-        self.btn_wimi_panel = tk.Button(
-            actions_frame,
-            text=" ▦ Painel WIMI: INICIANDO ",
-            font=("Segoe UI", 9, "bold"),
-            fg=TEXT_COLOR,
-            bg="#1F2937",
-            activebackground="#374151",
-            activeforeground=TEXT_COLOR,
-            bd=0,
-            cursor="hand2",
-            padx=10,
-            pady=5,
-            command=self.open_wimi_analytics,
-        )
-        self.btn_wimi_panel.pack(fill="x", padx=4, pady=2)
-        self.setup_button_hover(self.btn_wimi_panel, "#1F2937", "#374151")
 
         # Inicialização automática
         startup_frame = tk.Frame(left_col, bg=BG_COLOR, pady=2)
@@ -6402,17 +6426,39 @@ class CameraManagerApp:
             self.flash_button(self.btn_monitor, "🌐 Abrindo...", "#3B82F6")
 
     def set_wimi_panel_status(self, status, detail=None):
-        if not hasattr(self, "btn_wimi_panel") or getattr(self, "_shutdown_executed", False):
+        if getattr(self, "_shutdown_executed", False):
             return
-        styles = {
-            "starting": (" ▦ Painel WIMI: INICIANDO ", "#1F2937", "#CBD5E1"),
-            "active": (" ▦ Painel WIMI: ATIVO ", "#065F46", "#34D399"),
-            "error": (" ▦ Painel WIMI: ATENÇÃO ", "#7F1D1D", "#FCA5A5"),
+        tab_labels = {
+            "starting": "  Análises (carregando)  ",
+            "active": "  Análises  ",
+            "error": "  Análises (atenção)  ",
         }
-        text, background, foreground = styles.get(status, styles["error"])
-        self.btn_wimi_panel.configure(text=text, bg=background, fg=foreground)
-        if detail:
-            self.btn_wimi_panel.configure(takefocus=True)
+        notebook = getattr(self, "main_notebook", None)
+        analytics_page = getattr(self, "analytics_page", None)
+        if notebook is not None and analytics_page is not None:
+            try:
+                notebook.tab(analytics_page, text=tab_labels.get(status, tab_labels["error"]))
+            except tk.TclError:
+                pass
+        placeholder = getattr(self, "lbl_analytics_placeholder", None)
+        if placeholder is not None and placeholder.winfo_exists():
+            messages = {
+                "starting": "Preparando histórico, rede e visão local...",
+                "active": "Análises locais prontas.",
+                "error": f"Análises indisponíveis: {detail or 'verifique o log do sistema.'}",
+            }
+            placeholder.configure(
+                text=messages.get(status, messages["error"]),
+                fg=GREEN_COLOR if status == "active" else ORANGE_COLOR,
+            )
+
+    def on_main_tab_changed(self, _event=None):
+        notebook = getattr(self, "main_notebook", None)
+        analytics_page = getattr(self, "analytics_page", None)
+        if notebook is None or analytics_page is None:
+            return
+        if notebook.select() == str(analytics_page):
+            self.open_wimi_analytics()
 
     def start_wimi_analytics(self, open_panel=False):
         if getattr(self, "_analytics_shutdown", False) or getattr(self, "_shutdown_executed", False):
@@ -6523,15 +6569,25 @@ class CameraManagerApp:
         if getattr(self, "_shutdown_executed", False):
             return
         self.set_wimi_panel_status("active")
-        if open_panel:
+        analytics_selected = (
+            hasattr(self, "main_notebook")
+            and self.main_notebook.select() == str(getattr(self, "analytics_page", ""))
+        )
+        if open_panel or analytics_selected:
             self.open_wimi_analytics()
 
     def open_wimi_analytics(self):
+        if hasattr(self, "main_notebook") and hasattr(self, "analytics_page"):
+            self.main_notebook.select(self.analytics_page)
         if getattr(self, "_analytics_collector", None) is None:
             self.start_wimi_analytics(open_panel=True)
             return
         if self._analytics_window is None:
             from wimi_analytics.desktop import AnalyticsDesktopWindow
+
+            placeholder = getattr(self, "analytics_placeholder", None)
+            if placeholder is not None and placeholder.winfo_exists():
+                placeholder.pack_forget()
 
             self._analytics_window = AnalyticsDesktopWindow(
                 self.root,
@@ -6541,6 +6597,7 @@ class CameraManagerApp:
                 face_service=self._face_service,
                 camera_widgets=self.camera_widgets,
                 activate_cameras=self.activate_wimi_camera_analysis,
+                parent=self.analytics_page,
             )
         self._analytics_window.show()
 
@@ -6589,21 +6646,25 @@ class CameraManagerApp:
         face = getattr(self, "_face_service", None)
         snapshots = vision.snapshot() if vision is not None else {}
         active = sum(1 for item in snapshots.values() if item.get("state") == "active")
+        calibrating = sum(1 for item in snapshots.values() if item.get("state") == "calibrating")
         if vision is None or not vision.running:
             vision_status = "warning"
             vision_detail = "Worker local indisponivel"
-        elif active:
+        elif active or calibrating:
             vision_status = "active" if getattr(face, "available", False) else "limited"
             face_status = str(getattr(face, "status", "indisponivel")).replace("_", " ")
-            vision_detail = f"Movimento ativo em {active} camera(s); reconhecimento facial {face_status}"
+            vision_detail = (
+                f"Visao ativa em {active} camera(s), calibrando {calibrating}; "
+                f"reconhecimento facial {face_status}"
+            )
         else:
             vision_status = "limited"
             vision_detail = "Worker ativo; aguardando preview de camera"
         return {
             "analytics": {
                 "status": "active",
-                "detail": "Painel desktop nativo e historico local ativos",
-                "mode": "native",
+                "detail": "Aba nativa integrada e historico local ativos",
+                "mode": "native_embedded",
             },
             "vision": {"status": vision_status, "detail": vision_detail},
             "computers": {
