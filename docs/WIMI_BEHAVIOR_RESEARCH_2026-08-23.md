@@ -24,6 +24,31 @@ gravacao.
   atuais.
 - ONNX Runtime: runtime MIT eficiente, mas duplicaria a camada de inferencia que
   o OpenCV DNN ja fornece neste projeto.
+- Ultralytics YOLO: conjunto amplo e ativo, mas requer PyTorch no pacote Python
+  e usa AGPL-3.0 ou licenca Enterprise. Aumentaria instalacao, consumo e
+  obrigacoes sem necessidade para a contagem agregada atual.
+- OpenVINO: runtime Apache-2.0 forte para CPU, GPU Intel e NPU. Continua como
+  candidato de otimizacao, mas so deve substituir o OpenCV DNN se um benchmark
+  no PC do NVR demonstrar ganho relevante e estabilidade equivalente.
+
+## Parecer de selecao
+
+Para o requisito atual, OpenCV Zoo NanoDet continua sendo o melhor encaixe, nao
+o detector universalmente mais preciso. Ele reutiliza o runtime ja isolado,
+mantem o modelo quantizado em 1.123.958 bytes e possui licenca permissiva. O
+proprio resultado oficial informa AP50 de 67,5 para `person` e desempenho menor
+em objetos pequenos; por isso a deteccao e uma metrica auxiliar, nunca prova de
+identidade, produtividade ou seguranca.
+
+A integracao fixa o commit do OpenCV Zoo, tamanho e SHA-256. Falha, ausencia ou
+incompatibilidade do modelo degrada somente a metrica de pessoas e nao bloqueia
+gravacao, painel, movimento ou reconhecimento facial. Nao existe atualizacao
+automatica a partir de `main`.
+
+ByteTrack passa a ser considerado somente quando houver necessidade validada de
+trajetorias individuais. ONNX Runtime ou OpenVINO entram apenas depois de
+benchmark comparativo no hardware real. Ultralytics nao deve ser incorporado
+sem uma decisao explicita de licenca e um teste de carga prolongado.
 
 ## Decisao implementada
 
@@ -82,3 +107,5 @@ gravacao.
 - https://github.com/FoundationVision/ByteTrack
 - https://github.com/roboflow/supervision
 - https://github.com/microsoft/onnxruntime
+- https://github.com/ultralytics/ultralytics
+- https://github.com/openvinotoolkit/openvino

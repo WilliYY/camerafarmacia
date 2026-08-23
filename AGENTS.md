@@ -37,6 +37,23 @@ pedido interpretado antes de editar.
 8. Depois da validacao, crie um commit contendo somente os arquivos da tarefa,
    salvo quando o usuario pedir explicitamente para nao commitar.
 
+## Dependencias, modelos e repositorios externos
+
+- Antes de integrar algo do GitHub, compare pelo menos duas opcoes oficiais
+  viaveis. Avalie manutencao, estado de arquivamento, licenca para o uso real,
+  seguranca, compatibilidade com Windows e hardware, consumo, portabilidade,
+  complexidade operacional e modos de falha.
+- "Melhor" significa a opcao de menor risco que atende ao requisito medido, e
+  nao o repositorio com mais estrelas, recursos ou novidade.
+- Fixe versao, release ou commit. Para modelos e binarios, fixe tambem tamanho e
+  SHA-256, mantenha aviso de licenca e torne a instalacao reproduzivel.
+- Dependencias opcionais de analise devem falhar em modo degradado. Gravacao,
+  sincronizacao, armazenamento e encerramento nao podem depender delas.
+- Nao acompanhe `main`, nao substitua dependencias automaticamente em operacao e
+  nao baixe codigo executavel no caminho 24h. Atualize deliberadamente somente
+  depois de revisar licenca, seguranca e mudancas, testar em diretorio temporario
+  e comparar CPU, memoria, disco e resultados com a versao anterior.
+
 ## Protocolo de teste real
 
 Quando a mudanca afetar gravacao, streams, go2rtc, encerramento, energia ou
