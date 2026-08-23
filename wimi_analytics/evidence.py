@@ -19,8 +19,8 @@ class AnonymizedEvidenceArchive:
         retention_days=10,
         min_interval_seconds=900,
         max_total_bytes=256 * 1024 * 1024,
-        max_image_size=(960, 540),
-        jpeg_quality=72,
+        max_image_size=(1280, 720),
+        jpeg_quality=82,
     ):
         self.store = store
         self.root = Path(root).resolve()
@@ -98,9 +98,10 @@ class AnonymizedEvidenceArchive:
             )
         else:
             output = source.copy()
+        context_pixel_size = 12
         context_size = (
-            max(1, output.width // 24),
-            max(1, output.height // 24),
+            max(1, output.width // context_pixel_size),
+            max(1, output.height // context_pixel_size),
         )
         output = output.resize(context_size, Image.Resampling.BOX).resize(
             output.size, Image.Resampling.NEAREST
@@ -189,7 +190,7 @@ class AnonymizedEvidenceArchive:
                         "relative_path": relative_path,
                         "byte_count": len(protected),
                         "face_count": int(face_count),
-                        "anonymization": "full_frame_pixelated_faces_flattened",
+                        "anonymization": "balanced_context_pixelated_faces_flattened_v3",
                     }
                 )
             except Exception as error:

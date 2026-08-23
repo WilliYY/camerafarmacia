@@ -444,7 +444,7 @@ def build_readiness(nvr, network, modules, report, runtime=None):
         strengths.append(_finding(
             "vision_local_active",
             "Visao computacional local ativa",
-            "Movimento e rostos sao processados localmente sem salvar imagens.",
+            "Movimento, pessoas e rostos sao processados localmente sem enviar imagens.",
             "modules.vision=active",
         ))
 

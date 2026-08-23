@@ -35,13 +35,15 @@ sensivel.
    amostra por segundo por camera. Quadros antigos sao descartados.
 8. Movimento funciona com Pillow e nao depende de modelo. Cada camera passa por
    calibracao local limitada antes dos alertas; o limiar adaptativo tem piso,
-   teto, janela finita e nao aprende mudancas grandes como ruido. Rosto e
-   identidade usam OpenCV YuNet/SFace somente quando dependencia e modelos
-   verificados estiverem presentes.
+   teto, janela finita e nao aprende mudancas grandes como ruido. Pessoa usa o
+   NanoDet quantizado do OpenCV Zoo no maximo a cada cinco segundos; rosto e
+   identidade usam YuNet/SFace. Todos ficam opcionais e so carregam quando o
+   runtime e os modelos com SHA-256 aprovado estiverem presentes.
 9. Cadastro facial e manual, consentido e exige exatamente um rosto. Nenhuma
    imagem identificavel e salva; somente o vetor biometrico protegido pelo
-   DPAPI do Windows. Capturas operacionais pixelizam o quadro inteiro e achatam
-   todos os rostos detectados antes de qualquer persistencia; nao recebem identidade.
+   DPAPI do Windows. Capturas operacionais preservam ate `1280x720` em JPEG 82,
+   pixelizam o contexto em blocos de 12 pixels e achatam todos os rostos
+   detectados antes de qualquer persistencia; nao recebem identidade.
 10. Uma identidade so e exibida apos correspondencia acima do limiar, margem
     contra o segundo candidato e confirmacao em amostras consecutivas.
 11. A visao pausa se a protecao de hardware bloquear manutencao pesada, se a
@@ -65,8 +67,9 @@ Tabelas versionadas:
   privado, identificador pseudonimo, primeiro/ultimo sinal e duracao observada;
 - `local_application_sessions`: aplicativos deste PC com TCP estabelecido,
   inicio/ultimo sinal, duracao observada e pico de conexoes;
-- `vision_events`: inicio/fim de movimento, contagem de rostos, falha limitada e
-  presenca confirmada, sem imagem;
+- `vision_events`: inicio/fim de movimento, contagem de rostos e pessoas,
+  inicio/fim de presenca observada, falha limitada e presenca consentida
+  confirmada, sem imagem;
 - `evidence_snapshots`: indice sem nome ou perfil para capturas de atendimento
   descaracterizadas e cifradas em diretorio separado.
 
@@ -84,6 +87,11 @@ cada 15 minutos por camera e teto de 256 MB. A falta de caixas completas para
 todos os rostos impede a persistencia. Ao atingir o teto, a coleta visual para
 sem remover itens ainda dentro do prazo. O painel mostra a expiracao e oferece
 exclusao manual; nenhum item guarda `profile_id`, nome ou face identificavel.
+
+A analise de comportamento e agregada por camera. Duas amostras consecutivas
+sem pessoa encerram uma presenca observada; falta de amostra ou modelo
+indisponivel e estado inconclusivo e nao encerra sessao. Nao existe nesta fase
+tracking individual, inferencia de emocao, intencao ou produtividade.
 
 ## Interface nativa
 
@@ -159,6 +167,16 @@ Nesta evolucao, um ensaio adicional de 42 segundos validou dois videos sem novo
 `Kernel_144` e sem residuos. A visao real tambem colocou as duas cameras Online,
 concluiu a calibracao adaptativa em cerca de 30 segundos e chegou a Ativo 2/2,
 com memoria abaixo de 251 MB.
+
+Em 23/08/2026, a evolucao de evidencias e comportamento passou por novo ensaio
+real controlado de 60 segundos. As duas cameras ficaram Online, dois arquivos TS
+finais foram decodificados pelo FFmpeg com retorno zero e sem erro de
+decodificacao, o HD permaneceu disponivel, nao houve novo `Kernel_144` e nao
+restaram processos, travas ou temporarios de publicacao. O detector de pessoas
+tambem processou um quadro real `2304x1296` em 177,7 ms na CPU. O FFmpeg emitiu
+avisos de DTS nao monotono ao encaminhar os quadros ao muxer nulo; a observacao
+foi preservada para uma auditoria futura de timestamps e nao foi tratada como
+prova de corrupcao.
 
 Antes do teste real: confirmar uma unica instancia, baseline de discos,
 processos e Kernel_144. Interromper se surgir novo Kernel_144, se o HD sair, se

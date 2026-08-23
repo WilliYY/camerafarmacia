@@ -85,8 +85,10 @@ reinicia o NVR, o coletor, a visao ou o banco local.
 
 O historico persistente usa SQLite em `sistema/analytics/`, fora do HD de
 gravacoes. A visao reutiliza o preview existente, calibra de forma limitada o
-ruido de movimento de cada camera e nunca cria perfis faciais sozinha. Cadastro
-de identidade continua manual e consentido.
+ruido de movimento de cada camera e, a cada cinco segundos, mede contagem de
+pessoas, pico, variacao visual e permanencia observada com NanoDet local. Ela nunca
+cria perfis faciais sozinha; o cadastro de identidade continua manual e
+consentido.
 
 A aba Pessoas ordena somente os perfis consentidos por visitas e tempo observado
 estimado. Confirmacoes simultaneas em cameras diferentes nao dobram o tempo e
@@ -100,8 +102,9 @@ restaurar perfis cuja autorizacao possa ter sido revogada. A exclusao e a
 compactacao rodam fora do thread da interface; se a compactacao falhar, uma
 pendencia persistente faz nova tentativa na proxima abertura.
 
-A aba Comportamento resume apenas fatos observaveis, como movimento, duracao e
-contagem de rostos. Nao classifica emocao, intencao, honestidade ou produtividade.
+A aba Comportamento resume apenas fatos observaveis, como variacao visual,
+duracao e contagem estimada de pessoas. Nao classifica emocao, intencao,
+honestidade ou produtividade.
 
 A aba Rede identifica o tipo de conexao deste PC, velocidade do link, resposta
 do gateway, contadores, variacoes entre amostras e picos relativos ao historico
@@ -214,15 +217,22 @@ python tools\setup_wimi_vision.py --verify-only
 O cadastro facial exige consentimento explicito e um quadro recente com
 exatamente um rosto. Nenhuma imagem identificavel e salva: nome e vetor ficam
 juntos em um banco biometrico separado, protegido pelo DPAPI do Windows.
-Capturas de atendimento usam apenas deteccoes com caixas completas, pixelizam o
-quadro inteiro e achatam todos os rostos detectados antes da persistencia. Sao cifradas com DPAPI e
-ficam limitadas a 256 MB. O painel informa a exclusao automatica em 10 dias e
-oferece exclusao manual; as capturas nao recebem nome nem `profile_id`.
-Movimento, contagem
-de rostos e reconhecimento sao evidencias para revisao humana, nao inferencias
-de emocao, intencao ou produtividade. A adaptacao automatica aprende somente o
-ruido visual de fundo dentro de janela e limites fixos; nao altera gravacao,
-retencao, camera, rede ou identidade.
+Capturas de atendimento usam apenas deteccoes com caixas completas, preservam
+um quadro de contexto de ate `1280x720` em JPEG 82, aplicam pixelizacao global
+equilibrada em blocos de 12 pixels e achatam todos os rostos detectados antes da
+persistencia. Sao cifradas com DPAPI e ficam limitadas a 256 MB. O painel informa
+a exclusao automatica em 10 dias e oferece exclusao manual; as capturas nao
+recebem nome nem `profile_id`. Capturas antigas nao sao reprocessadas.
+
+O NanoDet quantizado do OpenCV Zoo usa o mesmo quadro do preview, sem nova
+conexao com a camera, e roda no maximo uma vez a cada cinco segundos por camera.
+A aba Comportamento persiste somente contagem estabilizada, inicio e fim de
+presenca confirmada, pico e permanencia observada. A intensidade de variacao
+visual aparece apenas no estado atual da camera. Esses sinais,
+assim como rostos e reconhecimento consentido, exigem revisao humana e nao
+inferem emocao, intencao, desonestidade ou produtividade. A adaptacao automatica
+aprende somente o ruido visual de fundo dentro de janela e limites fixos; nao
+altera gravacao, retencao, camera, rede ou identidade.
 
 A aba Rede registra sessoes dos adaptadores deste computador, dispositivos
 vistos na LAN e aplicativos com TCP estabelecido neste PC: inicio, ultimo sinal,

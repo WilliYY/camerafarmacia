@@ -1335,6 +1335,9 @@ class AnalyticsStore:
             "motion_start",
             "motion_end",
             "face_count",
+            "person_count",
+            "observed_presence_start",
+            "observed_presence_end",
             "presence_confirmed",
             "analysis_error",
         }

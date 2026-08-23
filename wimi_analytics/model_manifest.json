@@ -17,6 +17,13 @@
       "size": 38696353,
       "url": "https://media.githubusercontent.com/media/opencv/opencv_zoo/47534e27c9851bb1128ccc0102f1145e27f23f98/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
       "license": "Apache-2.0"
+    },
+    "nanodet_person": {
+      "filename": "object_detection_nanodet_2022nov_int8bq.onnx",
+      "sha256": "8a2c877cc6f09e7dfac7a9066e33ee5ae68de530b3b994f6ee9125cff6e34d3f",
+      "size": 1123958,
+      "url": "https://media.githubusercontent.com/media/opencv/opencv_zoo/47534e27c9851bb1128ccc0102f1145e27f23f98/models/object_detection_nanodet/object_detection_nanodet_2022nov_int8bq.onnx",
+      "license": "Apache-2.0"
     }
   }
 }

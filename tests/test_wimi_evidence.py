@@ -1,3 +1,4 @@
+import io
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -37,6 +38,10 @@ class AnonymizedEvidenceArchiveTests(unittest.TestCase):
     @staticmethod
     def patterned_frame():
         image = Image.new("RGB", (320, 180), "#17324D")
+        for x in range(0, 72):
+            for y in range(0, 72):
+                value = 225 if ((x // 8) + (y // 8)) % 2 else 25
+                image.putpixel((x, y), (value, value, value))
         for x in range(80, 160):
             for y in range(40, 120):
                 value = 255 if (x + y) % 2 else 0
@@ -61,7 +66,7 @@ class AnonymizedEvidenceArchiveTests(unittest.TestCase):
         self.assertEqual(rows[0]["expires_at"], "2026-08-26T10:00:00")
         self.assertEqual(
             rows[0]["anonymization"],
-            "full_frame_pixelated_faces_flattened",
+            "balanced_context_pixelated_faces_flattened_v3",
         )
         self.assertNotIn("profile", str(rows).casefold())
         self.assertNotIn("name", str(rows).casefold())
@@ -74,6 +79,38 @@ class AnonymizedEvidenceArchiveTests(unittest.TestCase):
         original_variance = sum(ImageStat.Stat(source.crop((80, 40, 160, 120))).stddev)
         restored_variance = sum(ImageStat.Stat(restored.crop((80, 40, 160, 120))).stddev)
         self.assertLess(restored_variance, original_variance * 0.35)
+        context_variance = sum(ImageStat.Stat(restored.crop((0, 0, 72, 72))).stddev)
+        self.assertGreater(context_variance, 45)
+
+    def test_global_pixelation_reduces_detail_outside_detected_face_boxes(self):
+        source = Image.new("RGB", (120, 120), "black")
+        for x in range(source.width):
+            for y in range(source.height):
+                value = 255 if (x + y) % 2 else 0
+                source.putpixel((x, y), (value, value, value))
+
+        jpeg = self.archive._anonymized_jpeg(source, face_boxes=[], face_count=0)
+        with Image.open(io.BytesIO(jpeg)) as image:
+            image.load()
+            restored = image.convert("RGB")
+
+        original_variance = sum(ImageStat.Stat(source).stddev)
+        restored_variance = sum(ImageStat.Stat(restored).stddev)
+        self.assertLess(restored_variance, original_variance * 0.15)
+
+    def test_large_capture_keeps_720p_context_without_upscaling(self):
+        source = Image.new("RGB", (1920, 1080), "#17324D")
+
+        evidence_id = self.archive.capture(
+            "farmacia",
+            source,
+            face_boxes=[(720, 240, 240, 240)],
+            face_count=1,
+            captured_at=datetime(2026, 8, 16, 10, 0, 0),
+        )
+
+        restored = self.archive.read_image(evidence_id)
+        self.assertEqual(restored.size, (1280, 720))
 
     def test_refuses_capture_without_complete_face_boxes(self):
         image = self.patterned_frame()

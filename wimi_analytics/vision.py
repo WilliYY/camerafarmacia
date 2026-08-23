@@ -128,8 +128,12 @@ class MotionAnalyzer:
                     "duration_seconds": max(0.0, (occurred_at - started_at).total_seconds()),
                 }
         state["previous"] = current
+        motion_duration = 0.0
+        if state["motion"] and state["started_at"] is not None:
+            motion_duration = max(0.0, (occurred_at - state["started_at"]).total_seconds())
         return {
             "motion": "active" if state["motion"] else "idle",
+            "motion_duration_seconds": round(motion_duration, 1),
             "changed_ratio": round(changed_ratio, 4),
             "motion_threshold": round(effective_threshold, 4),
             "calibrated": calibrated,
@@ -138,6 +142,209 @@ class MotionAnalyzer:
             ),
             "event": event,
         }
+
+
+class BehaviorAnalyzer:
+    def __init__(
+        self,
+        end_observations=2,
+        start_observations=2,
+        count_observations=2,
+        observation_timeout_seconds=15.0,
+    ):
+        self.end_observations = max(1, min(int(end_observations), 12))
+        self.start_observations = max(1, min(int(start_observations), 12))
+        self.count_observations = max(1, min(int(count_observations), 12))
+        self.observation_timeout_seconds = max(
+            1.0, min(float(observation_timeout_seconds), 300.0)
+        )
+        self._states = {}
+
+    @staticmethod
+    def _activity_level(motion):
+        if motion.get("motion") != "active":
+            return "quiet"
+        threshold = max(0.0001, float(motion.get("motion_threshold") or 0.0001))
+        relative_change = max(0.0, float(motion.get("changed_ratio") or 0.0)) / threshold
+        if relative_change >= 2.5:
+            return "high"
+        if relative_change >= 1.25:
+            return "moderate"
+        return "low"
+
+    def analyze(self, stream, motion, person_count=None, occurred_at=None):
+        occurred_at = occurred_at or datetime.now()
+        state = self._states.setdefault(
+            stream,
+            {
+                "last_count": None,
+                "reported_count": None,
+                "pending_count": None,
+                "pending_count_observations": 0,
+                "presence": False,
+                "started_at": None,
+                "candidate_started_at": None,
+                "positive_observations": 0,
+                "absent_observations": 0,
+                "peak_count": 0,
+                "candidate_peak_count": 0,
+                "last_observation_at": None,
+                "last_present_at": None,
+            },
+        )
+        events = []
+        previous_observation_at = state["last_observation_at"]
+        if (
+            previous_observation_at is not None
+            and max(0.0, (occurred_at - previous_observation_at).total_seconds())
+            > self.observation_timeout_seconds
+        ):
+            state["positive_observations"] = 0
+            state["candidate_started_at"] = None
+            state["candidate_peak_count"] = 0
+            state["pending_count"] = None
+            state["pending_count_observations"] = 0
+        if person_count is not None:
+            count = max(0, int(person_count))
+            state["last_count"] = count
+            state["last_observation_at"] = occurred_at
+            if state["pending_count"] == count:
+                state["pending_count_observations"] += 1
+            else:
+                state["pending_count"] = count
+                state["pending_count_observations"] = 1
+            if (
+                state["pending_count_observations"] >= self.count_observations
+                and state["reported_count"] != count
+            ):
+                events.append(
+                    {
+                        "event_type": "person_count",
+                        "stream": stream,
+                        "occurred_at": occurred_at,
+                        "count": count,
+                    }
+                )
+                state["reported_count"] = count
+            if count > 0:
+                state["absent_observations"] = 0
+                state["last_present_at"] = occurred_at
+                if state["presence"]:
+                    state["peak_count"] = max(state["peak_count"], count)
+                else:
+                    if state["positive_observations"] == 0:
+                        state["candidate_started_at"] = occurred_at
+                        state["candidate_peak_count"] = count
+                    state["positive_observations"] += 1
+                    state["candidate_peak_count"] = max(
+                        state["candidate_peak_count"], count
+                    )
+                if (
+                    not state["presence"]
+                    and state["positive_observations"] >= self.start_observations
+                ):
+                    state["presence"] = True
+                    state["started_at"] = state["candidate_started_at"] or occurred_at
+                    state["peak_count"] = state["candidate_peak_count"]
+                    state["positive_observations"] = 0
+                    state["candidate_started_at"] = None
+                    state["candidate_peak_count"] = 0
+                    events.append(
+                        {
+                            "event_type": "observed_presence_start",
+                            "stream": stream,
+                            "occurred_at": occurred_at,
+                            "count": count,
+                        }
+                    )
+            else:
+                state["positive_observations"] = 0
+                state["candidate_started_at"] = None
+                state["candidate_peak_count"] = 0
+                if state["presence"]:
+                    state["absent_observations"] += 1
+                if (
+                    state["presence"]
+                    and state["absent_observations"] >= self.end_observations
+                ):
+                    started_at = state["started_at"] or occurred_at
+                    last_present_at = state["last_present_at"] or started_at
+                    events.append(
+                        {
+                            "event_type": "observed_presence_end",
+                            "stream": stream,
+                            "occurred_at": occurred_at,
+                            "count": state["peak_count"],
+                            "duration_seconds": max(
+                                0.0, (last_present_at - started_at).total_seconds()
+                            ),
+                        }
+                    )
+                    state["presence"] = False
+                    state["started_at"] = None
+                    state["absent_observations"] = 0
+                    state["peak_count"] = 0
+                    state["last_present_at"] = None
+
+        presence_duration = 0.0
+        if state["presence"] and state["started_at"] is not None:
+            duration_end = state["last_present_at"] or state["started_at"]
+            presence_duration = max(
+                0.0, (duration_end - state["started_at"]).total_seconds()
+            )
+        last_observation_at = state["last_observation_at"]
+        observation_fresh = False
+        if last_observation_at is not None:
+            observation_fresh = (
+                max(0.0, (occurred_at - last_observation_at).total_seconds())
+                <= self.observation_timeout_seconds
+            )
+        observed_presence = (
+            "active"
+            if state["presence"] and observation_fresh
+            else "unknown"
+            if (
+                state["last_count"] is None
+                or not observation_fresh
+                or state["positive_observations"] > 0
+            )
+            else "idle"
+        )
+        return {
+            "person_count": state["last_count"] if observation_fresh else None,
+            "observed_presence": observed_presence,
+            "presence_duration_seconds": round(presence_duration, 1),
+            "peak_person_count": state["peak_count"] if state["presence"] else 0,
+            "activity_level": self._activity_level(motion),
+            "motion_duration_seconds": float(motion.get("motion_duration_seconds") or 0.0),
+            "events": events,
+        }
+
+    def close_all(self, occurred_at=None):
+        occurred_at = occurred_at or datetime.now()
+        events = []
+        for stream, state in self._states.items():
+            if not state["presence"]:
+                continue
+            started_at = state["started_at"] or occurred_at
+            last_present_at = state["last_present_at"] or started_at
+            events.append(
+                {
+                    "event_type": "observed_presence_end",
+                    "stream": stream,
+                    "occurred_at": occurred_at,
+                    "count": state["peak_count"],
+                    "duration_seconds": max(
+                        0.0, (last_present_at - started_at).total_seconds()
+                    ),
+                }
+            )
+            state["presence"] = False
+            state["started_at"] = None
+            state["absent_observations"] = 0
+            state["peak_count"] = 0
+            state["last_present_at"] = None
+        return events
 
 
 class VisionCoordinator:
@@ -152,14 +359,22 @@ class VisionCoordinator:
         face_interval_seconds=3.0,
         queue_size=2,
         max_frame_size=(1280, 720),
+        person_detector=None,
+        behavior_analyzer=None,
+        person_interval_seconds=5.0,
     ):
         self.store = store
         self.face_service = face_service
         self.evidence_archive = evidence_archive
+        self.person_detector = person_detector
         self.motion_analyzer = motion_analyzer or MotionAnalyzer(adaptive=True)
         self.hardware_guard = hardware_guard or (lambda: None)
         self.sample_interval_seconds = max(0.0, float(sample_interval_seconds))
         self.face_interval_seconds = max(0.0, float(face_interval_seconds))
+        self.person_interval_seconds = max(0.0, float(person_interval_seconds))
+        self.behavior_analyzer = behavior_analyzer or BehaviorAnalyzer(
+            observation_timeout_seconds=max(10.0, self.person_interval_seconds * 3.0)
+        )
         self.max_frame_size = (
             max(320, int(max_frame_size[0])),
             max(180, int(max_frame_size[1])),
@@ -171,6 +386,8 @@ class VisionCoordinator:
         self._last_submitted = {}
         self._last_face_analysis = {}
         self._last_face_count = {}
+        self._last_person_analysis = {}
+        self._last_person_state = {}
         self._last_presence = {}
         self._snapshots = {}
         self._latest_frames = {}
@@ -215,10 +432,16 @@ class VisionCoordinator:
             thread.join(max(0.1, float(timeout)))
         if thread and thread.is_alive():
             return False
+        events_flushed = True
+        close_all = getattr(self.behavior_analyzer, "close_all", None)
+        if callable(close_all):
+            for event in close_all(datetime.now()):
+                self._persist_event(event)
+            events_flushed = self._flush_pending_events(limit=32)
         self._thread = None
         with self._lock:
             self._latest_frames.clear()
-        return True
+        return events_flushed
 
     def submit(self, stream, image):
         if self._stop_event.is_set():
@@ -278,6 +501,7 @@ class VisionCoordinator:
             "last_analyzed_at": occurred_at.isoformat(timespec="seconds"),
             "motion": "unknown",
             "face_count": None,
+            "person_count": None,
             "identities": [],
             "error": str(error)[:120],
         }
@@ -340,6 +564,11 @@ class VisionCoordinator:
                 "last_analyzed_at": occurred_at.isoformat(timespec="seconds"),
                 "motion": "unknown",
                 "face_count": None,
+                "person_count": None,
+                "person_state": "paused",
+                "observed_presence": "unknown",
+                "presence_duration_seconds": 0.0,
+                "activity_level": "unknown",
                 "identities": [],
             }
             self._save_snapshot(stream, result)
@@ -349,6 +578,37 @@ class VisionCoordinator:
         motion = self.motion_analyzer.analyze(stream, image, occurred_at)
         if motion["event"]:
             self._persist_event(motion["event"])
+
+        person_state = self._last_person_state.get(stream, "not_configured")
+        person_observation = None
+        person_detector = self.person_detector
+        last_person_at = self._last_person_analysis.get(stream, -1e9)
+        if person_detector is not None:
+            person_state = self._last_person_state.get(
+                stream, getattr(person_detector, "status", "unavailable")
+            )
+        if (
+            person_detector is not None
+            and getattr(person_detector, "available", False)
+            and monotonic_now - last_person_at >= self.person_interval_seconds
+        ):
+            self._last_person_analysis[stream] = monotonic_now
+            try:
+                person_observation = len(person_detector.detect(image))
+                person_state = "active"
+            except Exception as error:
+                person_state = f"processing_error:{type(error).__name__}"[:80]
+            self._last_person_state[stream] = person_state
+        elif person_detector is not None and not getattr(person_detector, "available", False):
+            self._last_person_state[stream] = person_state
+        behavior = self.behavior_analyzer.analyze(
+            stream,
+            motion,
+            person_count=person_observation,
+            occurred_at=occurred_at,
+        )
+        for event in behavior.pop("events"):
+            self._persist_event(event)
 
         face_count = self._last_face_count.get(stream)
         identities = []
@@ -413,12 +673,15 @@ class VisionCoordinator:
             "pause_reason": None,
             "last_analyzed_at": occurred_at.isoformat(timespec="seconds"),
             "motion": motion["motion"],
+            "motion_duration_seconds": motion["motion_duration_seconds"],
             "changed_ratio": motion["changed_ratio"],
             "motion_threshold": motion["motion_threshold"],
             "adaptation_state": motion["adaptation_state"],
             "face_state": face_state,
             "face_count": face_count,
+            "person_state": person_state,
             "identities": identities,
+            **behavior,
         }
         with self._lock:
             self._latest_frames[stream] = (image.copy(), monotonic_now)

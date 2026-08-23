@@ -123,6 +123,60 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         if hasattr(self, "root"):
             self.root.destroy()
 
+    def test_behavior_tab_shows_people_activity_and_observed_dwell(self):
+        class BehaviorVision(FakeVision):
+            def snapshot(self):
+                return {
+                    "farmacia": {
+                        "state": "active",
+                        "motion": "active",
+                        "activity_level": "high",
+                        "person_count": 2,
+                        "presence_duration_seconds": 12.0,
+                        "face_count": 1,
+                        "identities": [],
+                        "last_analyzed_at": "2026-08-23T10:00:12",
+                    }
+                }
+
+        class BehaviorStore(FakeStore):
+            def list_vision_events(self, limit=300):
+                return [
+                    {
+                        "event_type": "observed_presence_end",
+                        "stream": "farmacia",
+                        "occurred_at": "2026-08-23T10:00:30",
+                        "count": 2,
+                        "duration_seconds": 30.0,
+                    },
+                    {
+                        "event_type": "observed_presence_start",
+                        "stream": "farmacia",
+                        "occurred_at": "2026-08-23T10:00:00",
+                        "count": 2,
+                    },
+                ]
+
+        controller = AnalyticsDesktopWindow(
+            self.root,
+            FakeCollector(),
+            BehaviorStore(),
+            BehaviorVision(),
+            face_service=FakeFaceService(),
+        )
+
+        self.assertTrue(controller.show())
+        self.root.update()
+        camera_values = controller._trees["cameras"].item("camera-0", "values")
+        summary = controller._labels["behavior_summary"].cget("text")
+
+        self.assertIn("Alta", camera_values)
+        self.assertIn("2", camera_values)
+        self.assertIn("12 s", camera_values)
+        self.assertIn("Sessões concluídas: 1", summary)
+        self.assertIn("Pico amostrado: 2", summary)
+        self.assertIn("30 s", summary)
+
     def test_reuses_one_native_window_and_preserves_seven_tabs(self):
         controller = AnalyticsDesktopWindow(
             self.root,
@@ -423,11 +477,23 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
 
         self.assertTrue(controller.show())
         self.root.update()
-        self.assertIn("10 dias", controller._labels["evidence_status"].cget("text"))
+        evidence_status = controller._labels["evidence_status"].cget("text")
+        self.assertIn("10 dias", evidence_status)
+        self.assertIn("rostos detectados descaracterizados", evidence_status)
+        self.assertNotIn("identificáveis: não", evidence_status)
         self.assertIn("✕", controller._evidence_delete_button.cget("text"))
         controller._trees["evidence"].selection_set("evidence-1")
-        controller._show_selected_evidence()
+        with patch.object(controller._evidence_preview, "winfo_width", return_value=640), patch.object(
+            controller._evidence_preview, "winfo_height", return_value=420
+        ):
+            controller._show_selected_evidence()
         self.assertIsNotNone(controller._evidence_photo)
+        with patch.object(controller._evidence_preview, "winfo_width", return_value=120), patch.object(
+            controller._evidence_preview, "winfo_height", return_value=100
+        ):
+            controller._render_evidence_preview()
+        self.assertLessEqual(controller._evidence_photo.width(), 96)
+        self.assertLessEqual(controller._evidence_photo.height(), 56)
 
         archive.snapshots = []
         controller._refresh_evidence()

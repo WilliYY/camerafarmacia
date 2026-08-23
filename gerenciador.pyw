@@ -6501,6 +6501,7 @@ class CameraManagerApp:
                 WindowsNetworkDiagnostics,
                 load_or_create_identifier_key,
             )
+            from wimi_analytics.person_engine import OpenCvPersonDetector
             from wimi_analytics.storage import AnalyticsStore
             from wimi_analytics.vision import VisionCoordinator
 
@@ -6515,6 +6516,7 @@ class CameraManagerApp:
                 forbidden_roots=forbidden_roots,
             )
             face_service = LocalFaceService(biometric_store)
+            person_detector = OpenCvPersonDetector()
             evidence_archive = AnonymizedEvidenceArchive(
                 analytics_store,
                 os.path.join(runtime_dir, "evidence"),
@@ -6537,9 +6539,11 @@ class CameraManagerApp:
                 store=analytics_store,
                 face_service=face_service,
                 evidence_archive=evidence_archive,
+                person_detector=person_detector,
                 hardware_guard=self.vision_hardware_guard,
                 sample_interval_seconds=1.0,
                 face_interval_seconds=3.0,
+                person_interval_seconds=5.0,
                 queue_size=2,
             )
             collector = AnalyticsCollector(
@@ -6675,6 +6679,7 @@ class CameraManagerApp:
     def wimi_runtime_status(self):
         vision = getattr(self, "_vision_coordinator", None)
         face = getattr(self, "_face_service", None)
+        person = getattr(vision, "person_detector", None) if vision is not None else None
         evidence = getattr(self, "_evidence_archive", None)
         snapshots = vision.snapshot() if vision is not None else {}
         active = sum(1 for item in snapshots.values() if item.get("state") == "active")
@@ -6683,11 +6688,12 @@ class CameraManagerApp:
             vision_status = "warning"
             vision_detail = "Worker local indisponivel"
         elif active or calibrating:
-            vision_status = "active" if getattr(face, "available", False) else "limited"
+            vision_status = "active" if getattr(person, "available", False) else "limited"
             face_status = str(getattr(face, "status", "indisponivel")).replace("_", " ")
+            person_status = str(getattr(person, "status", "indisponivel")).replace("_", " ")
             vision_detail = (
                 f"Visao ativa em {active} camera(s), calibrando {calibrating}; "
-                f"reconhecimento facial {face_status}"
+                f"pessoas {person_status}; rostos {face_status}"
             )
         else:
             vision_status = "limited"

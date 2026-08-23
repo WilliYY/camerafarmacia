@@ -36,6 +36,10 @@ def _status_text(value):
         "ready": "Pronto",
         "calibrating": "Calibrando",
         "idle": "Sem movimento",
+        "quiet": "Baixa",
+        "low": "Leve",
+        "moderate": "Moderada",
+        "high": "Alta",
         "unknown": "Desconhecido",
     }.get(str(value), str(value or "-").replace("_", " ").title())
 
@@ -45,6 +49,9 @@ def _event_text(value):
         "motion_start": "Movimento iniciado",
         "motion_end": "Movimento encerrado",
         "face_count": "Contagem de rostos",
+        "person_count": "Contagem de pessoas",
+        "observed_presence_start": "Presença observada",
+        "observed_presence_end": "Presença encerrada",
         "presence_confirmed": "Pessoa reconhecida",
         "analysis_error": "Falha temporária de análise",
     }.get(value, value)
@@ -140,6 +147,8 @@ class AnalyticsDesktopWindow:
         self._evidence_preview = None
         self._evidence_photo = None
         self._evidence_preview_id = None
+        self._evidence_source_image = None
+        self._evidence_resize_after_id = None
         self._responsive_labels = []
         self._last_wraplength = None
 
@@ -175,6 +184,7 @@ class AnalyticsDesktopWindow:
             return
         self._destroyed = True
         self._cancel_refresh()
+        self._cancel_evidence_resize()
         if self.window is not None and self.window.winfo_exists():
             self.window.destroy()
         self.window = None
@@ -386,11 +396,14 @@ class AnalyticsDesktopWindow:
                 ("signal", "Sinal"),
                 ("analysis", "Análise"),
                 ("motion", "Movimento"),
+                ("activity", "Variação visual"),
+                ("people", "Pessoas"),
+                ("dwell", "Permanência"),
                 ("faces", "Rostos"),
                 ("identity", "Pessoa"),
                 ("updated", "Última amostra"),
             ),
-            (130, 100, 110, 120, 80, 170, 160),
+            (115, 85, 90, 90, 90, 70, 105, 65, 135, 145),
             height=13,
         )
 
@@ -515,7 +528,7 @@ class AnalyticsDesktopWindow:
         self._section_title(
             tab,
             "Capturas de atendimento anonimizadas",
-            "Os rostos são descaracterizados antes da gravação. Exclusão automática após 10 dias; nenhuma captura contém nome ou perfil biométrico.",
+            "Os rostos detectados são descaracterizados antes da gravação. Exclusão automática após 10 dias; nenhuma captura contém nome ou perfil biométrico.",
         )
         actions = tk.Frame(tab, bg=BG)
         actions.pack(fill="x", padx=8, pady=(0, 10))
@@ -562,6 +575,9 @@ class AnalyticsDesktopWindow:
             anchor="center",
         )
         self._evidence_preview.pack(fill="both", expand=True, padx=12, pady=12)
+        self._evidence_preview.bind(
+            "<Configure>", self._schedule_evidence_resize, add="+"
+        )
 
     def _build_reports_tab(self):
         tab = self._tab("Relatórios")
@@ -738,6 +754,11 @@ class AnalyticsDesktopWindow:
                         signal,
                         _status_text(vision_item.get("state") or "waiting_for_data"),
                         _status_text(vision_item.get("motion") or "unknown"),
+                        _status_text(vision_item.get("activity_level") or "unknown"),
+                        vision_item.get("person_count")
+                        if vision_item.get("person_count") is not None
+                        else "-",
+                        _duration_text(vision_item.get("presence_duration_seconds")),
                         vision_item.get("face_count") if vision_item.get("face_count") is not None else "-",
                         identity,
                         vision_item.get("last_analyzed_at") or "-",
@@ -767,6 +788,20 @@ class AnalyticsDesktopWindow:
             for item in events
             if item.get("event_type") == "motion_end"
         )
+        presence_seconds = sum(
+            max(0.0, float(item.get("duration_seconds") or 0.0))
+            for item in events
+            if item.get("event_type") == "observed_presence_end"
+        )
+        peak_people = max(
+            (
+                max(0, int(item.get("count") or 0))
+                for item in events
+                if item.get("event_type")
+                in {"person_count", "observed_presence_start", "observed_presence_end"}
+            ),
+            default=0,
+        )
         recognized_profiles = {
             item.get("profile_id")
             for item in events
@@ -774,9 +809,10 @@ class AnalyticsDesktopWindow:
         }
         self._labels["behavior_summary"].configure(
             text=(
-                f"Últimos {len(events)} eventos | Movimentos: {counts['motion_start']} "
-                f"({_duration_text(motion_seconds)}) | Perfis consentidos observados: "
-                f"{len(recognized_profiles)} | Alterações de contagem: {counts['face_count']}"
+                f"Últimos {len(events)} eventos | Sessões concluídas: {counts['observed_presence_end']} "
+                f"({_duration_text(presence_seconds)}) | Pico amostrado: {peak_people} pessoa(s) | "
+                f"Movimentos: {counts['motion_start']} ({_duration_text(motion_seconds)}) | "
+                f"Perfis consentidos: {len(recognized_profiles)}"
             )
         )
         names = {
@@ -788,6 +824,15 @@ class AnalyticsDesktopWindow:
             detail = ""
             if event.get("event_type") == "face_count":
                 detail = f"{event.get('count', 0)} rosto(s)"
+            elif event.get("event_type") == "person_count":
+                detail = f"{event.get('count', 0)} pessoa(s)"
+            elif event.get("event_type") == "observed_presence_start":
+                detail = f"{event.get('count', 0)} pessoa(s) no início"
+            elif event.get("event_type") == "observed_presence_end":
+                detail = (
+                    f"pico {event.get('count', 0)} | "
+                    f"{_duration_text(event.get('duration_seconds'))}"
+                )
             elif event.get("event_type") == "presence_confirmed":
                 detail = names.get(event.get("profile_id"), "Perfil local")
             elif event.get("duration_seconds") is not None:
@@ -1013,7 +1058,7 @@ class AnalyticsDesktopWindow:
             text=(
                 f"Retenção: {status.get('retention_days', 10)} dias | "
                 f"{len(snapshots)} captura(s) | {_byte_size_text(status.get('total_bytes'))} | "
-                "rostos identificáveis: não"
+                "proteção: contexto pixelizado + rostos detectados descaracterizados"
             ),
             fg=GREEN if status.get("state") == "active" else YELLOW,
         )
@@ -1033,8 +1078,10 @@ class AnalyticsDesktopWindow:
         self._replace_rows(self._trees["evidence"], rows)
         evidence_ids = {item["evidence_id"] for item in snapshots}
         if self._evidence_preview_id and self._evidence_preview_id not in evidence_ids:
+            self._cancel_evidence_resize()
             self._evidence_preview_id = None
             self._evidence_photo = None
+            self._evidence_source_image = None
             self._evidence_preview.configure(image="", text="Selecione uma captura")
 
     def _show_selected_evidence(self, _event=None):
@@ -1043,20 +1090,58 @@ class AnalyticsDesktopWindow:
             return
         image = self.evidence_archive.read_image(selection[0])
         if image is None:
+            self._cancel_evidence_resize()
             self._evidence_preview_id = None
             self._evidence_photo = None
+            self._evidence_source_image = None
             self._evidence_preview.configure(
                 image="",
                 text="Captura indisponível ou não pôde ser descriptografada",
             )
             return
-        image.thumbnail((420, 300), Image.Resampling.LANCZOS)
         self._evidence_preview_id = selection[0]
+        self._evidence_source_image = image
+        self._render_evidence_preview()
+
+    def _render_evidence_preview(self):
+        self._evidence_resize_after_id = None
+        if self._evidence_source_image is None or self._evidence_preview is None:
+            return
+        if not self._evidence_preview.winfo_exists():
+            return
+        preview_width = max(1, self._evidence_preview.winfo_width() - 24)
+        preview_height = max(1, self._evidence_preview.winfo_height() - 44)
+        if preview_width < 40 or preview_height < 40:
+            return
+        image = self._evidence_source_image.copy()
+        image.thumbnail(
+            (min(preview_width, 1280), min(preview_height, 720)),
+            Image.Resampling.LANCZOS,
+        )
         self._evidence_photo = ImageTk.PhotoImage(image)
         self._evidence_preview.configure(
             image=self._evidence_photo,
-            text="Rostos anonimizados antes do armazenamento",
+            text="Rostos detectados descaracterizados antes do armazenamento",
         )
+
+    def _schedule_evidence_resize(self, _event=None):
+        if self._evidence_source_image is None or self.window is None:
+            return
+        self._cancel_evidence_resize()
+        try:
+            self._evidence_resize_after_id = self.window.after(
+                120, self._render_evidence_preview
+            )
+        except tk.TclError:
+            self._evidence_resize_after_id = None
+
+    def _cancel_evidence_resize(self):
+        if self._evidence_resize_after_id and self.window is not None:
+            try:
+                self.window.after_cancel(self._evidence_resize_after_id)
+            except tk.TclError:
+                pass
+        self._evidence_resize_after_id = None
 
     def _delete_evidence(self):
         selection = self._trees["evidence"].selection()
@@ -1077,6 +1162,7 @@ class AnalyticsDesktopWindow:
             return
         self._evidence_photo = None
         self._evidence_preview_id = None
+        self._evidence_source_image = None
         self._evidence_preview.configure(image="", text="Selecione uma captura")
         self._refresh_evidence()
 

@@ -12,9 +12,10 @@ from PIL import Image
 from wimi_analytics.biometric_storage import BiometricStore
 from wimi_analytics.face_engine import IdentityMatcher, OpenCvFaceBackend
 from wimi_analytics.face_engine import EnrollmentError, LocalFaceService
+from wimi_analytics.person_engine import OpenCvPersonDetector
 from wimi_analytics.privacy import DataProtectionError, protect_bytes, unprotect_bytes
 from wimi_analytics.storage import AnalyticsStore
-from wimi_analytics.vision import MotionAnalyzer, VisionCoordinator
+from wimi_analytics.vision import BehaviorAnalyzer, MotionAnalyzer, VisionCoordinator
 
 
 class FakeVisionStore:
@@ -83,6 +84,22 @@ class FakeFaceBackend:
 
     def extract_embeddings(self, image):
         return [list(value) for value in self.embeddings]
+
+
+class FakePersonDetector:
+    available = True
+    status = "ready"
+
+    def __init__(self, counts):
+        self.counts = iter(counts)
+        self.calls = 0
+
+    def detect(self, image):
+        self.calls += 1
+        return [
+            {"bbox": (index * 10, 0, 8, 20), "confidence": 0.90}
+            for index in range(next(self.counts))
+        ]
 
 
 class MotionAnalyzerTests(unittest.TestCase):
@@ -161,6 +178,151 @@ class MotionAnalyzerTests(unittest.TestCase):
 
         movement = analyzer.analyze("farmacia", Image.new("RGB", (64, 36), "white"))
         self.assertEqual(movement["event"]["event_type"], "motion_start")
+
+
+class BehaviorAnalyzerTests(unittest.TestCase):
+    def test_tracks_observed_presence_peak_and_dwell_with_absence_hysteresis(self):
+        analyzer = BehaviorAnalyzer(end_observations=2)
+        started_at = datetime(2026, 8, 23, 10, 0, 0)
+        motion = {
+            "motion": "active",
+            "changed_ratio": 0.12,
+            "motion_threshold": 0.04,
+            "motion_duration_seconds": 3.0,
+        }
+
+        candidate = analyzer.analyze("farmacia", motion, 2, started_at)
+        started = analyzer.analyze(
+            "farmacia", motion, 2, started_at + timedelta(seconds=3)
+        )
+        pending = analyzer.analyze(
+            "farmacia", motion, 0, started_at + timedelta(seconds=6)
+        )
+        ended = analyzer.analyze(
+            "farmacia", motion, 0, started_at + timedelta(seconds=9)
+        )
+
+        self.assertEqual(candidate["events"], [])
+        self.assertEqual(candidate["observed_presence"], "unknown")
+        self.assertEqual(
+            [event["event_type"] for event in started["events"]],
+            ["person_count", "observed_presence_start"],
+        )
+        self.assertEqual(started["activity_level"], "high")
+        self.assertEqual(pending["observed_presence"], "active")
+        self.assertFalse(any(event["event_type"] == "observed_presence_end" for event in pending["events"]))
+        presence_end = next(
+            event for event in ended["events"] if event["event_type"] == "observed_presence_end"
+        )
+        self.assertEqual(presence_end["count"], 2)
+        self.assertEqual(presence_end["duration_seconds"], 3.0)
+        self.assertEqual(ended["observed_presence"], "idle")
+
+    def test_missing_person_observation_does_not_end_an_active_session(self):
+        analyzer = BehaviorAnalyzer(
+            end_observations=1,
+            start_observations=1,
+            count_observations=1,
+            observation_timeout_seconds=5,
+        )
+        started_at = datetime(2026, 8, 23, 10, 0, 0)
+        motion = {"motion": "idle", "changed_ratio": 0.0, "motion_threshold": 0.04}
+
+        analyzer.analyze("farmacia", motion, 1, started_at)
+        recent = analyzer.analyze(
+            "farmacia", motion, None, started_at + timedelta(seconds=3)
+        )
+        stale = analyzer.analyze(
+            "farmacia", motion, None, started_at + timedelta(seconds=6)
+        )
+
+        self.assertEqual(recent["observed_presence"], "active")
+        self.assertEqual(recent["person_count"], 1)
+        self.assertEqual(stale["observed_presence"], "unknown")
+        self.assertIsNone(stale["person_count"])
+        self.assertEqual(stale["presence_duration_seconds"], 0.0)
+        self.assertEqual(stale["events"], [])
+
+    def test_single_positive_detection_does_not_create_presence_session(self):
+        analyzer = BehaviorAnalyzer()
+        started_at = datetime(2026, 8, 23, 10, 0, 0)
+        motion = {"motion": "idle", "changed_ratio": 0.0, "motion_threshold": 0.04}
+
+        results = [
+            analyzer.analyze("farmacia", motion, 1, started_at),
+            analyzer.analyze("farmacia", motion, 0, started_at + timedelta(seconds=5)),
+            analyzer.analyze("farmacia", motion, 0, started_at + timedelta(seconds=10)),
+        ]
+
+        event_types = [
+            event["event_type"] for result in results for event in result["events"]
+        ]
+        self.assertNotIn("observed_presence_start", event_types)
+        self.assertNotIn("observed_presence_end", event_types)
+
+    def test_person_count_event_requires_same_count_twice(self):
+        analyzer = BehaviorAnalyzer()
+        started_at = datetime(2026, 8, 23, 10, 0, 0)
+        motion = {"motion": "idle", "changed_ratio": 0.0, "motion_threshold": 0.04}
+
+        unstable = [
+            analyzer.analyze("farmacia", motion, 1, started_at),
+            analyzer.analyze("farmacia", motion, 2, started_at + timedelta(seconds=5)),
+            analyzer.analyze("farmacia", motion, 1, started_at + timedelta(seconds=10)),
+        ]
+        stable = analyzer.analyze(
+            "farmacia", motion, 1, started_at + timedelta(seconds=15)
+        )
+
+        self.assertFalse(
+            any(
+                event["event_type"] == "person_count"
+                for result in unstable
+                for event in result["events"]
+            )
+        )
+        self.assertEqual(
+            [event["event_type"] for event in stable["events"]], ["person_count"]
+        )
+
+    def test_stale_positive_candidate_cannot_confirm_presence_later(self):
+        analyzer = BehaviorAnalyzer(observation_timeout_seconds=10)
+        started_at = datetime(2026, 8, 23, 10, 0, 0)
+        motion = {"motion": "idle", "changed_ratio": 0.0, "motion_threshold": 0.04}
+        first = analyzer.analyze("farmacia", motion, 1, started_at)
+        analyzer.analyze(
+            "farmacia", motion, None, started_at + timedelta(seconds=20)
+        )
+        new_candidate = analyzer.analyze(
+            "farmacia", motion, 1, started_at + timedelta(seconds=30)
+        )
+        confirmed = analyzer.analyze(
+            "farmacia", motion, 1, started_at + timedelta(seconds=35)
+        )
+
+        self.assertEqual(first["events"], [])
+        self.assertEqual(new_candidate["events"], [])
+        start_event = next(
+            event
+            for event in confirmed["events"]
+            if event["event_type"] == "observed_presence_start"
+        )
+        self.assertEqual(start_event["occurred_at"], started_at + timedelta(seconds=35))
+        self.assertEqual(confirmed["presence_duration_seconds"], 5.0)
+
+    def test_close_all_finishes_only_confirmed_active_sessions(self):
+        analyzer = BehaviorAnalyzer()
+        started_at = datetime(2026, 8, 23, 10, 0, 0)
+        motion = {"motion": "idle", "changed_ratio": 0.0, "motion_threshold": 0.04}
+        analyzer.analyze("farmacia", motion, 1, started_at)
+        analyzer.analyze("farmacia", motion, 1, started_at + timedelta(seconds=5))
+
+        events = analyzer.close_all(started_at + timedelta(seconds=10))
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event_type"], "observed_presence_end")
+        self.assertEqual(events[0]["duration_seconds"], 5.0)
+        self.assertEqual(analyzer.close_all(started_at + timedelta(seconds=11)), [])
 
 
 class IdentityMatcherTests(unittest.TestCase):
@@ -293,6 +455,180 @@ class BiometricStoreTests(unittest.TestCase):
 
 
 class VisionCoordinatorTests(unittest.TestCase):
+    def test_person_detection_emits_bounded_observable_behavior_events(self):
+        store = FakeVisionStore()
+        detector = FakePersonDetector([2, 2, 0, 0])
+        coordinator = VisionCoordinator(
+            store=store,
+            person_detector=detector,
+            behavior_analyzer=BehaviorAnalyzer(end_observations=2),
+            sample_interval_seconds=0,
+            person_interval_seconds=0,
+        )
+        image = Image.new("RGB", (64, 36), "black")
+        started_at = datetime(2026, 8, 23, 10, 0, 0)
+
+        candidate = coordinator.process_frame_now(
+            "farmacia", image, occurred_at=started_at, monotonic_now=1
+        )
+        active = coordinator.process_frame_now(
+            "farmacia", image, occurred_at=started_at + timedelta(seconds=3), monotonic_now=2
+        )
+        coordinator.process_frame_now(
+            "farmacia", image, occurred_at=started_at + timedelta(seconds=6), monotonic_now=3
+        )
+        last = coordinator.process_frame_now(
+            "farmacia", image, occurred_at=started_at + timedelta(seconds=9), monotonic_now=4
+        )
+
+        self.assertEqual(candidate["person_count"], 2)
+        self.assertEqual(candidate["observed_presence"], "unknown")
+        self.assertEqual(active["observed_presence"], "active")
+        self.assertEqual(last["observed_presence"], "idle")
+        self.assertEqual(detector.calls, 4)
+        event_types = [event["event_type"] for event in store.events]
+        self.assertIn("person_count", event_types)
+        self.assertIn("observed_presence_start", event_types)
+        self.assertIn("observed_presence_end", event_types)
+
+    def test_person_error_persists_and_stale_observation_becomes_unknown(self):
+        class FailingAfterSuccessDetector:
+            available = True
+            status = "ready"
+
+            def __init__(self):
+                self.calls = 0
+
+            def detect(self, image):
+                self.calls += 1
+                if self.calls == 1:
+                    return [{"bbox": (1, 1, 10, 20), "confidence": 0.9}]
+                raise RuntimeError("inference_failed")
+
+        detector = FailingAfterSuccessDetector()
+        coordinator = VisionCoordinator(
+            store=FakeVisionStore(),
+            person_detector=detector,
+            behavior_analyzer=BehaviorAnalyzer(
+                start_observations=1,
+                count_observations=1,
+                observation_timeout_seconds=5,
+            ),
+            sample_interval_seconds=0,
+            person_interval_seconds=5,
+        )
+        image = Image.new("RGB", (64, 36), "black")
+        started_at = datetime(2026, 8, 23, 10, 0, 0)
+
+        first = coordinator.process_frame_now(
+            "farmacia", image, occurred_at=started_at, monotonic_now=1
+        )
+        between = coordinator.process_frame_now(
+            "farmacia", image, occurred_at=started_at + timedelta(seconds=1), monotonic_now=2
+        )
+        failed = coordinator.process_frame_now(
+            "farmacia", image, occurred_at=started_at + timedelta(seconds=6), monotonic_now=7
+        )
+        stale = coordinator.process_frame_now(
+            "farmacia", image, occurred_at=started_at + timedelta(seconds=7), monotonic_now=8
+        )
+
+        self.assertEqual(first["person_state"], "active")
+        self.assertEqual(between["person_state"], "active")
+        self.assertTrue(failed["person_state"].startswith("processing_error:"))
+        self.assertEqual(stale["person_state"], failed["person_state"])
+        self.assertEqual(stale["observed_presence"], "unknown")
+        self.assertIsNone(stale["person_count"])
+
+    def test_safe_stop_persists_end_for_active_observed_presence(self):
+        store = FakeVisionStore()
+        detector = FakePersonDetector([1, 1])
+        coordinator = VisionCoordinator(
+            store=store,
+            person_detector=detector,
+            sample_interval_seconds=0,
+            person_interval_seconds=0,
+        )
+        image = Image.new("RGB", (64, 36), "black")
+        started_at = datetime(2026, 8, 23, 10, 0, 0)
+        coordinator.process_frame_now(
+            "farmacia", image, occurred_at=started_at, monotonic_now=1
+        )
+        coordinator.process_frame_now(
+            "farmacia", image, occurred_at=started_at + timedelta(seconds=5), monotonic_now=2
+        )
+
+        self.assertTrue(coordinator.stop())
+
+        end_events = [
+            event
+            for event in store.events
+            if event["event_type"] == "observed_presence_end"
+        ]
+        self.assertEqual(len(end_events), 1)
+        self.assertEqual(end_events[0]["duration_seconds"], 5.0)
+
+    def test_safe_stop_retries_pending_presence_end_before_reporting_success(self):
+        class ToggleStore(FakeVisionStore):
+            def __init__(self):
+                super().__init__()
+                self.fail = False
+
+            def record_vision_event(self, event):
+                if self.fail:
+                    raise sqlite3.OperationalError("database_busy")
+                return super().record_vision_event(event)
+
+        store = ToggleStore()
+        detector = FakePersonDetector([1, 1])
+        coordinator = VisionCoordinator(
+            store=store,
+            person_detector=detector,
+            sample_interval_seconds=0,
+            person_interval_seconds=0,
+        )
+        image = Image.new("RGB", (64, 36), "black")
+        started_at = datetime(2026, 8, 23, 10, 0, 0)
+        coordinator.process_frame_now(
+            "farmacia", image, occurred_at=started_at, monotonic_now=1
+        )
+        coordinator.process_frame_now(
+            "farmacia", image, occurred_at=started_at + timedelta(seconds=5), monotonic_now=2
+        )
+        store.fail = True
+
+        self.assertFalse(coordinator.stop())
+        self.assertEqual(coordinator.pending_event_count, 1)
+        store.fail = False
+        self.assertTrue(coordinator.stop())
+        self.assertEqual(coordinator.pending_event_count, 0)
+        self.assertEqual(
+            sum(
+                event["event_type"] == "observed_presence_end"
+                for event in store.events
+            ),
+            1,
+        )
+
+    def test_missing_person_model_keeps_existing_vision_active(self):
+        class MissingPersonDetector:
+            available = False
+            status = "model_nanodet_person_missing"
+
+        coordinator = VisionCoordinator(
+            store=FakeVisionStore(),
+            person_detector=MissingPersonDetector(),
+            sample_interval_seconds=0,
+        )
+
+        snapshot = coordinator.process_frame_now(
+            "farmacia", Image.new("RGB", (64, 36), "black")
+        )
+
+        self.assertIn(snapshot["state"], {"active", "calibrating"})
+        self.assertEqual(snapshot["person_state"], "model_nanodet_person_missing")
+        self.assertIsNone(snapshot["person_count"])
+
     def test_processes_existing_frame_without_writing_images(self):
         with tempfile.TemporaryDirectory() as temp:
             before = set(Path(temp).iterdir())
@@ -476,6 +812,32 @@ class VisionCoordinatorTests(unittest.TestCase):
             self.assertEqual(events[0]["event_type"], "analysis_error")
             store.close()
 
+    def test_observable_behavior_events_are_supported_by_real_store(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = AnalyticsStore(Path(temp) / "analytics.sqlite3")
+            occurred_at = datetime(2026, 8, 23, 10, 0, 0)
+
+            for event in (
+                {"event_type": "person_count", "count": 2},
+                {"event_type": "observed_presence_start", "count": 2},
+                {
+                    "event_type": "observed_presence_end",
+                    "count": 2,
+                    "duration_seconds": 45.0,
+                },
+            ):
+                store.record_vision_event(
+                    {**event, "stream": "farmacia", "occurred_at": occurred_at}
+                )
+
+            events = store.list_vision_events(limit=10)
+            self.assertEqual(len(events), 3)
+            self.assertEqual(
+                {event["event_type"] for event in events},
+                {"person_count", "observed_presence_start", "observed_presence_end"},
+            )
+            store.close()
+
     def test_pending_event_retry_queue_is_bounded(self):
         class FailingStore:
             def record_vision_event(self, event):
@@ -581,6 +943,63 @@ class FaceBackendLimitsTests(unittest.TestCase):
         self.assertEqual(backend._recognizer.calls, 8)
         self.assertEqual(backend._np.seen_size, (960, 540))
         self.assertEqual(backend._detector.input_size, (960, 540))
+
+
+class PersonDetectorLimitsTests(unittest.TestCase):
+    def test_preserves_official_model_rgb_channel_order(self):
+        try:
+            import cv2
+            import numpy as np
+        except ImportError as error:
+            self.skipTest(f"Runtime OpenCV indisponivel: {error}")
+        detector = OpenCvPersonDetector.__new__(OpenCvPersonDetector)
+        detector._cv2 = cv2
+        detector._np = np
+        detector._input_size = (416, 416)
+
+        frame, geometry = detector._letterbox(
+            Image.new("RGB", (416, 416), (10, 20, 30))
+        )
+
+        self.assertEqual(frame[0, 0].tolist(), [10, 20, 30])
+        self.assertEqual(geometry, (1.0, 0, 0, 416, 416))
+
+    def test_missing_verified_model_disables_detector_without_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            detector = OpenCvPersonDetector(model_dir=temp)
+
+        self.assertFalse(detector.available)
+        self.assertIn("model_nanodet_person_missing", detector.status)
+
+
+class VisionCoordinatorCompatibilityTests(unittest.TestCase):
+    def test_preserves_legacy_positional_constructor_order(self):
+        store = FakeVisionStore()
+        face_service = object()
+        evidence_archive = object()
+        motion_analyzer = MotionAnalyzer(adaptive=False)
+        hardware_guard = lambda: None
+
+        coordinator = VisionCoordinator(
+            store,
+            face_service,
+            evidence_archive,
+            motion_analyzer,
+            hardware_guard,
+            0.5,
+            2.0,
+            3,
+            (960, 540),
+        )
+
+        self.assertIs(coordinator.face_service, face_service)
+        self.assertIs(coordinator.evidence_archive, evidence_archive)
+        self.assertIs(coordinator.motion_analyzer, motion_analyzer)
+        self.assertIs(coordinator.hardware_guard, hardware_guard)
+        self.assertEqual(coordinator.sample_interval_seconds, 0.5)
+        self.assertEqual(coordinator.face_interval_seconds, 2.0)
+        self.assertEqual(coordinator._queue.maxsize, 3)
+        self.assertEqual(coordinator.max_frame_size, (960, 540))
 
 
 @unittest.skipUnless(os.name == "nt", "DPAPI disponivel apenas no Windows")
