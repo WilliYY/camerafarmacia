@@ -209,6 +209,145 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         self.assertIn("Maria (Funcionário)", camera_values)
         controller.destroy()
 
+    def test_camera_tab_unifies_repeated_identifications_and_active_state(self):
+        class IdentificationStore(FakeStore):
+            def list_vision_events(self, limit=300):
+                return [
+                    {
+                        "event_type": "presence_confirmed",
+                        "profile_id": "profile-1",
+                        "stream": "farmacia2",
+                        "occurred_at": "2026-08-23T15:42:00",
+                        "confidence": 0.91,
+                    },
+                    {
+                        "event_type": "presence_confirmed",
+                        "profile_id": "profile-1",
+                        "stream": "farmacia",
+                        "occurred_at": "2026-08-23T14:10:00",
+                        "confidence": 0.88,
+                    },
+                ]
+
+        class ActiveVision(FakeVision):
+            def snapshot(self):
+                return {
+                    "farmacia": {"state": "active"},
+                    "farmacia2": {"state": "active"},
+                }
+
+        class FaceWithProfile(FakeFaceService):
+            available = True
+            status = "ready"
+
+            def list_profiles(self):
+                return [
+                    {
+                        "profile_id": "profile-1",
+                        "display_name": "Pessoa 1",
+                        "role": "employee",
+                    }
+                ]
+
+        controller = AnalyticsDesktopWindow(
+            self.root,
+            FakeCollector(),
+            IdentificationStore(),
+            ActiveVision(),
+            face_service=FaceWithProfile(),
+            activate_cameras=lambda: None,
+        )
+
+        self.assertTrue(controller.show())
+        self.root.update()
+        identification_rows = [
+            controller._trees["identifications"].item(item, "values")
+            for item in controller._trees["identifications"].get_children()
+        ]
+
+        self.assertEqual(len(identification_rows), 2)
+        self.assertTrue(all("Pessoa 1" in row for row in identification_rows))
+        self.assertIn("FARMACIA2", identification_rows[0])
+        self.assertIn("2 confirmações", controller._labels["identification_summary"].cget("text"))
+        self.assertEqual(controller._analysis_button.cget("text"), "Análise já ativa")
+        self.assertEqual(str(controller._analysis_button.cget("state")), "disabled")
+        controller.destroy()
+
+    def test_renaming_selected_identification_updates_all_history_rows(self):
+        class IdentificationStore(FakeStore):
+            def list_vision_events(self, limit=300):
+                return [
+                    {
+                        "event_type": "presence_confirmed",
+                        "profile_id": "profile-1",
+                        "stream": "farmacia2",
+                        "occurred_at": "2026-08-23T15:42:00",
+                        "confidence": 0.91,
+                    },
+                    {
+                        "event_type": "presence_confirmed",
+                        "profile_id": "profile-1",
+                        "stream": "farmacia",
+                        "occurred_at": "2026-08-23T14:10:00",
+                        "confidence": 0.88,
+                    },
+                ]
+
+        class RenamableFaceService(FakeFaceService):
+            available = True
+            status = "ready"
+
+            def __init__(self):
+                self.name = "Pessoa 1"
+
+            def list_profiles(self):
+                return [
+                    {
+                        "profile_id": "profile-1",
+                        "display_name": self.name,
+                        "role": "employee",
+                    }
+                ]
+
+            def rename_profile(self, profile_id, display_name):
+                if profile_id != "profile-1":
+                    return False
+                self.name = display_name
+                return True
+
+        face_service = RenamableFaceService()
+        controller = AnalyticsDesktopWindow(
+            self.root,
+            FakeCollector(),
+            IdentificationStore(),
+            FakeVision(),
+            face_service=face_service,
+        )
+        self.assertTrue(controller.show())
+        self.root.update()
+        first_row = controller._trees["identifications"].get_children()[0]
+        controller._trees["identifications"].selection_set(first_row)
+
+        with (
+            patch(
+                "wimi_analytics.desktop.simpledialog.askstring",
+                return_value="Thiago",
+            ),
+            patch("wimi_analytics.desktop.messagebox.showinfo"),
+        ):
+            controller._rename_selected_identification()
+            self.assertTrue(controller.wait_for_workers(timeout=2))
+            controller._drain_ui_actions()
+
+        identification_rows = [
+            controller._trees["identifications"].item(item, "values")
+            for item in controller._trees["identifications"].get_children()
+        ]
+        people_values = controller._trees["people"].item("profile-1", "values")
+        self.assertTrue(all("Thiago" in row for row in identification_rows))
+        self.assertIn("Thiago", people_values)
+        controller.destroy()
+
     def test_reuses_one_native_window_and_groups_people_inside_evidence(self):
         controller = AnalyticsDesktopWindow(
             self.root,

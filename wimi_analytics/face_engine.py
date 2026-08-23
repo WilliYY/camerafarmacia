@@ -271,6 +271,26 @@ class LocalFaceService:
                 for profile_id in sorted(self._names, key=lambda value: self._names[value].casefold())
             ]
 
+    def rename_profile(self, profile_id, display_name):
+        if not self.available:
+            raise FaceEngineUnavailable(self.status)
+        profile_id = str(profile_id)
+        display_name = " ".join(str(display_name).split())[:80]
+        if not display_name:
+            raise EnrollmentError("display_name_required")
+        with self._lock:
+            embedding = self._profiles.get(profile_id)
+            if embedding is None:
+                return False
+            role = self._roles.get(profile_id, "authorized")
+            protected = self.protector.protect(
+                self._encode(display_name, embedding, role)
+            )
+            if not self.store.update_profile(profile_id, protected):
+                return False
+            self._names[profile_id] = display_name
+        return True
+
     def delete_profile(self, profile_id):
         deleted = self.store.delete_profile(profile_id)
         if deleted:

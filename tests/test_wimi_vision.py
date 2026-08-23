@@ -412,6 +412,45 @@ class BiometricStoreTests(unittest.TestCase):
             self.assertEqual(service.list_profiles()[0]["role"], "authorized")
             store.close()
 
+    def test_profile_rename_preserves_id_role_embedding_and_records_audit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            db_path = Path(temp) / "biometric.sqlite3"
+            store = BiometricStore(db_path)
+            service = LocalFaceService(
+                store,
+                backend=FakeFaceBackend(),
+                protector=FakeProtector(),
+                matcher=IdentityMatcher(confirmations=1),
+            )
+            image = Image.new("RGB", (64, 64), "white")
+            profile_id = service.enroll(
+                "Pessoa 1", image, consent=True, role="employee"
+            )
+
+            self.assertTrue(service.rename_profile(profile_id, "Thiago"))
+            self.assertEqual(
+                service.list_profiles(),
+                [
+                    {
+                        "profile_id": profile_id,
+                        "display_name": "Thiago",
+                        "role": "employee",
+                    }
+                ],
+            )
+            recognized = service.analyze_frame("farmacia", image)
+            self.assertEqual(recognized["identities"][0]["display_name"], "Thiago")
+            connection = sqlite3.connect(db_path)
+            try:
+                audit = connection.execute(
+                    "SELECT action, profile_id FROM biometric_audit ORDER BY audit_id"
+                ).fetchall()
+            finally:
+                connection.close()
+            self.assertEqual(audit[-1], ("updated", profile_id))
+            self.assertNotIn(b"Thiago", db_path.read_bytes())
+            store.close()
+
     def test_deleted_payload_is_removed_from_database_and_wal(self):
         with tempfile.TemporaryDirectory() as temp:
             db_path = Path(temp) / "biometric.sqlite3"

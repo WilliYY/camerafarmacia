@@ -125,6 +125,27 @@ class BiometricStore:
             results.append(item)
         return results
 
+    def update_profile(self, profile_id, protected_profile):
+        if not isinstance(protected_profile, (bytes, bytearray)):
+            raise ValueError("invalid_protected_profile")
+        protected_profile = bytes(protected_profile)
+        if not protected_profile or len(protected_profile) > MAX_PROTECTED_PROFILE_BYTES:
+            raise ValueError("invalid_protected_profile")
+        profile_id = str(profile_id)
+        now = datetime.now()
+        with self._lock, self._connection() as connection:
+            cursor = connection.execute(
+                "UPDATE biometric_profiles SET protected_profile = ? WHERE profile_id = ?",
+                (protected_profile, profile_id),
+            )
+            if not cursor.rowcount:
+                return False
+            connection.execute(
+                "INSERT INTO biometric_audit(occurred_at, action, profile_id) VALUES (?, ?, ?)",
+                (_iso(now), "updated", profile_id),
+            )
+        return True
+
     def delete_profile(self, profile_id):
         profile_id = str(profile_id)
         now = datetime.now()

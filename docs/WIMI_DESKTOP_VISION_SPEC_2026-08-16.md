@@ -96,7 +96,9 @@ tracking individual, inferencia de emocao, intencao ou produtividade.
 ## Interface nativa
 
 - **Visao geral:** estado do NVR, riscos, pontos fortes e atualidade da fonte.
-- **Cameras:** conectividade, gravacao e estado da analise por camera.
+- **Cameras:** conectividade, gravacao, estado automatico da analise e as 200
+  confirmacoes consentidas mais recentes, com horario, camera, funcao e
+  confianca. A mesma lista permite renomear o perfil selecionado.
 - **Comportamento:** movimento e presenca agregados, com origem e horario.
 - **Rede:** conexao/gateway, dispositivos vistos e aplicativos TCP deste PC em
   subabas persistentes.
@@ -105,14 +107,19 @@ tracking individual, inferencia de emocao, intencao ou produtividade.
   exclusao manual em lote confirmada. A paginacao mantem no maximo 24 miniaturas
   descriptografadas em memoria e so as carrega com a aba visivel, sem alterar o
   historico de comportamento. A mesma area possui a subaba `Pessoas cadastradas`
-  para cadastro, classificacao manual de funcao, ranking e exclusao de perfis
-  consentidos.
+  para cadastro, classificacao manual de funcao, ranking, renomeacao e exclusao
+  de perfis consentidos.
 - **Relatorios:** coletas persistidas, filtros de periodo e detalhes.
 
 O reconhecimento retorna automaticamente o nome e a funcao de perfis ja
 cadastrados. A funcao nunca e inferida pela aparencia: e selecionada durante o
 cadastro consentido. A aba `Cameras` mostra ambos depois da confirmacao. Rosto
 desconhecido permanece desconhecido e nao cria perfil.
+
+A renomeacao preserva o `profile_id`, a funcao e o vetor. Nome, funcao e vetor
+sao novamente cifrados em um unico payload DPAPI e a alteracao gera auditoria no
+banco biometrico. Como os eventos operacionais guardam apenas o `profile_id`, as
+ocorrencias antigas passam a exibir o nome novo sem alterar o historico.
 
 Trocar de aba apenas muda a visualizacao. O coletor, a fila limitada, os
 previews e o banco mantem o estado. A navegacao superior tambem pode ser

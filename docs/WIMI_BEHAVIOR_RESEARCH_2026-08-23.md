@@ -30,6 +30,11 @@ gravacao.
 - OpenVINO: runtime Apache-2.0 forte para CPU, GPU Intel e NPU. Continua como
   candidato de otimizacao, mas so deve substituir o OpenCV DNN se um benchmark
   no PC do NVR demonstrar ganho relevante e estabilidade equivalente.
+- MMAction2: referencia Apache-2.0 para reconhecimento temporal de acoes, mas
+  adiciona PyTorch, MMEngine e MMCV, alem de exigir um modelo adequado ao angulo
+  real das cameras. Nao foi incorporado: o custo operacional e alto e seus
+  modelos genericos nao comprovam com seguranca uma acao especifica como uso de
+  celular neste ambiente.
 
 ## Parecer de selecao
 
@@ -76,12 +81,16 @@ sem uma decisao explicita de licenca e um teste de carga prolongado.
   protegido apenas pela pixelizacao global, pois nenhum detector e infalivel.
 - Permanencia pertence ao campo de visao da camera, nao a uma identidade.
 - Nao ha tracking individual, zonas, fila, emocao, intencao ou produtividade.
+- Nao ha detector de uso de celular. Horario e camera de um perfil consentido
+  sao fatos observados; qualquer acao corporal futura deve aparecer como
+  `possivel evento`, com confianca e revisao humana, nunca como certeza.
 - Antes de adicionar ByteTrack, e necessario medir CPU/memoria por 24 horas e
   calibrar zonas com imagens anonimizadas de cada camera.
 
 ## Validacao desta entrega
 
-- A suite completa passou `195` testes, incluindo falso positivo isolado,
+- A suite completa passou `205` testes, incluindo renomeacao retrospectiva de
+  perfil, falso positivo isolado,
   oscilacao de contagem, expiracao para estado desconhecido, encerramento seguro,
   anonimizacao defensiva e redimensionamento do preview.
 - O manifesto e os modelos locais passaram na verificacao de tamanho e SHA-256.
@@ -112,3 +121,4 @@ sem uma decisao explicita de licenca e um teste de carga prolongado.
 - https://github.com/microsoft/onnxruntime
 - https://github.com/ultralytics/ultralytics
 - https://github.com/openvinotoolkit/openvino
+- https://github.com/open-mmlab/mmaction2

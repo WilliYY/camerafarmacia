@@ -222,7 +222,17 @@ selecionada manualmente no cadastro e permanece dentro do payload protegido.
 Depois do cadastro, o reconhecimento e automatico; um rosto desconhecido nao
 cria perfil nem recebe funcao automaticamente. Perfis anteriores a essa
 classificacao continuam validos como `authorized`. Quando um perfil e
-confirmado, a aba `Cameras` mostra nome e funcao cadastrada.
+confirmado, a aba `Cameras` mostra nome e funcao cadastrada. Essa aba tambem
+lista as 200 confirmacoes mais recentes, com camera, horario e confianca, e
+resume quantas vezes cada perfil apareceu. O botao de analise muda sozinho para
+`Analise ja ativa` ou `Analise calibrando`, evitando solicitar uma ativacao que
+ja aconteceu.
+
+Um perfil consentido pode comecar com uma identificacao temporaria, como
+`Pessoa 1`, e ser renomeado depois pela ocorrencia ou por `Pessoas cadastradas`.
+O `profile_id` nao muda: nome, funcao e vetor continuam no payload DPAPI, e todo
+o historico exibido passa a resolver o novo nome sem copiar ou reescrever
+eventos.
 Capturas de atendimento usam apenas deteccoes com caixas completas, preservam
 um quadro de contexto de ate `1280x720` em JPEG 82, aplicam pixelizacao global
 equilibrada em blocos de 12 pixels e achatam todos os rostos detectados antes da
@@ -245,6 +255,12 @@ assim como rostos e reconhecimento consentido, exigem revisao humana e nao
 inferem emocao, intencao, desonestidade ou produtividade. A adaptacao automatica
 aprende somente o ruido visual de fundo dentro de janela e limites fixos; nao
 altera gravacao, retencao, camera, rede ou identidade.
+
+O sistema ainda nao afirma acoes individuais como `pegou o celular`. Um recurso
+desse tipo deve primeiro detectar apenas um evento possivel, manter o trecho
+para revisao humana, usar zonas calibradas e passar por benchmark prolongado no
+hardware real. Nenhum framework temporal pesado foi adicionado ao processo do
+NVR nesta entrega.
 
 A aba Rede registra sessoes dos adaptadores deste computador, dispositivos
 vistos na LAN e aplicativos com TCP estabelecido neste PC: inicio, ultimo sinal,

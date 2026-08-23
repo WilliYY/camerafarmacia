@@ -152,10 +152,17 @@ class AnalyticsDesktopWindow:
         self._enrollment_busy = False
         self._enrollment_thread = None
         self._enroll_button = None
+        self._analysis_button = None
         self._deletion_lock = threading.Lock()
         self._deletion_busy = False
         self._deletion_thread = None
         self._delete_button = None
+        self._rename_lock = threading.Lock()
+        self._rename_busy = False
+        self._rename_thread = None
+        self._rename_button = None
+        self._identification_rename_button = None
+        self._identification_profile_ids = {}
         self._evidence_delete_button = None
         self._evidence_select_all_button = None
         self._evidence_clear_selection_button = None
@@ -427,13 +434,26 @@ class AnalyticsDesktopWindow:
         )
         actions = tk.Frame(tab, bg=BG)
         actions.pack(fill="x", padx=8, pady=(0, 10))
-        self._button(actions, "Ativar previews e análise", self._activate_camera_analysis, GREEN).pack(side="left")
+        self._analysis_button = self._button(
+            actions,
+            "Iniciar análise das câmeras",
+            self._activate_camera_analysis,
+            GREEN,
+        )
+        self._analysis_button.pack(side="left")
         self._labels["vision_status"] = tk.Label(
             actions, text="Visão: aguardando", font=("Segoe UI", 9), fg=MUTED, bg=BG
         )
         self._labels["vision_status"].pack(side="left", padx=14)
+
+        body = tk.PanedWindow(tab, orient="vertical", bg=BG, sashwidth=5, bd=0)
+        body.pack(fill="both", expand=True, padx=8, pady=(0, 12))
+        camera_panel = tk.Frame(body, bg=BG)
+        history_panel = tk.Frame(body, bg=BG)
+        body.add(camera_panel, minsize=170)
+        body.add(history_panel, minsize=190)
         self._tree(
-            tab,
+            camera_panel,
             "cameras",
             (
                 ("camera", "Câmera"),
@@ -448,7 +468,51 @@ class AnalyticsDesktopWindow:
                 ("updated", "Última amostra"),
             ),
             (115, 85, 90, 90, 90, 70, 105, 65, 135, 145),
-            height=13,
+            height=6,
+        )
+
+        history_header = tk.Frame(history_panel, bg=BG)
+        history_header.pack(fill="x", padx=8, pady=(2, 8))
+        tk.Label(
+            history_header,
+            text="Identificações recentes",
+            font=("Segoe UI", 11, "bold"),
+            fg=TEXT,
+            bg=BG,
+        ).pack(side="left")
+        self._labels["identification_summary"] = tk.Label(
+            history_header,
+            text="Nenhuma identificação confirmada.",
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg=BG,
+        )
+        self._labels["identification_summary"].pack(side="left", padx=14)
+        self._identification_rename_button = self._button(
+            history_header,
+            "Renomear selecionado",
+            self._rename_selected_identification,
+            BLUE,
+        )
+        self._identification_rename_button.pack(side="right")
+        self._identification_rename_button.configure(
+            state="disabled", disabledforeground=MUTED
+        )
+        identifications = self._tree(
+            history_panel,
+            "identifications",
+            (
+                ("when", "Data e hora"),
+                ("camera", "Câmera"),
+                ("name", "Pessoa"),
+                ("role", "Função"),
+                ("confidence", "Confiança"),
+            ),
+            (175, 125, 220, 130, 90),
+            height=7,
+        )
+        identifications.bind(
+            "<<TreeviewSelect>>", self._update_profile_action_controls, add="+"
         )
 
     def _build_behavior_tab(self):
@@ -736,6 +800,11 @@ class AnalyticsDesktopWindow:
             actions, "Cadastrar rosto", self._enroll_person, GREEN
         )
         self._enroll_button.pack(side="left")
+        self._rename_button = self._button(
+            actions, "Renomear", self._rename_selected_person, BLUE
+        )
+        self._rename_button.pack(side="left", padx=(8, 0))
+        self._rename_button.configure(state="disabled", disabledforeground=MUTED)
         self._delete_button = self._button(
             actions, "Excluir selecionado", self._delete_person, RED
         )
@@ -744,7 +813,7 @@ class AnalyticsDesktopWindow:
             actions, text="Reconhecimento: verificando", font=("Segoe UI", 9), fg=MUTED, bg=BG
         )
         self._labels["face_status"].pack(side="left", padx=10)
-        self._tree(
+        people = self._tree(
             tab,
             "people",
             (
@@ -758,6 +827,9 @@ class AnalyticsDesktopWindow:
             ),
             (70, 190, 110, 70, 130, 170, 210),
             height=14,
+        )
+        people.bind(
+            "<<TreeviewSelect>>", self._update_profile_action_controls, add="+"
         )
 
     def _replace_rows(self, tree, rows):
@@ -794,7 +866,7 @@ class AnalyticsDesktopWindow:
             events=events,
             evidence=evidence_status,
         )
-        self._refresh_cameras(payload, vision=vision_snapshot)
+        self._refresh_cameras(payload, vision=vision_snapshot, events=events)
         self._refresh_behavior(events=events)
         self._refresh_network(payload)
         self._refresh_evidence(
@@ -840,7 +912,7 @@ class AnalyticsDesktopWindow:
             )
         self._replace_rows(self._trees["modules"], rows)
 
-    def _refresh_cameras(self, payload, vision=None):
+    def _refresh_cameras(self, payload, vision=None, events=None):
         vision = self.vision.snapshot() if vision is None else vision
         nvr_metrics = ((payload.get("nvr") or {}).get("snapshot") or {}).get("metrics") or {}
         connectivity = nvr_metrics.get("camera_connectivity") or {}
@@ -900,6 +972,82 @@ class AnalyticsDesktopWindow:
             ),
             fg=GREEN if active_count and not calibrating_count else YELLOW,
         )
+        if self._analysis_button is not None:
+            analyzing_count = active_count + calibrating_count
+            if names and analyzing_count == len(names):
+                self._analysis_button.configure(
+                    text=(
+                        "Análise calibrando"
+                        if calibrating_count
+                        else "Análise já ativa"
+                    ),
+                    state="disabled",
+                    disabledforeground=TEXT,
+                )
+            else:
+                self._analysis_button.configure(
+                    text="Iniciar análise das câmeras",
+                    state="normal" if self.activate_cameras else "disabled",
+                )
+        self._refresh_identifications(events=events)
+
+    def _refresh_identifications(self, events=None):
+        events = self.store.list_vision_events(limit=500) if events is None else events
+        profiles = self.face_service.list_profiles() if self.face_service else []
+        profiles_by_id = {item["profile_id"]: item for item in profiles}
+        confirmed = [
+            item
+            for item in events
+            if item.get("event_type") == "presence_confirmed"
+            and item.get("profile_id")
+        ][:200]
+        counts = Counter(item["profile_id"] for item in confirmed)
+        self._identification_profile_ids = {}
+        rows = []
+        for index, event in enumerate(confirmed):
+            profile_id = str(event["profile_id"])
+            profile = profiles_by_id.get(profile_id) or {}
+            display_name = profile.get("display_name") or "Perfil removido"
+            role = PROFILE_ROLE_LABELS.get(profile.get("role"), "-")
+            confidence = event.get("confidence")
+            try:
+                confidence_text = f"{max(0.0, min(float(confidence), 1.0)) * 100:.0f}%"
+            except (TypeError, ValueError, OverflowError):
+                confidence_text = "-"
+            item_id = f"identification-{index}"
+            if profile:
+                self._identification_profile_ids[item_id] = profile_id
+            rows.append(
+                (
+                    item_id,
+                    (
+                        event.get("occurred_at") or "-",
+                        str(event.get("stream") or "-").upper(),
+                        display_name,
+                        role,
+                        confidence_text,
+                    ),
+                )
+            )
+        self._replace_rows(self._trees["identifications"], rows)
+
+        if confirmed:
+            top_profile_id, top_count = counts.most_common(1)[0]
+            top_name = (profiles_by_id.get(top_profile_id) or {}).get(
+                "display_name", "Perfil removido"
+            )
+            self._labels["identification_summary"].configure(
+                text=(
+                    f"{len(confirmed)} confirmações | {len(counts)} perfil(is) | "
+                    f"Mais frequente: {top_name} ({top_count})"
+                ),
+                fg=GREEN,
+            )
+        else:
+            self._labels["identification_summary"].configure(
+                text="Nenhuma identificação confirmada.", fg=MUTED
+            )
+        self._update_profile_action_controls()
 
     def _refresh_behavior(self, events=None):
         events = self.store.list_vision_events(limit=500) if events is None else events
@@ -1679,10 +1827,7 @@ class AnalyticsDesktopWindow:
             self._trees["people"],
             rows,
         )
-        if self._delete_button is not None:
-            self._delete_button.configure(
-                state="disabled" if self.deletion_running else "normal"
-            )
+        self._update_profile_action_controls()
 
     def _schedule_refresh(self):
         self._cancel_refresh()
@@ -1711,6 +1856,86 @@ class AnalyticsDesktopWindow:
             self.activate_cameras()
         self.refresh()
 
+    def _update_profile_action_controls(self, _event=None):
+        busy = self.deletion_running or self.rename_running
+        people_selected = bool(
+            self._trees.get("people") and self._trees["people"].selection()
+        )
+        identification_selected = False
+        if self._trees.get("identifications"):
+            selection = self._trees["identifications"].selection()
+            identification_selected = bool(
+                selection and self._identification_profile_ids.get(selection[0])
+            )
+        if self._delete_button is not None:
+            self._delete_button.configure(
+                state="normal" if people_selected and not busy else "disabled"
+            )
+        if self._rename_button is not None:
+            self._rename_button.configure(
+                state="normal" if people_selected and not busy else "disabled"
+            )
+        if self._identification_rename_button is not None:
+            self._identification_rename_button.configure(
+                state=(
+                    "normal"
+                    if identification_selected and not busy
+                    else "disabled"
+                )
+            )
+
+    def _prompt_profile_rename(self, profile_id):
+        service = self.face_service
+        if not service:
+            return
+        profile = next(
+            (
+                item
+                for item in service.list_profiles()
+                if item.get("profile_id") == profile_id
+            ),
+            None,
+        )
+        if profile is None:
+            messagebox.showwarning(
+                "Perfil indisponível",
+                "O perfil selecionado não está mais disponível.",
+                parent=self.window,
+            )
+            return
+        display_name = simpledialog.askstring(
+            "Renomear pessoa",
+            "Novo nome para todas as ocorrências deste perfil:",
+            initialvalue=profile.get("display_name", ""),
+            parent=self.window,
+        )
+        if display_name is None:
+            return
+        display_name = display_name.strip()
+        if not display_name or display_name == profile.get("display_name"):
+            return
+        if not self._start_profile_rename(profile_id, display_name):
+            messagebox.showinfo(
+                "Alteração em andamento",
+                "Aguarde a conclusão da alteração atual.",
+                parent=self.window,
+            )
+
+    def _rename_selected_person(self):
+        tree = self._trees.get("people")
+        selection = tree.selection() if tree else ()
+        if selection:
+            self._prompt_profile_rename(selection[0])
+
+    def _rename_selected_identification(self):
+        tree = self._trees.get("identifications")
+        selection = tree.selection() if tree else ()
+        if not selection:
+            return
+        profile_id = self._identification_profile_ids.get(selection[0])
+        if profile_id:
+            self._prompt_profile_rename(profile_id)
+
     def _enroll_person(self):
         service = self.face_service
         if not service or not getattr(service, "available", False):
@@ -1736,7 +1961,11 @@ class AnalyticsDesktopWindow:
                 parent=self.window,
             )
             return
-        name = simpledialog.askstring("Nome", "Nome da pessoa:", parent=self.window)
+        name = simpledialog.askstring(
+            "Nome",
+            "Nome atual ou identificação temporária (ex.: Pessoa 1):",
+            parent=self.window,
+        )
         if not name:
             return
         consent = messagebox.askyesno(
@@ -1795,7 +2024,11 @@ class AnalyticsDesktopWindow:
 
     def wait_for_workers(self, timeout=3.0):
         deadline = time.monotonic() + max(0.1, float(timeout))
-        threads = (self._enrollment_thread, self._deletion_thread)
+        threads = (
+            self._enrollment_thread,
+            self._deletion_thread,
+            self._rename_thread,
+        )
         for thread in threads:
             if thread and thread is not threading.current_thread():
                 thread.join(max(0.0, deadline - time.monotonic()))
@@ -1818,6 +2051,9 @@ class AnalyticsDesktopWindow:
                     continue
                 if action == "deletion_complete":
                     self._finish_deletion(payload)
+                    continue
+                if action == "rename_complete":
+                    self._finish_profile_rename(payload)
                     continue
             finally:
                 self._ui_actions.task_done()
@@ -1843,13 +2079,77 @@ class AnalyticsDesktopWindow:
         with self._deletion_lock:
             return self._deletion_busy
 
+    @property
+    def rename_running(self):
+        with self._rename_lock:
+            return self._rename_busy
+
+    def _start_profile_rename(self, profile_id, display_name):
+        if self.deletion_running:
+            return False
+        with self._rename_lock:
+            if self._rename_busy:
+                return False
+            self._rename_busy = True
+        self._update_profile_action_controls()
+        thread = threading.Thread(
+            target=self._profile_rename_worker,
+            args=(str(profile_id), str(display_name)),
+            name="wimi-profile-rename",
+            daemon=True,
+        )
+        self._rename_thread = thread
+        thread.start()
+        return True
+
+    def _profile_rename_worker(self, profile_id, display_name):
+        result = {"renamed": False, "error": None}
+        try:
+            result["renamed"] = bool(
+                self.face_service.rename_profile(profile_id, display_name)
+            )
+        except Exception as caught:
+            result["error"] = str(caught)[:200]
+        try:
+            self._ui_actions.put_nowait(("rename_complete", result))
+        except queue.Full:
+            with self._rename_lock:
+                self._rename_busy = False
+
+    def _finish_profile_rename(self, result):
+        with self._rename_lock:
+            self._rename_busy = False
+        if self._destroyed or self.window is None or not self.window.winfo_exists():
+            return
+        self.refresh()
+        if result.get("error"):
+            messagebox.showerror(
+                "Nome não alterado",
+                result["error"],
+                parent=self.window,
+            )
+        elif not result.get("renamed"):
+            messagebox.showwarning(
+                "Perfil não encontrado",
+                "O perfil não está mais disponível no banco biométrico.",
+                parent=self.window,
+            )
+        else:
+            messagebox.showinfo(
+                "Nome atualizado",
+                "O novo nome já aparece em todo o histórico deste perfil.",
+                parent=self.window,
+            )
+        self._update_profile_action_controls()
+
     def _start_profile_deletion(self, profile_id):
+        if self.rename_running:
+            return False
         with self._deletion_lock:
             if self._deletion_busy:
                 return False
             self._deletion_busy = True
-        if self._delete_button is not None:
-            self._delete_button.configure(state="disabled")
+        self._update_profile_action_controls()
         thread = threading.Thread(
             target=self._profile_deletion_worker,
             args=(str(profile_id),),
@@ -1882,8 +2182,6 @@ class AnalyticsDesktopWindow:
             self._deletion_busy = False
         if self._destroyed or self.window is None or not self.window.winfo_exists():
             return
-        if self._delete_button is not None:
-            self._delete_button.configure(state="normal")
         self.refresh()
         if result.get("error"):
             messagebox.showerror(
