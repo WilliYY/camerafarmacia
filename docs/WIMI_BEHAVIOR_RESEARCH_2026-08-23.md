@@ -65,6 +65,9 @@ sem uma decisao explicita de licenca e um teste de carga prolongado.
    em blocos de 12 pixels e
    achatamento adicional de cada rosto detectado. Arquivos antigos permanecem
    inalterados.
+7. A aba Evidencias usa cards responsivos e paginacao de 24 miniaturas. Selecao
+   individual, marcar/desmarcar tudo e exclusao em lote reutilizam o arquivo
+   cifrado existente. A aba Comportamento e seu historico nao sao reiniciados.
 
 ## Limites
 

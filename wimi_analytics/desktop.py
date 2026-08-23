@@ -103,6 +103,10 @@ def _byte_size_text(byte_count):
 
 class AnalyticsDesktopWindow:
     REFRESH_MS = 3000
+    EVIDENCE_PAGE_SIZE = 24
+    EVIDENCE_CARD_WIDTH = 252
+    EVIDENCE_CARD_HEIGHT = 230
+    EVIDENCE_THUMBNAIL_SIZE = (232, 131)
 
     def __init__(
         self,
@@ -144,11 +148,25 @@ class AnalyticsDesktopWindow:
         self._deletion_thread = None
         self._delete_button = None
         self._evidence_delete_button = None
-        self._evidence_preview = None
-        self._evidence_photo = None
-        self._evidence_preview_id = None
-        self._evidence_source_image = None
-        self._evidence_resize_after_id = None
+        self._evidence_select_all_button = None
+        self._evidence_clear_selection_button = None
+        self._evidence_previous_button = None
+        self._evidence_next_button = None
+        self._evidence_page_label = None
+        self._evidence_tab = None
+        self._evidence_gallery_canvas = None
+        self._evidence_gallery_frame = None
+        self._evidence_canvas_window = None
+        self._evidence_cards = {}
+        self._evidence_selection_vars = {}
+        self._evidence_photo_cache = {}
+        self._evidence_selected_ids = set()
+        self._evidence_snapshots = []
+        self._evidence_snapshot_signature = None
+        self._evidence_status_snapshot = {}
+        self._evidence_gallery_dirty = True
+        self._evidence_page_index = 0
+        self._evidence_grid_columns = 0
         self._responsive_labels = []
         self._last_wraplength = None
 
@@ -184,7 +202,8 @@ class AnalyticsDesktopWindow:
             return
         self._destroyed = True
         self._cancel_refresh()
-        self._cancel_evidence_resize()
+        self._evidence_photo_cache.clear()
+        self._evidence_cards.clear()
         if self.window is not None and self.window.winfo_exists():
             self.window.destroy()
         self.window = None
@@ -198,6 +217,15 @@ class AnalyticsDesktopWindow:
         except queue.Full:
             pass
 
+    def _on_window_destroyed(self, event):
+        if event.widget is not self.window:
+            return
+        self._cancel_refresh()
+        self._evidence_photo_cache.clear()
+        self._evidence_cards.clear()
+        self._evidence_gallery_dirty = True
+        self.window = None
+
     def _build(self):
         if self.embedded:
             window = tk.Frame(self.parent, bg=BG)
@@ -210,6 +238,7 @@ class AnalyticsDesktopWindow:
             window.configure(bg=BG)
             window.protocol("WM_DELETE_WINDOW", self.hide)
         self.window = window
+        window.bind("<Destroy>", self._on_window_destroyed, add="+")
 
         style = ttk.Style(window)
         style.configure("Wimi.TNotebook", background=BG, borderwidth=0)
@@ -270,6 +299,9 @@ class AnalyticsDesktopWindow:
         self._build_evidence_tab()
         self._build_reports_tab()
         self._build_people_tab()
+        self.notebook.bind(
+            "<<NotebookTabChanged>>", self._on_notebook_tab_changed, add="+"
+        )
         window.bind("<Configure>", self._on_resize, add="+")
 
     def _tab(self, title):
@@ -525,58 +557,97 @@ class AnalyticsDesktopWindow:
 
     def _build_evidence_tab(self):
         tab = self._tab("Evidências")
+        self._evidence_tab = tab
         self._section_title(
             tab,
             "Capturas de atendimento anonimizadas",
             "Os rostos detectados são descaracterizados antes da gravação. Exclusão automática após 10 dias; nenhuma captura contém nome ou perfil biométrico.",
         )
         actions = tk.Frame(tab, bg=BG)
-        actions.pack(fill="x", padx=8, pady=(0, 10))
+        actions.pack(fill="x", padx=8, pady=(0, 8))
+        self._evidence_select_all_button = self._button(
+            actions, "☑ Marcar tudo", self._select_all_evidence, BLUE
+        )
+        self._evidence_select_all_button.pack(side="left")
+        self._evidence_clear_selection_button = self._button(
+            actions, "☐ Desmarcar", self._clear_evidence_selection, SURFACE_ALT
+        )
+        self._evidence_clear_selection_button.pack(side="left", padx=8)
         self._evidence_delete_button = self._button(
-            actions, "✕ Excluir", self._delete_evidence, RED
+            actions, "✕ Excluir (0)", self._delete_evidence, RED
         )
         self._evidence_delete_button.pack(side="left")
-        self._labels["evidence_status"] = tk.Label(
+        self._evidence_delete_button.configure(
+            state="disabled",
+            disabledforeground=MUTED,
+        )
+
+        self._evidence_next_button = self._button(
+            actions, "›", lambda: self._change_evidence_page(1), SURFACE_ALT
+        )
+        self._evidence_next_button.configure(width=3, padx=4)
+        self._evidence_next_button.pack(side="right")
+        self._evidence_page_label = tk.Label(
             actions,
+            text="Página 1 de 1",
+            font=("Segoe UI", 9, "bold"),
+            fg=MUTED,
+            bg=BG,
+        )
+        self._evidence_page_label.pack(side="right", padx=10)
+        self._evidence_previous_button = self._button(
+            actions, "‹", lambda: self._change_evidence_page(-1), SURFACE_ALT
+        )
+        self._evidence_previous_button.configure(width=3, padx=4)
+        self._evidence_previous_button.pack(side="right")
+
+        status_row = tk.Frame(tab, bg=BG)
+        status_row.pack(fill="x", padx=8, pady=(0, 8))
+        self._labels["evidence_status"] = tk.Label(
+            status_row,
             text="Retenção: 10 dias | aguardando capturas",
             font=("Segoe UI", 9),
             fg=MUTED,
             bg=BG,
+            justify="left",
+            anchor="w",
+            wraplength=1100,
         )
-        self._labels["evidence_status"].pack(side="left", padx=12)
+        self._labels["evidence_status"].pack(fill="x")
+        self._responsive_labels.append(self._labels["evidence_status"])
 
-        body = tk.PanedWindow(tab, orient="horizontal", bg=BG, sashwidth=5, bd=0)
-        body.pack(fill="both", expand=True, padx=8, pady=(0, 12))
-        left = tk.Frame(body, bg=BG)
-        right = tk.Frame(body, bg=SURFACE, highlightbackground=BORDER, highlightthickness=1)
-        body.add(left, minsize=620)
-        body.add(right, minsize=280)
-        evidence_tree = self._tree(
-            left,
-            "evidence",
-            (
-                ("captured", "Capturada em"),
-                ("camera", "Câmera"),
-                ("faces", "Rostos anonimizados"),
-                ("expires", "Exclusão automática"),
-                ("size", "Tamanho"),
-            ),
-            (160, 120, 135, 165, 90),
-            height=13,
+        gallery_shell = tk.Frame(tab, bg=BG)
+        gallery_shell.pack(fill="both", expand=True, padx=8, pady=(0, 12))
+        self._evidence_gallery_canvas = tk.Canvas(
+            gallery_shell,
+            bg=BG,
+            highlightthickness=0,
+            bd=0,
         )
-        evidence_tree.bind("<<TreeviewSelect>>", self._show_selected_evidence)
-        self._evidence_preview = tk.Label(
-            right,
-            text="Selecione uma captura",
-            font=("Segoe UI", 10),
-            fg=MUTED,
-            bg=SURFACE,
-            compound="top",
-            anchor="center",
+        gallery_scrollbar = ttk.Scrollbar(
+            gallery_shell,
+            orient="vertical",
+            command=self._evidence_gallery_canvas.yview,
         )
-        self._evidence_preview.pack(fill="both", expand=True, padx=12, pady=12)
-        self._evidence_preview.bind(
-            "<Configure>", self._schedule_evidence_resize, add="+"
+        self._evidence_gallery_canvas.configure(
+            yscrollcommand=gallery_scrollbar.set
+        )
+        self._evidence_gallery_canvas.pack(side="left", fill="both", expand=True)
+        gallery_scrollbar.pack(side="right", fill="y")
+        self._evidence_gallery_frame = tk.Frame(
+            self._evidence_gallery_canvas,
+            bg=BG,
+        )
+        self._evidence_canvas_window = self._evidence_gallery_canvas.create_window(
+            (0, 0),
+            window=self._evidence_gallery_frame,
+            anchor="nw",
+        )
+        self._evidence_gallery_frame.bind(
+            "<Configure>", self._update_evidence_scrollregion, add="+"
+        )
+        self._evidence_gallery_canvas.bind(
+            "<Configure>", self._layout_evidence_cards, add="+"
         )
 
     def _build_reports_tab(self):
@@ -1046,125 +1117,404 @@ class AnalyticsDesktopWindow:
     def _refresh_evidence(self, snapshots=None, status=None):
         archive = self.evidence_archive
         if archive is None:
-            self._labels["evidence_status"].configure(
-                text="Retenção: 10 dias | arquivo indisponível",
-                fg=YELLOW,
-            )
-            self._replace_rows(self._trees["evidence"], [])
-            return
-        snapshots = archive.list_snapshots(limit=200) if snapshots is None else snapshots
-        status = archive.status() if status is None else status
-        self._labels["evidence_status"].configure(
-            text=(
-                f"Retenção: {status.get('retention_days', 10)} dias | "
-                f"{len(snapshots)} captura(s) | {_byte_size_text(status.get('total_bytes'))} | "
-                "proteção: contexto pixelizado + rostos detectados descaracterizados"
-            ),
-            fg=GREEN if status.get("state") == "active" else YELLOW,
-        )
-        rows = [
+            snapshots = []
+            status = {"state": "unavailable", "retention_days": 10, "total_bytes": 0}
+        else:
+            snapshots = archive.list_snapshots(limit=200) if snapshots is None else snapshots
+            status = archive.status() if status is None else status
+
+        snapshots = list(snapshots or [])
+        status = dict(status or {})
+        signature = tuple(
             (
-                item["evidence_id"],
-                (
-                    item.get("captured_at", "-"),
-                    str(item.get("stream") or "-").upper(),
-                    item.get("face_count", 0),
-                    item.get("expires_at", "-"),
-                    _byte_size_text(item.get("byte_count")),
-                ),
+                item.get("evidence_id"),
+                item.get("captured_at"),
+                item.get("expires_at"),
+                item.get("stream"),
+                item.get("face_count"),
+                item.get("byte_count"),
+                item.get("anonymization"),
             )
             for item in snapshots
-        ]
-        self._replace_rows(self._trees["evidence"], rows)
-        evidence_ids = {item["evidence_id"] for item in snapshots}
-        if self._evidence_preview_id and self._evidence_preview_id not in evidence_ids:
-            self._cancel_evidence_resize()
-            self._evidence_preview_id = None
-            self._evidence_photo = None
-            self._evidence_source_image = None
-            self._evidence_preview.configure(image="", text="Selecione uma captura")
-
-    def _show_selected_evidence(self, _event=None):
-        selection = self._trees["evidence"].selection()
-        if not selection or self.evidence_archive is None:
-            return
-        image = self.evidence_archive.read_image(selection[0])
-        if image is None:
-            self._cancel_evidence_resize()
-            self._evidence_preview_id = None
-            self._evidence_photo = None
-            self._evidence_source_image = None
-            self._evidence_preview.configure(
-                image="",
-                text="Captura indisponível ou não pôde ser descriptografada",
-            )
-            return
-        self._evidence_preview_id = selection[0]
-        self._evidence_source_image = image
-        self._render_evidence_preview()
-
-    def _render_evidence_preview(self):
-        self._evidence_resize_after_id = None
-        if self._evidence_source_image is None or self._evidence_preview is None:
-            return
-        if not self._evidence_preview.winfo_exists():
-            return
-        preview_width = max(1, self._evidence_preview.winfo_width() - 24)
-        preview_height = max(1, self._evidence_preview.winfo_height() - 44)
-        if preview_width < 40 or preview_height < 40:
-            return
-        image = self._evidence_source_image.copy()
-        image.thumbnail(
-            (min(preview_width, 1280), min(preview_height, 720)),
-            Image.Resampling.LANCZOS,
         )
-        self._evidence_photo = ImageTk.PhotoImage(image)
-        self._evidence_preview.configure(
-            image=self._evidence_photo,
-            text="Rostos detectados descaracterizados antes do armazenamento",
+        evidence_ids = {
+            item.get("evidence_id") for item in snapshots if item.get("evidence_id")
+        }
+        self._evidence_selected_ids.intersection_update(evidence_ids)
+        self._evidence_snapshots = snapshots
+        self._evidence_status_snapshot = status
+        page_count = self._evidence_page_count()
+        self._evidence_page_index = min(
+            self._evidence_page_index,
+            max(0, page_count - 1),
         )
+        if signature != self._evidence_snapshot_signature:
+            self._evidence_snapshot_signature = signature
+            self._evidence_gallery_dirty = True
+        if self._evidence_tab_is_selected() and self._evidence_gallery_dirty:
+            self._render_evidence_gallery()
+        else:
+            self._sync_evidence_card_selection()
+        self._update_evidence_controls()
 
-    def _schedule_evidence_resize(self, _event=None):
-        if self._evidence_source_image is None or self.window is None:
-            return
-        self._cancel_evidence_resize()
+    def _evidence_tab_is_selected(self):
+        if self.notebook is None or self._evidence_tab is None:
+            return False
         try:
-            self._evidence_resize_after_id = self.window.after(
-                120, self._render_evidence_preview
-            )
+            return self.notebook.select() == str(self._evidence_tab)
         except tk.TclError:
-            self._evidence_resize_after_id = None
+            return False
 
-    def _cancel_evidence_resize(self):
-        if self._evidence_resize_after_id and self.window is not None:
-            try:
-                self.window.after_cancel(self._evidence_resize_after_id)
-            except tk.TclError:
-                pass
-        self._evidence_resize_after_id = None
+    def _on_notebook_tab_changed(self, _event=None):
+        if not self._evidence_tab_is_selected() or not self._evidence_gallery_dirty:
+            return
+        self._render_evidence_gallery()
+        self._update_evidence_controls()
+
+    def _evidence_page_count(self):
+        count = len(self._evidence_snapshots)
+        return max(1, (count + self.EVIDENCE_PAGE_SIZE - 1) // self.EVIDENCE_PAGE_SIZE)
+
+    def _evidence_page_items(self):
+        start = self._evidence_page_index * self.EVIDENCE_PAGE_SIZE
+        return self._evidence_snapshots[start : start + self.EVIDENCE_PAGE_SIZE]
+
+    @staticmethod
+    def _evidence_time_text(value):
+        text = str(value or "-").replace("T", " ")
+        return text[:19]
+
+    def _render_evidence_gallery(self):
+        frame = self._evidence_gallery_frame
+        if frame is None or not frame.winfo_exists():
+            return
+        for child in frame.winfo_children():
+            child.destroy()
+        self._evidence_cards.clear()
+        self._evidence_selection_vars.clear()
+        self._evidence_photo_cache.clear()
+
+        page_items = self._evidence_page_items()
+        if not page_items:
+            empty = tk.Label(
+                frame,
+                text="Nenhuma captura anonimizada disponível.",
+                font=("Segoe UI", 11),
+                fg=MUTED,
+                bg=BG,
+            )
+            empty.grid(row=0, column=0, padx=18, pady=40, sticky="w")
+        else:
+            for item in page_items:
+                self._build_evidence_card(item)
+        self._layout_evidence_cards()
+        self._evidence_gallery_dirty = False
+        if self._evidence_gallery_canvas is not None:
+            self._evidence_gallery_canvas.yview_moveto(0.0)
+
+    def _build_evidence_card(self, item):
+        evidence_id = str(item.get("evidence_id") or "")
+        if not evidence_id:
+            return
+        selected = evidence_id in self._evidence_selected_ids
+        card = tk.Frame(
+            self._evidence_gallery_frame,
+            width=self.EVIDENCE_CARD_WIDTH,
+            height=self.EVIDENCE_CARD_HEIGHT,
+            bg=SURFACE,
+            highlightbackground=BLUE if selected else BORDER,
+            highlightcolor=BLUE if selected else BORDER,
+            highlightthickness=2 if selected else 1,
+        )
+        card.grid_propagate(False)
+        card.pack_propagate(False)
+
+        variable = tk.BooleanVar(value=selected)
+        header = tk.Frame(card, bg=SURFACE)
+        header.pack(fill="x", padx=8, pady=(6, 4))
+        checkbox = tk.Checkbutton(
+            header,
+            text=f"Selecionar  |  {str(item.get('stream') or '-').upper()}",
+            variable=variable,
+            command=lambda item_id=evidence_id: self._set_evidence_selected(
+                item_id,
+                bool(self._evidence_selection_vars[item_id].get()),
+            ),
+            font=("Segoe UI", 9, "bold"),
+            fg=TEXT,
+            bg=SURFACE,
+            activeforeground=TEXT,
+            activebackground=SURFACE,
+            selectcolor=SURFACE_ALT,
+            anchor="w",
+            bd=0,
+            highlightthickness=0,
+            cursor="hand2",
+        )
+        checkbox.pack(fill="x")
+
+        image_area = tk.Frame(
+            card,
+            width=self.EVIDENCE_THUMBNAIL_SIZE[0],
+            height=self.EVIDENCE_THUMBNAIL_SIZE[1],
+            bg=SURFACE_ALT,
+        )
+        image_area.pack(padx=8)
+        image_area.pack_propagate(False)
+        photo = self._load_evidence_thumbnail(evidence_id)
+        preview = tk.Label(
+            image_area,
+            image=photo or "",
+            text="" if photo else "Captura indisponível",
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg=SURFACE_ALT,
+            anchor="center",
+            cursor="hand2",
+        )
+        preview.pack(fill="both", expand=True)
+        if photo is not None:
+            self._evidence_photo_cache[evidence_id] = photo
+
+        captured = self._evidence_time_text(item.get("captured_at"))
+        expires = self._evidence_time_text(item.get("expires_at"))
+        faces = max(0, int(item.get("face_count") or 0))
+        detail = tk.Label(
+            card,
+            text=(
+                f"{captured}\n"
+                f"Análise: {faces} rosto(s) anonimizado(s)  |  "
+                f"{_byte_size_text(item.get('byte_count'))}\n"
+                f"Exclusão automática: {expires}"
+            ),
+            font=("Segoe UI", 8),
+            fg=MUTED,
+            bg=SURFACE,
+            justify="left",
+            anchor="w",
+            wraplength=self.EVIDENCE_THUMBNAIL_SIZE[0],
+        )
+        detail.pack(fill="x", padx=9, pady=(5, 7))
+        for widget in (preview, detail):
+            widget.bind(
+                "<Button-1>",
+                lambda _event, item_id=evidence_id: self._toggle_evidence_selected(
+                    item_id
+                ),
+                add="+",
+            )
+
+        self._evidence_cards[evidence_id] = {
+            "frame": card,
+            "checkbox": checkbox,
+            "preview": preview,
+        }
+        self._evidence_selection_vars[evidence_id] = variable
+
+    def _load_evidence_thumbnail(self, evidence_id):
+        if self.evidence_archive is None:
+            return None
+        try:
+            source = self.evidence_archive.read_image(evidence_id)
+        except Exception:
+            return None
+        if source is None:
+            return None
+        image = source.convert("RGB")
+        image.thumbnail(self.EVIDENCE_THUMBNAIL_SIZE, Image.Resampling.LANCZOS)
+        thumbnail = Image.new("RGB", self.EVIDENCE_THUMBNAIL_SIZE, SURFACE_ALT)
+        offset = (
+            (self.EVIDENCE_THUMBNAIL_SIZE[0] - image.width) // 2,
+            (self.EVIDENCE_THUMBNAIL_SIZE[1] - image.height) // 2,
+        )
+        thumbnail.paste(image, offset)
+        return ImageTk.PhotoImage(thumbnail, master=self.window)
+
+    def _layout_evidence_cards(self, event=None):
+        canvas = self._evidence_gallery_canvas
+        frame = self._evidence_gallery_frame
+        if canvas is None or frame is None:
+            return
+        width = int(getattr(event, "width", 0) or canvas.winfo_width() or 1)
+        try:
+            canvas.itemconfigure(self._evidence_canvas_window, width=max(1, width))
+        except tk.TclError:
+            return
+        columns = max(1, width // (self.EVIDENCE_CARD_WIDTH + 16))
+        for column in range(max(columns, self._evidence_grid_columns)):
+            frame.grid_columnconfigure(
+                column,
+                weight=1 if column < columns else 0,
+                uniform="evidence-gallery" if column < columns else "",
+            )
+        for index, item in enumerate(self._evidence_page_items()):
+            card_data = self._evidence_cards.get(str(item.get("evidence_id") or ""))
+            if card_data:
+                card_data["frame"].grid(
+                    row=index // columns,
+                    column=index % columns,
+                    padx=6,
+                    pady=6,
+                    sticky="n",
+                )
+        self._evidence_grid_columns = columns
+        self._update_evidence_scrollregion()
+
+    def _update_evidence_scrollregion(self, _event=None):
+        if self._evidence_gallery_canvas is None:
+            return
+        bounds = self._evidence_gallery_canvas.bbox("all")
+        if bounds:
+            self._evidence_gallery_canvas.configure(scrollregion=bounds)
+
+    def _sync_evidence_card_selection(self):
+        for evidence_id, card in self._evidence_cards.items():
+            selected = evidence_id in self._evidence_selected_ids
+            variable = self._evidence_selection_vars.get(evidence_id)
+            if variable is not None and bool(variable.get()) != selected:
+                variable.set(selected)
+            card["frame"].configure(
+                highlightbackground=BLUE if selected else BORDER,
+                highlightcolor=BLUE if selected else BORDER,
+                highlightthickness=2 if selected else 1,
+            )
+
+    def _set_evidence_selected(self, evidence_id, selected):
+        valid_ids = {
+            str(item.get("evidence_id") or "") for item in self._evidence_snapshots
+        }
+        if evidence_id not in valid_ids:
+            return
+        if selected:
+            self._evidence_selected_ids.add(evidence_id)
+        else:
+            self._evidence_selected_ids.discard(evidence_id)
+        self._sync_evidence_card_selection()
+        self._update_evidence_controls()
+
+    def _toggle_evidence_selected(self, evidence_id):
+        self._set_evidence_selected(
+            evidence_id,
+            evidence_id not in self._evidence_selected_ids,
+        )
+
+    def _select_all_evidence(self):
+        self._evidence_selected_ids = {
+            str(item.get("evidence_id") or "")
+            for item in self._evidence_snapshots
+            if item.get("evidence_id")
+        }
+        self._sync_evidence_card_selection()
+        self._update_evidence_controls()
+
+    def _clear_evidence_selection(self):
+        self._evidence_selected_ids.clear()
+        self._sync_evidence_card_selection()
+        self._update_evidence_controls()
+
+    def _change_evidence_page(self, delta):
+        page_count = self._evidence_page_count()
+        target = max(0, min(self._evidence_page_index + int(delta), page_count - 1))
+        if target == self._evidence_page_index:
+            return
+        self._evidence_page_index = target
+        self._render_evidence_gallery()
+        self._update_evidence_controls()
+
+    def _update_evidence_controls(self):
+        count = len(self._evidence_snapshots)
+        selected_count = len(self._evidence_selected_ids)
+        status = self._evidence_status_snapshot
+        if self._labels.get("evidence_status") is not None:
+            unavailable = self.evidence_archive is None
+            text = (
+                f"Retenção: {status.get('retention_days', 10)} dias | "
+                f"{count} captura(s) | {selected_count} selecionada(s) | "
+                f"{_byte_size_text(status.get('total_bytes'))} | "
+                "proteção: contexto pixelizado + rostos detectados descaracterizados"
+            )
+            if unavailable:
+                text = "Retenção: 10 dias | arquivo de evidências indisponível"
+            self._labels["evidence_status"].configure(
+                text=text,
+                fg=GREEN if status.get("state") == "active" else YELLOW,
+            )
+
+        if self._evidence_delete_button is not None:
+            self._evidence_delete_button.configure(
+                text=f"✕ Excluir ({selected_count})",
+                state="normal" if selected_count else "disabled",
+            )
+        if self._evidence_select_all_button is not None:
+            self._evidence_select_all_button.configure(
+                state="normal" if count and selected_count < count else "disabled"
+            )
+        if self._evidence_clear_selection_button is not None:
+            self._evidence_clear_selection_button.configure(
+                state="normal" if selected_count else "disabled"
+            )
+
+        page_count = self._evidence_page_count()
+        start = self._evidence_page_index * self.EVIDENCE_PAGE_SIZE
+        shown_from = start + 1 if count else 0
+        shown_to = min(count, start + self.EVIDENCE_PAGE_SIZE)
+        if self._evidence_page_label is not None:
+            self._evidence_page_label.configure(
+                text=(
+                    f"Página {self._evidence_page_index + 1} de {page_count}"
+                    f"  |  {shown_from}-{shown_to} de {count}"
+                )
+            )
+        if self._evidence_previous_button is not None:
+            self._evidence_previous_button.configure(
+                state="normal" if self._evidence_page_index > 0 else "disabled"
+            )
+        if self._evidence_next_button is not None:
+            self._evidence_next_button.configure(
+                state=(
+                    "normal"
+                    if self._evidence_page_index + 1 < page_count
+                    else "disabled"
+                )
+            )
 
     def _delete_evidence(self):
-        selection = self._trees["evidence"].selection()
-        if not selection or self.evidence_archive is None:
+        if not self._evidence_selected_ids or self.evidence_archive is None:
             return
+        ordered_ids = [
+            str(item.get("evidence_id") or "")
+            for item in self._evidence_snapshots
+            if str(item.get("evidence_id") or "") in self._evidence_selected_ids
+        ]
+        count = len(ordered_ids)
+        prompt = (
+            "Excluir definitivamente a captura anonimizada selecionada?"
+            if count == 1
+            else f"Excluir definitivamente as {count} capturas anonimizadas selecionadas?"
+        )
         if not messagebox.askyesno(
-            "Excluir captura",
-            "Excluir definitivamente a captura anonimizada selecionada?",
+            "Excluir capturas",
+            prompt,
             parent=self.window,
         ):
             return
-        if not self.evidence_archive.delete(selection[0]):
+        failures = []
+        for evidence_id in ordered_ids:
+            try:
+                deleted = self.evidence_archive.delete(evidence_id)
+            except Exception:
+                deleted = False
+            if not deleted:
+                failures.append(evidence_id)
+        self._evidence_selected_ids = set(failures)
+        self._evidence_snapshot_signature = None
+        self._refresh_evidence()
+        if failures:
             messagebox.showwarning(
-                "Captura não removida",
-                "Não foi possível remover a captura agora.",
+                "Capturas não removidas",
+                f"Não foi possível remover {len(failures)} captura(s) agora.",
                 parent=self.window,
             )
-            return
-        self._evidence_photo = None
-        self._evidence_preview_id = None
-        self._evidence_source_image = None
-        self._evidence_preview.configure(image="", text="Selecione uma captura")
-        self._refresh_evidence()
 
     def _refresh_reports(self):
         reports = self.store.list_reports(limit=200)

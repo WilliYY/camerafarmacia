@@ -100,7 +100,11 @@ tracking individual, inferencia de emocao, intencao ou produtividade.
 - **Comportamento:** movimento e presenca agregados, com origem e horario.
 - **Rede:** conexao/gateway, dispositivos vistos e aplicativos TCP deste PC em
   subabas persistentes.
-- **Evidencias:** miniaturas descaracterizadas, expiracao e exclusao manual.
+- **Evidencias:** galeria responsiva de cards com miniaturas descaracterizadas,
+  metadados de analise, expiracao, selecao individual, marcar/desmarcar tudo e
+  exclusao manual em lote confirmada. A paginacao mantem no maximo 24 miniaturas
+  descriptografadas em memoria e so as carrega com a aba visivel, sem alterar o
+  historico de comportamento.
 - **Relatorios:** coletas persistidas, filtros de periodo e detalhes.
 - **Pessoas:** cadastro, ativacao e exclusao de perfis consentidos.
 

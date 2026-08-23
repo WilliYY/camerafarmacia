@@ -74,6 +74,7 @@ class FakeEvidenceArchive:
     def __init__(self, snapshots=None):
         self.snapshots = list(snapshots or [])
         self.deleted = []
+        self.read_ids = []
 
     def list_snapshots(self, limit=200):
         return list(self.snapshots[:limit])
@@ -88,6 +89,7 @@ class FakeEvidenceArchive:
         }
 
     def read_image(self, evidence_id):
+        self.read_ids.append(evidence_id)
         if any(item["evidence_id"] == evidence_id for item in self.snapshots):
             return Image.new("RGB", (320, 180), "#345678")
         return None
@@ -203,6 +205,23 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
 
         controller.destroy()
         self.assertIsNone(controller.window)
+
+    def test_external_window_destroy_cancels_refresh_callback(self):
+        controller = AnalyticsDesktopWindow(
+            self.root,
+            FakeCollector(),
+            FakeStore(),
+            FakeVision(),
+            face_service=FakeFaceService(),
+            evidence_archive=FakeEvidenceArchive(),
+        )
+
+        self.assertTrue(controller.show())
+        self.assertIsNotNone(controller._after_id)
+        controller.window.destroy()
+        self.root.update()
+
+        self.assertIsNone(controller._after_id)
 
     def test_embeds_in_existing_panel_without_creating_a_second_window(self):
         panel = tk.Frame(self.root)
@@ -451,7 +470,7 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
             controller._trees["network_applications"].item("application-2", "values"),
         )
 
-    def test_evidence_tab_previews_anonymized_capture_and_deletes_on_request(self):
+    def test_evidence_tab_renders_gallery_and_selection_controls(self):
         archive = FakeEvidenceArchive(
             [
                 {
@@ -463,7 +482,17 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
                     "byte_count": 32768,
                     "face_count": 2,
                     "anonymization": "face_regions_pixelated",
-                }
+                },
+                {
+                    "evidence_id": "evidence-2",
+                    "captured_at": "2026-08-16T10:05:00",
+                    "expires_at": "2026-08-26T10:05:00",
+                    "stream": "farmacia2",
+                    "category": "service_observation",
+                    "byte_count": 24576,
+                    "face_count": 1,
+                    "anonymization": "full_frame_pixelated_faces_flattened",
+                },
             ]
         )
         controller = AnalyticsDesktopWindow(
@@ -476,48 +505,111 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         )
 
         self.assertTrue(controller.show())
+        self.assertEqual(archive.read_ids, [])
+        controller.notebook.select(4)
         self.root.update()
         evidence_status = controller._labels["evidence_status"].cget("text")
         self.assertIn("10 dias", evidence_status)
         self.assertIn("rostos detectados descaracterizados", evidence_status)
         self.assertNotIn("identificáveis: não", evidence_status)
         self.assertIn("✕", controller._evidence_delete_button.cget("text"))
-        controller._trees["evidence"].selection_set("evidence-1")
-        with patch.object(controller._evidence_preview, "winfo_width", return_value=640), patch.object(
-            controller._evidence_preview, "winfo_height", return_value=420
-        ):
-            controller._show_selected_evidence()
-        self.assertIsNotNone(controller._evidence_photo)
-        with patch.object(controller._evidence_preview, "winfo_width", return_value=120), patch.object(
-            controller._evidence_preview, "winfo_height", return_value=100
-        ):
-            controller._render_evidence_preview()
-        self.assertLessEqual(controller._evidence_photo.width(), 96)
-        self.assertLessEqual(controller._evidence_photo.height(), 56)
+        self.assertEqual(set(controller._evidence_cards), {"evidence-1", "evidence-2"})
+        self.assertEqual(set(controller._evidence_photo_cache), {"evidence-1", "evidence-2"})
+        self.assertLessEqual(controller._evidence_photo_cache["evidence-1"].width(), 232)
+        self.assertLessEqual(controller._evidence_photo_cache["evidence-1"].height(), 131)
+        reads_after_render = list(archive.read_ids)
+        controller._refresh_evidence()
+        self.assertEqual(archive.read_ids, reads_after_render)
 
-        archive.snapshots = []
-        controller._refresh_evidence()
-        self.assertIsNone(controller._evidence_photo)
-        archive.snapshots = [
-            {
-                "evidence_id": "evidence-1",
-                "captured_at": "2026-08-16T10:00:00",
-                "expires_at": "2026-08-26T10:00:00",
-                "stream": "farmacia",
-                "category": "service_observation",
-                "byte_count": 32768,
-                "face_count": 2,
-                "anonymization": "full_frame_pixelated_faces_flattened",
-            }
-        ]
-        controller._refresh_evidence()
-        controller._trees["evidence"].selection_set("evidence-1")
+        controller._select_all_evidence()
+        self.assertEqual(controller._evidence_selected_ids, {"evidence-1", "evidence-2"})
+        self.assertIn("2", controller._evidence_delete_button.cget("text"))
+        controller._clear_evidence_selection()
+        self.assertEqual(controller._evidence_selected_ids, set())
+        self.assertEqual(str(controller._evidence_delete_button.cget("state")), "disabled")
+        controller.destroy()
+
+    def test_evidence_tab_deletes_multiple_selected_captures(self):
+        archive = FakeEvidenceArchive(
+            [
+                {
+                    "evidence_id": f"evidence-{index}",
+                    "captured_at": f"2026-08-16T10:0{index}:00",
+                    "expires_at": f"2026-08-26T10:0{index}:00",
+                    "stream": "farmacia",
+                    "category": "service_observation",
+                    "byte_count": 20000 + index,
+                    "face_count": index,
+                    "anonymization": "full_frame_pixelated_faces_flattened",
+                }
+                for index in range(1, 4)
+            ]
+        )
+        controller = AnalyticsDesktopWindow(
+            self.root,
+            FakeCollector(),
+            FakeStore(),
+            FakeVision(),
+            face_service=FakeFaceService(),
+            evidence_archive=archive,
+        )
+
+        self.assertTrue(controller.show())
+        controller.notebook.select(4)
+        self.root.update()
+        controller._set_evidence_selected("evidence-1", True)
+        controller._set_evidence_selected("evidence-3", True)
 
         with patch("wimi_analytics.desktop.messagebox.askyesno", return_value=True):
             controller._delete_evidence()
 
-        self.assertEqual(archive.deleted, ["evidence-1"])
-        self.assertEqual(controller._trees["evidence"].get_children(), ())
+        self.assertEqual(archive.deleted, ["evidence-1", "evidence-3"])
+        self.assertEqual([item["evidence_id"] for item in archive.snapshots], ["evidence-2"])
+        self.assertEqual(set(controller._evidence_cards), {"evidence-2"})
+        self.assertEqual(controller._evidence_selected_ids, set())
+        controller.destroy()
+
+    def test_evidence_gallery_pages_thumbnails_but_selects_all_captures(self):
+        archive = FakeEvidenceArchive(
+            [
+                {
+                    "evidence_id": f"evidence-{index:02d}",
+                    "captured_at": "2026-08-16T10:00:00",
+                    "expires_at": "2026-08-26T10:00:00",
+                    "stream": "farmacia",
+                    "category": "service_observation",
+                    "byte_count": 20000,
+                    "face_count": 1,
+                    "anonymization": "full_frame_pixelated_faces_flattened",
+                }
+                for index in range(30)
+            ]
+        )
+        controller = AnalyticsDesktopWindow(
+            self.root,
+            FakeCollector(),
+            FakeStore(),
+            FakeVision(),
+            face_service=FakeFaceService(),
+            evidence_archive=archive,
+        )
+
+        self.assertTrue(controller.show())
+        controller.notebook.select(4)
+        self.root.update()
+        self.assertEqual(len(controller._evidence_cards), 24)
+        self.assertEqual(len(controller._evidence_photo_cache), 24)
+
+        controller._select_all_evidence()
+        self.assertEqual(len(controller._evidence_selected_ids), 30)
+        controller._change_evidence_page(1)
+        self.root.update()
+
+        self.assertEqual(len(controller._evidence_cards), 6)
+        self.assertEqual(len(controller._evidence_photo_cache), 6)
+        self.assertIn("Página 2 de 2", controller._evidence_page_label.cget("text"))
+        self.assertTrue(all(variable.get() for variable in controller._evidence_selection_vars.values()))
+        controller.destroy()
 
     def test_profile_deletion_also_removes_operational_presence_history(self):
         class DeletionStore(FakeStore):

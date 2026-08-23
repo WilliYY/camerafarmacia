@@ -221,7 +221,13 @@ Capturas de atendimento usam apenas deteccoes com caixas completas, preservam
 um quadro de contexto de ate `1280x720` em JPEG 82, aplicam pixelizacao global
 equilibrada em blocos de 12 pixels e achatam todos os rostos detectados antes da
 persistencia. Sao cifradas com DPAPI e ficam limitadas a 256 MB. O painel informa
-a exclusao automatica em 10 dias e oferece exclusao manual; as capturas nao
+a exclusao automatica em 10 dias e apresenta as capturas em uma galeria
+responsiva. Cada card mostra a miniatura anonimizada, camera, horario, quantidade
+de rostos descaracterizados, tamanho e expiracao. A interface permite selecionar
+varias capturas, marcar ou desmarcar todas e confirmar uma exclusao em lote. Sao
+mantidas no maximo 24 miniaturas descriptografadas em memoria por pagina e elas
+so sao abertas quando a aba Evidencias esta visivel; marcar tudo inclui o
+historico listado sem carregar todas as imagens. As capturas nao
 recebem nome nem `profile_id`. Capturas antigas nao sao reprocessadas.
 
 O NanoDet quantizado do OpenCV Zoo usa o mesmo quadro do preview, sem nova
