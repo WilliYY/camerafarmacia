@@ -104,9 +104,15 @@ tracking individual, inferencia de emocao, intencao ou produtividade.
   metadados de analise, expiracao, selecao individual, marcar/desmarcar tudo e
   exclusao manual em lote confirmada. A paginacao mantem no maximo 24 miniaturas
   descriptografadas em memoria e so as carrega com a aba visivel, sem alterar o
-  historico de comportamento.
+  historico de comportamento. A mesma area possui a subaba `Pessoas cadastradas`
+  para cadastro, classificacao manual de funcao, ranking e exclusao de perfis
+  consentidos.
 - **Relatorios:** coletas persistidas, filtros de periodo e detalhes.
-- **Pessoas:** cadastro, ativacao e exclusao de perfis consentidos.
+
+O reconhecimento retorna automaticamente o nome e a funcao de perfis ja
+cadastrados. A funcao nunca e inferida pela aparencia: e selecionada durante o
+cadastro consentido. A aba `Cameras` mostra ambos depois da confirmacao. Rosto
+desconhecido permanece desconhecido e nao cria perfil.
 
 Trocar de aba apenas muda a visualizacao. O coletor, a fila limitada, os
 previews e o banco mantem o estado. A navegacao superior tambem pode ser

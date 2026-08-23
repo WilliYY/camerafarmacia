@@ -179,7 +179,37 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         self.assertIn("Pico amostrado: 2", summary)
         self.assertIn("30 s", summary)
 
-    def test_reuses_one_native_window_and_preserves_seven_tabs(self):
+    def test_camera_tab_shows_manually_assigned_role_after_recognition(self):
+        class RecognizedVision(FakeVision):
+            def snapshot(self):
+                return {
+                    "farmacia": {
+                        "state": "active",
+                        "identities": [
+                            {
+                                "display_name": "Maria",
+                                "role": "employee",
+                            }
+                        ],
+                    }
+                }
+
+        controller = AnalyticsDesktopWindow(
+            self.root,
+            FakeCollector(),
+            FakeStore(),
+            RecognizedVision(),
+            face_service=FakeFaceService(),
+        )
+
+        self.assertTrue(controller.show())
+        self.root.update()
+        camera_values = controller._trees["cameras"].item("camera-0", "values")
+
+        self.assertIn("Maria (Funcionário)", camera_values)
+        controller.destroy()
+
+    def test_reuses_one_native_window_and_groups_people_inside_evidence(self):
         controller = AnalyticsDesktopWindow(
             self.root,
             FakeCollector(),
@@ -192,16 +222,24 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         self.assertTrue(controller.show())
         first_window = controller.window
         self.root.update()
-        self.assertEqual(len(controller.notebook.tabs()), 7)
-        self.assertIn(
-            "Evidências",
-            [controller.notebook.tab(tab, "text") for tab in controller.notebook.tabs()],
+        top_level_tabs = [
+            controller.notebook.tab(tab, "text") for tab in controller.notebook.tabs()
+        ]
+        self.assertEqual(len(top_level_tabs), 6)
+        self.assertIn("Evidências", top_level_tabs)
+        self.assertNotIn("Pessoas", top_level_tabs)
+        self.assertEqual(
+            [
+                controller._evidence_notebook.tab(tab, "text")
+                for tab in controller._evidence_notebook.tabs()
+            ],
+            ["Capturas", "Pessoas cadastradas"],
         )
 
         controller.hide()
         self.assertTrue(controller.show())
         self.assertIs(controller.window, first_window)
-        self.assertEqual(len(controller.notebook.tabs()), 7)
+        self.assertEqual(len(controller.notebook.tabs()), 6)
 
         controller.destroy()
         self.assertIsNone(controller.window)
@@ -242,7 +280,7 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
 
         self.assertIsInstance(embedded_frame, tk.Frame)
         self.assertIs(embedded_frame.winfo_toplevel(), self.root)
-        self.assertEqual(len(controller.notebook.tabs()), 7)
+        self.assertEqual(len(controller.notebook.tabs()), 6)
 
         controller.hide()
         self.assertTrue(controller.show())
@@ -258,7 +296,7 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
             available = True
             status = "ready"
 
-            def enroll(self, name, frame, consent=False):
+            def enroll(self, name, frame, consent=False, role="authorized"):
                 started.set()
                 release.wait(2)
                 return "profile-1"
@@ -272,7 +310,7 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         )
         controller.show()
 
-        controller._start_enrollment("Pessoa", object())
+        controller._start_enrollment("Pessoa", object(), "employee")
         self.assertTrue(started.wait(1))
         self.assertTrue(controller.enrollment_running)
 
@@ -317,7 +355,13 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
             status = "ready"
 
             def list_profiles(self):
-                return [{"profile_id": "profile-1", "display_name": "Pessoa Consentida"}]
+                return [
+                    {
+                        "profile_id": "profile-1",
+                        "display_name": "Pessoa Consentida",
+                        "role": "employee",
+                    }
+                ]
 
         controller = AnalyticsDesktopWindow(
             self.root,
@@ -334,6 +378,7 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
 
         self.assertIn("1º", people_values)
         self.assertIn("Pessoa Consentida", people_values)
+        self.assertIn("Funcionário", people_values)
         self.assertIn("1 h 2 min", people_values)
         self.assertIn("Tráfego deste PC: 2,0 KB/s", network_text)
         self.assertIn("conteúdo não coletado", network_text)
@@ -527,6 +572,41 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         controller._clear_evidence_selection()
         self.assertEqual(controller._evidence_selected_ids, set())
         self.assertEqual(str(controller._evidence_delete_button.cget("state")), "disabled")
+        controller.destroy()
+
+    def test_people_subtab_does_not_decrypt_evidence_until_captures_are_visible(self):
+        archive = FakeEvidenceArchive(
+            [
+                {
+                    "evidence_id": "evidence-1",
+                    "captured_at": "2026-08-16T10:00:00",
+                    "expires_at": "2026-08-26T10:00:00",
+                    "stream": "farmacia",
+                    "category": "service_observation",
+                    "byte_count": 32768,
+                    "face_count": 1,
+                    "anonymization": "face_regions_pixelated",
+                }
+            ]
+        )
+        controller = AnalyticsDesktopWindow(
+            self.root,
+            FakeCollector(),
+            FakeStore(),
+            FakeVision(),
+            face_service=FakeFaceService(),
+            evidence_archive=archive,
+        )
+
+        self.assertTrue(controller.show())
+        controller._evidence_notebook.select(controller._evidence_people_tab)
+        controller.notebook.select(controller._evidence_tab)
+        self.root.update()
+        self.assertEqual(archive.read_ids, [])
+
+        controller._evidence_notebook.select(controller._evidence_capture_tab)
+        self.root.update()
+        self.assertEqual(archive.read_ids, ["evidence-1"])
         controller.destroy()
 
     def test_evidence_tab_deletes_multiple_selected_captures(self):

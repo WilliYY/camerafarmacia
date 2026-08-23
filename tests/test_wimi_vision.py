@@ -360,12 +360,56 @@ class BiometricStoreTests(unittest.TestCase):
                 "Maria Teste",
                 Image.new("RGB", (64, 64), "white"),
                 consent=True,
+                role="employee",
             )
 
             self.assertEqual(service.list_profiles()[0]["display_name"], "Maria Teste")
+            self.assertEqual(service.list_profiles()[0]["role"], "employee")
             self.assertNotIn(b"Maria Teste", db_path.read_bytes())
+            self.assertNotIn(b"employee", db_path.read_bytes())
             self.assertTrue(service.delete_profile(profile_id))
             self.assertEqual(service.list_profiles(), [])
+            store.close()
+
+    def test_recognition_returns_manual_role_without_auto_enrolling_unknown_face(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = BiometricStore(Path(temp) / "biometric.sqlite3")
+            backend = FakeFaceBackend()
+            service = LocalFaceService(
+                store,
+                backend=backend,
+                protector=FakeProtector(),
+                matcher=IdentityMatcher(confirmations=1),
+            )
+            image = Image.new("RGB", (64, 64), "white")
+            service.enroll("João", image, consent=True, role="employee")
+
+            recognized = service.analyze_frame("farmacia", image)
+            self.assertEqual(recognized["identities"][0]["role"], "employee")
+
+            backend.embeddings = [[0.0, 1.0, 0.0]]
+            unknown = service.analyze_frame("farmacia", image)
+            self.assertEqual(unknown["identities"], [])
+            self.assertEqual(len(service.list_profiles()), 1)
+            store.close()
+
+    def test_profile_created_before_roles_remains_available_as_authorized(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = BiometricStore(Path(temp) / "biometric.sqlite3")
+            protector = FakeProtector()
+            legacy_payload = (
+                b'{"schema_version":1,"model_id":"synthetic-test-model",'
+                b'"display_name":"Perfil antigo","embedding":[1.0,0.0,0.0]}'
+            )
+            store.create_profile(protector.protect(legacy_payload))
+            service = LocalFaceService(
+                store,
+                backend=FakeFaceBackend(),
+                protector=protector,
+                matcher=IdentityMatcher(confirmations=1),
+            )
+
+            self.assertEqual(service.list_profiles()[0]["role"], "authorized")
             store.close()
 
     def test_deleted_payload_is_removed_from_database_and_wal(self):
@@ -394,6 +438,8 @@ class BiometricStoreTests(unittest.TestCase):
 
             with self.assertRaises(EnrollmentError):
                 service.enroll("Pessoa", image, consent=False)
+            with self.assertRaises(EnrollmentError):
+                service.enroll("Pessoa", image, consent=True, role="inferred_employee")
             with self.assertRaises(EnrollmentError):
                 service.enroll("Pessoa", image, consent=True)
             store.close()

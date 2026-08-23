@@ -16,6 +16,16 @@ class EnrollmentError(ValueError):
     pass
 
 
+PROFILE_ROLES = frozenset({"authorized", "contractor", "employee", "manager"})
+
+
+def normalize_profile_role(value):
+    role = str(value or "authorized").strip().lower()
+    if role not in PROFILE_ROLES:
+        raise EnrollmentError("invalid_profile_role")
+    return role
+
+
 def _cosine_similarity(left, right):
     if len(left) != len(right) or not left:
         return -1.0
@@ -183,14 +193,16 @@ class LocalFaceService:
         self.status = self.backend.status
         self._profiles = {}
         self._names = {}
+        self._roles = {}
         if self.available:
             self.refresh_profiles()
 
-    def _encode(self, display_name, embedding):
+    def _encode(self, display_name, embedding, role):
         value = {
             "schema_version": 1,
             "model_id": self.backend.model_id,
             "display_name": display_name,
+            "role": normalize_profile_role(role),
             "embedding": [float(item) for item in embedding],
         }
         return json.dumps(value, separators=(",", ":"), allow_nan=False).encode("utf-8")
@@ -207,28 +219,33 @@ class LocalFaceService:
             raise ValueError("face_profile_name_missing")
         return {
             "display_name": display_name,
+            "role": normalize_profile_role(payload.get("role", "authorized")),
             "embedding": [float(item) for item in embedding],
         }
 
     def refresh_profiles(self):
         profiles = {}
         names = {}
+        roles = {}
         for item in self.store.list_profiles(include_payload=True):
             try:
                 decoded = self._decode(item["protected_profile"])
                 profiles[item["profile_id"]] = decoded["embedding"]
                 names[item["profile_id"]] = decoded["display_name"]
+                roles[item["profile_id"]] = decoded["role"]
             except Exception:
                 continue
         with self._lock:
             self._profiles = profiles
             self._names = names
+            self._roles = roles
 
-    def enroll(self, display_name, image, consent=False):
+    def enroll(self, display_name, image, consent=False, role="authorized"):
         if not consent:
             raise EnrollmentError("explicit_consent_required")
         if not self.available:
             raise FaceEngineUnavailable(self.status)
+        role = normalize_profile_role(role)
         with self._lock:
             embeddings = self.backend.extract_embeddings(image)
         if len(embeddings) != 1:
@@ -236,7 +253,9 @@ class LocalFaceService:
         display_name = " ".join(str(display_name).split())[:80]
         if not display_name:
             raise EnrollmentError("display_name_required")
-        protected = self.protector.protect(self._encode(display_name, embeddings[0]))
+        protected = self.protector.protect(
+            self._encode(display_name, embeddings[0], role)
+        )
         profile_id = self.store.create_profile(protected)
         self.refresh_profiles()
         return profile_id
@@ -244,7 +263,11 @@ class LocalFaceService:
     def list_profiles(self):
         with self._lock:
             return [
-                {"profile_id": profile_id, "display_name": self._names[profile_id]}
+                {
+                    "profile_id": profile_id,
+                    "display_name": self._names[profile_id],
+                    "role": self._roles.get(profile_id, "authorized"),
+                }
                 for profile_id in sorted(self._names, key=lambda value: self._names[value].casefold())
             ]
 
@@ -280,6 +303,7 @@ class LocalFaceService:
                 result = self.matcher.match(f"{stream}:{index}", embedding, self._profiles)
                 if result:
                     result["display_name"] = self._names.get(result["profile_id"], "Pessoa cadastrada")
+                    result["role"] = self._roles.get(result["profile_id"], "authorized")
                     identities.append(result)
         return {
             "face_count": len(faces),

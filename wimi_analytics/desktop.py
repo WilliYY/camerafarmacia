@@ -19,6 +19,15 @@ GREEN = "#10B981"
 YELLOW = "#F59E0B"
 RED = "#EF4444"
 
+PROFILE_ROLE_OPTIONS = (
+    ("Funcionário", "employee"),
+    ("Gerente", "manager"),
+    ("Prestador", "contractor"),
+    ("Autorizado", "authorized"),
+)
+PROFILE_ROLE_BY_LABEL = dict(PROFILE_ROLE_OPTIONS)
+PROFILE_ROLE_LABELS = {code: label for label, code in PROFILE_ROLE_OPTIONS}
+
 
 def _status_text(value):
     return {
@@ -154,6 +163,9 @@ class AnalyticsDesktopWindow:
         self._evidence_next_button = None
         self._evidence_page_label = None
         self._evidence_tab = None
+        self._evidence_notebook = None
+        self._evidence_capture_tab = None
+        self._evidence_people_tab = None
         self._evidence_gallery_canvas = None
         self._evidence_gallery_frame = None
         self._evidence_canvas_window = None
@@ -169,6 +181,7 @@ class AnalyticsDesktopWindow:
         self._evidence_grid_columns = 0
         self._responsive_labels = []
         self._last_wraplength = None
+        self._profile_role_var = None
 
     def show(self):
         if self._destroyed:
@@ -298,7 +311,6 @@ class AnalyticsDesktopWindow:
         self._build_network_tab()
         self._build_evidence_tab()
         self._build_reports_tab()
-        self._build_people_tab()
         self.notebook.bind(
             "<<NotebookTabChanged>>", self._on_notebook_tab_changed, add="+"
         )
@@ -558,12 +570,23 @@ class AnalyticsDesktopWindow:
     def _build_evidence_tab(self):
         tab = self._tab("Evidências")
         self._evidence_tab = tab
+
+        self._evidence_notebook = ttk.Notebook(tab, style="Wimi.TNotebook")
+        self._evidence_notebook.pack(fill="both", expand=True)
+        self._evidence_notebook.enable_traversal()
+        captures_tab = tk.Frame(self._evidence_notebook, bg=BG)
+        people_tab = tk.Frame(self._evidence_notebook, bg=BG)
+        self._evidence_notebook.add(captures_tab, text="Capturas")
+        self._evidence_notebook.add(people_tab, text="Pessoas cadastradas")
+        self._evidence_capture_tab = captures_tab
+        self._evidence_people_tab = people_tab
+
         self._section_title(
-            tab,
+            captures_tab,
             "Capturas de atendimento anonimizadas",
             "Os rostos detectados são descaracterizados antes da gravação. Exclusão automática após 10 dias; nenhuma captura contém nome ou perfil biométrico.",
         )
-        actions = tk.Frame(tab, bg=BG)
+        actions = tk.Frame(captures_tab, bg=BG)
         actions.pack(fill="x", padx=8, pady=(0, 8))
         self._evidence_select_all_button = self._button(
             actions, "☑ Marcar tudo", self._select_all_evidence, BLUE
@@ -601,7 +624,7 @@ class AnalyticsDesktopWindow:
         self._evidence_previous_button.configure(width=3, padx=4)
         self._evidence_previous_button.pack(side="right")
 
-        status_row = tk.Frame(tab, bg=BG)
+        status_row = tk.Frame(captures_tab, bg=BG)
         status_row.pack(fill="x", padx=8, pady=(0, 8))
         self._labels["evidence_status"] = tk.Label(
             status_row,
@@ -616,7 +639,7 @@ class AnalyticsDesktopWindow:
         self._labels["evidence_status"].pack(fill="x")
         self._responsive_labels.append(self._labels["evidence_status"])
 
-        gallery_shell = tk.Frame(tab, bg=BG)
+        gallery_shell = tk.Frame(captures_tab, bg=BG)
         gallery_shell.pack(fill="both", expand=True, padx=8, pady=(0, 12))
         self._evidence_gallery_canvas = tk.Canvas(
             gallery_shell,
@@ -648,6 +671,10 @@ class AnalyticsDesktopWindow:
         )
         self._evidence_gallery_canvas.bind(
             "<Configure>", self._layout_evidence_cards, add="+"
+        )
+        self._build_people_panel(people_tab)
+        self._evidence_notebook.bind(
+            "<<NotebookTabChanged>>", self._on_notebook_tab_changed, add="+"
         )
 
     def _build_reports_tab(self):
@@ -681,15 +708,30 @@ class AnalyticsDesktopWindow:
         )
         self._report_detail.pack(fill="both", expand=True)
 
-    def _build_people_tab(self):
-        tab = self._tab("Pessoas")
+    def _build_people_panel(self, tab):
         self._section_title(
             tab,
             "Perfis consentidos mais observados",
-            "Ranking por visitas e tempo estimado. Não há cadastro automático; imagens não são salvas.",
+            "A função é definida no cadastro. Depois disso, as câmeras reconhecem o perfil automaticamente; desconhecidos nunca são cadastrados sozinhos.",
         )
         actions = tk.Frame(tab, bg=BG)
         actions.pack(fill="x", padx=8, pady=(0, 10))
+        tk.Label(
+            actions,
+            text="Função:",
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg=BG,
+        ).pack(side="left")
+        self._profile_role_var = tk.StringVar(value="Funcionário")
+        role_selector = ttk.Combobox(
+            actions,
+            textvariable=self._profile_role_var,
+            values=[label for label, _code in PROFILE_ROLE_OPTIONS],
+            state="readonly",
+            width=13,
+        )
+        role_selector.pack(side="left", padx=(6, 10))
         self._enroll_button = self._button(
             actions, "Cadastrar rosto", self._enroll_person, GREEN
         )
@@ -708,12 +750,13 @@ class AnalyticsDesktopWindow:
             (
                 ("rank", "Posição"),
                 ("name", "Nome"),
+                ("role", "Função"),
                 ("visits", "Visitas"),
                 ("duration", "Tempo observado"),
                 ("last_seen", "Última observação"),
                 ("cameras", "Câmeras"),
             ),
-            (70, 190, 70, 130, 170, 210),
+            (70, 190, 110, 70, 130, 170, 210),
             height=14,
         )
 
@@ -816,7 +859,14 @@ class AnalyticsDesktopWindow:
                 )
             signal = "Online" if getattr(widget, "is_online", False) else _status_text(signal_value)
             identities = vision_item.get("identities") or []
-            identity = ", ".join(item.get("display_name", "Pessoa") for item in identities) or "-"
+            identity_labels = []
+            for item in identities:
+                display_name = item.get("display_name", "Pessoa")
+                role_label = PROFILE_ROLE_LABELS.get(item.get("role"))
+                identity_labels.append(
+                    f"{display_name} ({role_label})" if role_label else display_name
+                )
+            identity = ", ".join(identity_labels) or "-"
             rows.append(
                 (
                     f"camera-{index}",
@@ -1158,10 +1208,19 @@ class AnalyticsDesktopWindow:
         self._update_evidence_controls()
 
     def _evidence_tab_is_selected(self):
-        if self.notebook is None or self._evidence_tab is None:
+        if (
+            self.notebook is None
+            or self._evidence_tab is None
+            or self._evidence_notebook is None
+            or self._evidence_capture_tab is None
+        ):
             return False
         try:
-            return self.notebook.select() == str(self._evidence_tab)
+            return (
+                self.notebook.select() == str(self._evidence_tab)
+                and self._evidence_notebook.select()
+                == str(self._evidence_capture_tab)
+            )
         except tk.TclError:
             return False
 
@@ -1603,6 +1662,9 @@ class AnalyticsDesktopWindow:
                     (
                         f"{rank}º" if rank else "-",
                         item["display_name"],
+                        PROFILE_ROLE_LABELS.get(
+                            item.get("role", "authorized"), "Autorizado"
+                        ),
                         summary.get("visit_count", 0),
                         _duration_text(summary.get("observed_seconds", 0)),
                         summary.get("last_seen_at") or "Ainda não observado",
@@ -1684,7 +1746,13 @@ class AnalyticsDesktopWindow:
         )
         if not consent:
             return
-        if not self._start_enrollment(name, frame):
+        role_label = (
+            self._profile_role_var.get()
+            if self._profile_role_var is not None
+            else "Autorizado"
+        )
+        role = PROFILE_ROLE_BY_LABEL.get(role_label, "authorized")
+        if not self._start_enrollment(name, frame, role):
             messagebox.showinfo(
                 "Cadastro em andamento",
                 "Aguarde a conclusão do cadastro atual.",
@@ -1696,7 +1764,7 @@ class AnalyticsDesktopWindow:
         with self._enrollment_lock:
             return self._enrollment_busy
 
-    def _start_enrollment(self, name, frame):
+    def _start_enrollment(self, name, frame, role="authorized"):
         with self._enrollment_lock:
             if self._enrollment_busy:
                 return False
@@ -1705,7 +1773,7 @@ class AnalyticsDesktopWindow:
             self._enroll_button.configure(state="disabled")
         thread = threading.Thread(
             target=self._enrollment_worker,
-            args=(str(name), frame),
+            args=(str(name), frame, str(role)),
             name="wimi-face-enrollment",
             daemon=True,
         )
@@ -1713,10 +1781,10 @@ class AnalyticsDesktopWindow:
         thread.start()
         return True
 
-    def _enrollment_worker(self, name, frame):
+    def _enrollment_worker(self, name, frame, role):
         error = None
         try:
-            self.face_service.enroll(name, frame, consent=True)
+            self.face_service.enroll(name, frame, consent=True, role=role)
         except Exception as caught:
             error = str(caught)[:200]
         try:

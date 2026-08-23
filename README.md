@@ -199,10 +199,10 @@ pythonw.exe gerenciador.pyw --silent
 ```
 
 O WIMI Analytics roda integrado ao processo do NVR. No modo visual, use as abas
-superiores `Cameras` e `Analises`; a segunda contem sete subabas: Visao geral,
-Cameras, Comportamento, Rede, Evidencias, Relatorios e Pessoas. Trocar de aba preserva a
-coleta, os previews e o historico; o fluxo normal nao abre navegador nem uma
-segunda janela.
+superiores `Cameras` e `Analises`; a segunda contem seis subabas: Visao geral,
+Cameras, Comportamento, Rede, Evidencias e Relatorios. `Evidencias` agrupa
+`Capturas` e `Pessoas cadastradas`. Trocar de aba preserva a coleta, os previews
+e o historico; o fluxo normal nao abre navegador nem uma segunda janela.
 
 O historico fica em `sistema/analytics/`, fora do HD de gravacao. A visao usa os
 quadros ja decodificados pelo preview, sem abrir outra conexao com as cameras e
@@ -216,7 +216,13 @@ python tools\setup_wimi_vision.py --verify-only
 
 O cadastro facial exige consentimento explicito e um quadro recente com
 exatamente um rosto. Nenhuma imagem identificavel e salva: nome e vetor ficam
-juntos em um banco biometrico separado, protegido pelo DPAPI do Windows.
+juntos em um banco biometrico separado, protegido pelo DPAPI do Windows. A
+funcao da pessoa (`employee`, `manager`, `contractor` ou `authorized`) e
+selecionada manualmente no cadastro e permanece dentro do payload protegido.
+Depois do cadastro, o reconhecimento e automatico; um rosto desconhecido nao
+cria perfil nem recebe funcao automaticamente. Perfis anteriores a essa
+classificacao continuam validos como `authorized`. Quando um perfil e
+confirmado, a aba `Cameras` mostra nome e funcao cadastrada.
 Capturas de atendimento usam apenas deteccoes com caixas completas, preservam
 um quadro de contexto de ate `1280x720` em JPEG 82, aplicam pixelizacao global
 equilibrada em blocos de 12 pixels e achatam todos os rostos detectados antes da
