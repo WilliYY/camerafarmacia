@@ -30,6 +30,14 @@ class FakeStore:
     def list_vision_events(self, limit=300):
         return []
 
+    def list_profile_observations(self, limit=500):
+        return [
+            item
+            for item in self.list_vision_events(limit=2000)
+            if item.get("event_type") == "presence_confirmed"
+            and item.get("profile_id")
+        ][:limit]
+
     def list_network_samples(self, limit=200):
         return []
 
@@ -125,7 +133,7 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         if hasattr(self, "root"):
             self.root.destroy()
 
-    def test_behavior_tab_shows_people_activity_and_observed_dwell(self):
+    def test_evidence_activity_shows_people_activity_and_observed_dwell(self):
         class BehaviorVision(FakeVision):
             def snapshot(self):
                 return {
@@ -168,6 +176,8 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         )
 
         self.assertTrue(controller.show())
+        controller.notebook.select(controller._evidence_tab)
+        controller._evidence_notebook.select(controller._evidence_activity_tab)
         self.root.update()
         camera_values = controller._trees["cameras"].item("camera-0", "values")
         summary = controller._labels["behavior_summary"].cget("text")
@@ -178,6 +188,140 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         self.assertIn("Sessões concluídas: 1", summary)
         self.assertIn("Pico amostrado: 2", summary)
         self.assertIn("30 s", summary)
+        self.assertEqual(
+            [
+                controller._behavior_notebook.tab(tab, "text")
+                for tab in controller._behavior_notebook.tabs()
+            ],
+            ["Trajetos consentidos", "Eventos técnicos"],
+        )
+        self.assertEqual(len(controller._trees["events"].get_children()), 2)
+        controller.destroy()
+
+    def test_evidence_activity_reports_consent_profile_camera_change(self):
+        class ActivityStore(FakeStore):
+            def list_vision_events(self, limit=300):
+                return [
+                    {
+                        "event_id": "new",
+                        "event_type": "presence_confirmed",
+                        "profile_id": "profile-1",
+                        "stream": "farmacia2",
+                        "occurred_at": "2026-08-23T10:02:00",
+                        "confidence": 0.92,
+                    },
+                    {
+                        "event_id": "old",
+                        "event_type": "presence_confirmed",
+                        "profile_id": "profile-1",
+                        "stream": "farmacia",
+                        "occurred_at": "2026-08-23T10:01:00",
+                        "confidence": 0.89,
+                    },
+                ]
+
+        class ActivityFaces(FakeFaceService):
+            available = True
+            status = "ready"
+
+            def list_profiles(self):
+                return [
+                    {
+                        "profile_id": "profile-1",
+                        "display_name": "Thiago",
+                        "role": "employee",
+                    }
+                ]
+
+        controller = AnalyticsDesktopWindow(
+            self.root,
+            FakeCollector(),
+            ActivityStore(),
+            FakeVision(),
+            face_service=ActivityFaces(),
+        )
+
+        self.assertTrue(controller.show())
+        controller.notebook.select(controller._evidence_tab)
+        controller._evidence_notebook.select(controller._evidence_activity_tab)
+        self.root.update()
+        rows = [
+            controller._trees["profile_activity"].item(item, "values")
+            for item in controller._trees["profile_activity"].get_children()
+        ]
+
+        self.assertTrue(
+            any(any("Thiago" in str(value) for value in row) for row in rows)
+        )
+        self.assertTrue(
+            any(
+                any(
+                    "Sequência observada: FARMACIA → FARMACIA2" in str(value)
+                    for value in row
+                )
+                for row in rows
+            )
+        )
+        self.assertIn(
+            "Sequências entre câmeras: 1",
+            controller._labels["profile_activity_summary"].cget("text"),
+        )
+        controller.destroy()
+
+    def test_profile_timeline_is_loaded_only_while_activity_is_visible(self):
+        class CountingStore(FakeStore):
+            def __init__(self):
+                self.observation_reads = 0
+
+            def list_profile_observations(self, limit=500):
+                self.observation_reads += 1
+                return []
+
+        store = CountingStore()
+        controller = AnalyticsDesktopWindow(
+            self.root,
+            FakeCollector(),
+            store,
+            FakeVision(),
+            face_service=FakeFaceService(),
+        )
+
+        self.assertTrue(controller.show())
+        self.root.update()
+        self.assertEqual(store.observation_reads, 0)
+
+        controller.notebook.select(controller._evidence_tab)
+        controller._evidence_notebook.select(controller._evidence_activity_tab)
+        self.root.update()
+        self.assertGreaterEqual(store.observation_reads, 1)
+        controller.destroy()
+
+    def test_activity_view_preserves_selection_at_minimum_geometry(self):
+        controller = AnalyticsDesktopWindow(
+            self.root,
+            FakeCollector(),
+            FakeStore(),
+            FakeVision(),
+            face_service=FakeFaceService(),
+        )
+
+        self.assertTrue(controller.show())
+        controller.window.geometry("980x650")
+        controller.notebook.select(controller._evidence_tab)
+        controller._evidence_notebook.select(controller._evidence_activity_tab)
+        controller._behavior_notebook.select(1)
+        self.root.update()
+
+        self.assertGreaterEqual(controller.window.winfo_width(), 980)
+        self.assertGreaterEqual(controller.window.winfo_height(), 650)
+        self.assertGreater(controller._trees["events"].winfo_height(), 100)
+
+        controller._evidence_notebook.select(controller._evidence_people_tab)
+        self.root.update()
+        controller._evidence_notebook.select(controller._evidence_activity_tab)
+        self.root.update()
+        self.assertEqual(controller._behavior_notebook.index("current"), 1)
+        controller.destroy()
 
     def test_camera_tab_shows_manually_assigned_role_after_recognition(self):
         class RecognizedVision(FakeVision):
@@ -364,21 +508,22 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         top_level_tabs = [
             controller.notebook.tab(tab, "text") for tab in controller.notebook.tabs()
         ]
-        self.assertEqual(len(top_level_tabs), 6)
+        self.assertEqual(len(top_level_tabs), 5)
         self.assertIn("Evidências", top_level_tabs)
+        self.assertNotIn("Comportamento", top_level_tabs)
         self.assertNotIn("Pessoas", top_level_tabs)
         self.assertEqual(
             [
                 controller._evidence_notebook.tab(tab, "text")
                 for tab in controller._evidence_notebook.tabs()
             ],
-            ["Capturas", "Pessoas cadastradas"],
+            ["Capturas", "Atividade e trajetos", "Pessoas cadastradas"],
         )
 
         controller.hide()
         self.assertTrue(controller.show())
         self.assertIs(controller.window, first_window)
-        self.assertEqual(len(controller.notebook.tabs()), 6)
+        self.assertEqual(len(controller.notebook.tabs()), 5)
 
         controller.destroy()
         self.assertIsNone(controller.window)
@@ -419,7 +564,7 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
 
         self.assertIsInstance(embedded_frame, tk.Frame)
         self.assertIs(embedded_frame.winfo_toplevel(), self.root)
-        self.assertEqual(len(controller.notebook.tabs()), 6)
+        self.assertEqual(len(controller.notebook.tabs()), 5)
 
         controller.hide()
         self.assertTrue(controller.show())
@@ -690,7 +835,7 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
 
         self.assertTrue(controller.show())
         self.assertEqual(archive.read_ids, [])
-        controller.notebook.select(4)
+        controller.notebook.select(controller._evidence_tab)
         self.root.update()
         evidence_status = controller._labels["evidence_status"].cget("text")
         self.assertIn("10 dias", evidence_status)
@@ -774,7 +919,7 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         )
 
         self.assertTrue(controller.show())
-        controller.notebook.select(4)
+        controller.notebook.select(controller._evidence_tab)
         self.root.update()
         controller._set_evidence_selected("evidence-1", True)
         controller._set_evidence_selected("evidence-3", True)
@@ -814,7 +959,7 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         )
 
         self.assertTrue(controller.show())
-        controller.notebook.select(4)
+        controller.notebook.select(controller._evidence_tab)
         self.root.update()
         self.assertEqual(len(controller._evidence_cards), 24)
         self.assertEqual(len(controller._evidence_photo_cache), 24)

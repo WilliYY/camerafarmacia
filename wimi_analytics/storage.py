@@ -11,7 +11,7 @@ from pathlib import Path
 from statistics import median
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 MAX_PAYLOAD_BYTES = 256 * 1024
 JOURNAL_SIZE_LIMIT = 8 * 1024 * 1024
 MAX_DATABASE_BYTES = 256 * 1024 * 1024
@@ -44,6 +44,13 @@ def _iso(value):
         parsed = datetime.fromisoformat(value)
         return parsed.isoformat(timespec="seconds")
     raise ValueError("invalid_datetime")
+
+
+def _vision_iso(value):
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(value)
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+    return parsed.isoformat(timespec="seconds")
 
 
 def _stable_value(value):
@@ -237,6 +244,9 @@ class AnalyticsStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_vision_occurred
                     ON vision_events(occurred_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_vision_profile_observations
+                    ON vision_events(event_type, occurred_at DESC, event_id DESC)
+                    WHERE profile_id IS NOT NULL;
 
                 CREATE TABLE IF NOT EXISTS profile_presence_stats (
                     profile_id TEXT PRIMARY KEY,
@@ -339,6 +349,31 @@ class AnalyticsStore:
                         VALUES ('sensitive_compaction_pending', '1')
                         """
                     )
+            if previous_version < 6:
+                connection.execute(
+                    """
+                    UPDATE vision_events
+                    SET occurred_at = strftime(
+                        '%Y-%m-%dT%H:%M:%S', occurred_at, 'localtime'
+                    )
+                    WHERE (
+                        substr(occurred_at, -1) = 'Z'
+                        OR instr(substr(occurred_at, 12), '+') > 0
+                        OR instr(substr(occurred_at, 12), '-') > 0
+                    )
+                    AND strftime(
+                        '%Y-%m-%dT%H:%M:%S', occurred_at, 'localtime'
+                    ) IS NOT NULL
+                    """
+                )
+                connection.execute("DROP INDEX IF EXISTS idx_vision_profile_observations")
+                connection.execute(
+                    """
+                    CREATE INDEX idx_vision_profile_observations
+                    ON vision_events(event_type, occurred_at DESC, event_id DESC)
+                    WHERE profile_id IS NOT NULL
+                    """
+                )
             connection.execute("UPDATE schema_meta SET version = ?", (SCHEMA_VERSION,))
         self._run_pending_sensitive_compaction()
 
@@ -1347,7 +1382,7 @@ class AnalyticsStore:
         stream = str(event.get("stream", "")).strip()[:80]
         if not stream:
             raise ValueError("invalid_vision_stream")
-        occurred_at = _iso(event.get("occurred_at") or datetime.now())
+        occurred_at = _vision_iso(event.get("occurred_at") or datetime.now())
         event_id = str(event.get("event_id") or uuid.uuid4())
         count = event.get("count")
         count = max(0, int(count)) if count is not None else None
@@ -1388,6 +1423,22 @@ class AnalyticsStore:
         with self._lock, self._connection() as connection:
             rows = connection.execute(
                 "SELECT * FROM vision_events ORDER BY occurred_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_profile_observations(self, limit=500):
+        limit = max(1, min(int(limit), 2000))
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM vision_events
+                WHERE event_type = 'presence_confirmed'
+                  AND profile_id IS NOT NULL
+                ORDER BY occurred_at DESC, event_id DESC
+                LIMIT ?
+                """,
                 (limit,),
             ).fetchall()
         return [dict(row) for row in rows]

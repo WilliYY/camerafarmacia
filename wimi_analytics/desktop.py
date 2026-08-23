@@ -7,6 +7,8 @@ from tkinter import messagebox, simpledialog, ttk
 
 from PIL import Image, ImageTk
 
+from .activity import build_profile_activity
+
 
 BG = "#0B0D12"
 SURFACE = "#141821"
@@ -172,7 +174,9 @@ class AnalyticsDesktopWindow:
         self._evidence_tab = None
         self._evidence_notebook = None
         self._evidence_capture_tab = None
+        self._evidence_activity_tab = None
         self._evidence_people_tab = None
+        self._behavior_notebook = None
         self._evidence_gallery_canvas = None
         self._evidence_gallery_frame = None
         self._evidence_canvas_window = None
@@ -314,7 +318,6 @@ class AnalyticsDesktopWindow:
         self.notebook.enable_traversal()
         self._build_overview_tab()
         self._build_cameras_tab()
-        self._build_behavior_tab()
         self._build_network_tab()
         self._build_evidence_tab()
         self._build_reports_tab()
@@ -515,24 +518,61 @@ class AnalyticsDesktopWindow:
             "<<TreeviewSelect>>", self._update_profile_action_controls, add="+"
         )
 
-    def _build_behavior_tab(self):
-        tab = self._tab("Comportamento")
+    def _build_behavior_panel(self, tab):
         self._section_title(
             tab,
-            "Eventos observáveis",
-            "Movimento, presença e duração observada. O sistema não infere emoção, intenção ou produtividade individual.",
+            "Atividade e trajetos observados",
+            "Confirmações consentidas por câmera e intervalos sem confirmação. O sistema não conhece a localização fora da imagem.",
+        )
+        self._labels["profile_activity_summary"] = tk.Label(
+            tab,
+            text="Nenhum trajeto consentido registrado.",
+            font=("Segoe UI", 10, "bold"),
+            fg=GREEN,
+            bg=BG,
+            anchor="w",
+            justify="left",
+            wraplength=1100,
+        )
+        self._labels["profile_activity_summary"].pack(
+            fill="x", padx=8, pady=(0, 10)
+        )
+        self._responsive_labels.append(
+            self._labels["profile_activity_summary"]
+        )
+        body = ttk.Notebook(tab, style="Wimi.TNotebook")
+        body.pack(fill="both", expand=True, padx=8, pady=(0, 12))
+        activity_panel = tk.Frame(body, bg=BG)
+        event_panel = tk.Frame(body, bg=BG)
+        body.add(activity_panel, text="Trajetos consentidos")
+        body.add(event_panel, text="Eventos técnicos")
+        self._behavior_notebook = body
+        self._tree(
+            activity_panel,
+            "profile_activity",
+            (
+                ("when", "Data e hora"),
+                ("person", "Pessoa"),
+                ("activity", "Evidência observada"),
+                ("duration", "Janela / intervalo"),
+                ("confidence", "Confiança"),
+            ),
+            (160, 155, 390, 125, 90),
+            height=12,
         )
         self._labels["behavior_summary"] = tk.Label(
-            tab,
+            event_panel,
             text="Nenhum evento registrado.",
-            font=("Segoe UI", 10),
+            font=("Segoe UI", 9),
             fg=MUTED,
             bg=BG,
             anchor="w",
         )
-        self._labels["behavior_summary"].pack(fill="x", padx=8, pady=(0, 10))
+        self._labels["behavior_summary"].pack(
+            fill="x", padx=8, pady=(8, 6)
+        )
         self._tree(
-            tab,
+            event_panel,
             "events",
             (
                 ("when", "Data e hora"),
@@ -540,8 +580,8 @@ class AnalyticsDesktopWindow:
                 ("event", "Evento"),
                 ("detail", "Detalhe"),
             ),
-            (170, 140, 190, 460),
-            height=15,
+            (160, 125, 180, 390),
+            height=11,
         )
 
     def _build_network_tab(self):
@@ -639,11 +679,15 @@ class AnalyticsDesktopWindow:
         self._evidence_notebook.pack(fill="both", expand=True)
         self._evidence_notebook.enable_traversal()
         captures_tab = tk.Frame(self._evidence_notebook, bg=BG)
+        activity_tab = tk.Frame(self._evidence_notebook, bg=BG)
         people_tab = tk.Frame(self._evidence_notebook, bg=BG)
         self._evidence_notebook.add(captures_tab, text="Capturas")
+        self._evidence_notebook.add(activity_tab, text="Atividade e trajetos")
         self._evidence_notebook.add(people_tab, text="Pessoas cadastradas")
         self._evidence_capture_tab = captures_tab
+        self._evidence_activity_tab = activity_tab
         self._evidence_people_tab = people_tab
+        self._build_behavior_panel(activity_tab)
 
         self._section_title(
             captures_tab,
@@ -850,6 +894,24 @@ class AnalyticsDesktopWindow:
         )
         vision_snapshot = self.vision.snapshot()
         events = self.store.list_vision_events(limit=500)
+        activity_visible = self._activity_tab_is_selected()
+        profiles = None
+        profile_observations = None
+        if activity_visible:
+            list_profile_observations = getattr(
+                self.store, "list_profile_observations", None
+            )
+            profile_observations = (
+                list_profile_observations(limit=500)
+                if callable(list_profile_observations)
+                else [
+                    item
+                    for item in events
+                    if item.get("event_type") == "presence_confirmed"
+                    and item.get("profile_id")
+                ]
+            )
+            profiles = self.face_service.list_profiles() if self.face_service else []
         evidence_snapshots = (
             self.evidence_archive.list_snapshots(limit=200)
             if self.evidence_archive is not None
@@ -867,14 +929,19 @@ class AnalyticsDesktopWindow:
             evidence=evidence_status,
         )
         self._refresh_cameras(payload, vision=vision_snapshot, events=events)
-        self._refresh_behavior(events=events)
+        if activity_visible:
+            self._refresh_behavior(
+                events=events,
+                profile_observations=profile_observations,
+                profiles=profiles,
+            )
         self._refresh_network(payload)
         self._refresh_evidence(
             snapshots=evidence_snapshots,
             status=evidence_status,
         )
         self._refresh_reports()
-        self._refresh_people()
+        self._refresh_people(profiles=profiles)
 
     def _refresh_overview(self, payload, vision=None, events=None, evidence=None):
         nvr = payload.get("nvr") or {}
@@ -1049,8 +1116,80 @@ class AnalyticsDesktopWindow:
             )
         self._update_profile_action_controls()
 
-    def _refresh_behavior(self, events=None):
+    def _refresh_behavior(
+        self,
+        events=None,
+        profile_observations=None,
+        profiles=None,
+    ):
         events = self.store.list_vision_events(limit=500) if events is None else events
+        if profile_observations is None:
+            list_profile_observations = getattr(
+                self.store, "list_profile_observations", None
+            )
+            profile_observations = (
+                list_profile_observations(limit=500)
+                if callable(list_profile_observations)
+                else [
+                    item
+                    for item in events
+                    if item.get("event_type") == "presence_confirmed"
+                    and item.get("profile_id")
+                ]
+            )
+        profiles = (
+            self.face_service.list_profiles()
+            if profiles is None and self.face_service
+            else (profiles or [])
+        )
+        activity = build_profile_activity(profile_observations, profiles, limit=200)
+        activity_summary = activity["summary"]
+        if activity_summary["profile_count"]:
+            self._labels["profile_activity_summary"].configure(
+                text=(
+                    f"Perfis observados: {activity_summary['profile_count']} | "
+                    f"Confirmações: {activity_summary['observation_count']} | "
+                    f"Sequências entre câmeras: {activity_summary['transition_count']} | "
+                    f"Intervalos sem confirmação: {activity_summary['coverage_gap_count']} | "
+                    "Sem confirmação não informa onde a pessoa esteve"
+                ),
+                fg=GREEN,
+            )
+        else:
+            self._labels["profile_activity_summary"].configure(
+                text="Nenhum trajeto consentido registrado.",
+                fg=MUTED,
+            )
+        activity_rows = []
+        for index, item in enumerate(activity["activities"]):
+            role = PROFILE_ROLE_LABELS.get(item.get("role"), "Autorizado")
+            person = f"{item['display_name']} ({role})"
+            duration = item.get("duration_seconds")
+            duration_text = (
+                _duration_text(duration)
+                if duration is not None and float(duration) > 0
+                else "-"
+            )
+            confidence = item.get("confidence")
+            confidence_text = (
+                f"{max(0.0, min(float(confidence), 1.0)) * 100:.0f}%"
+                if confidence is not None
+                else "-"
+            )
+            activity_rows.append(
+                (
+                    f"activity-{index}",
+                    (
+                        item.get("occurred_at", "-").replace("T", " "),
+                        person,
+                        item.get("description", "-"),
+                        duration_text,
+                        confidence_text,
+                    ),
+                )
+            )
+        self._replace_rows(self._trees["profile_activity"], activity_rows)
+
         counts = Counter(item.get("event_type") for item in events)
         motion_seconds = sum(
             max(0.0, float(item.get("duration_seconds") or 0.0))
@@ -1086,7 +1225,7 @@ class AnalyticsDesktopWindow:
         )
         names = {
             item["profile_id"]: item["display_name"]
-            for item in (self.face_service.list_profiles() if self.face_service else [])
+            for item in profiles
         }
         rows = []
         for index, event in enumerate(events[:200]):
@@ -1355,28 +1494,34 @@ class AnalyticsDesktopWindow:
             self._sync_evidence_card_selection()
         self._update_evidence_controls()
 
-    def _evidence_tab_is_selected(self):
+    def _evidence_subtab_is_selected(self, subtab):
         if (
             self.notebook is None
             or self._evidence_tab is None
             or self._evidence_notebook is None
-            or self._evidence_capture_tab is None
+            or subtab is None
         ):
             return False
         try:
             return (
                 self.notebook.select() == str(self._evidence_tab)
-                and self._evidence_notebook.select()
-                == str(self._evidence_capture_tab)
+                and self._evidence_notebook.select() == str(subtab)
             )
         except tk.TclError:
             return False
 
+    def _evidence_tab_is_selected(self):
+        return self._evidence_subtab_is_selected(self._evidence_capture_tab)
+
+    def _activity_tab_is_selected(self):
+        return self._evidence_subtab_is_selected(self._evidence_activity_tab)
+
     def _on_notebook_tab_changed(self, _event=None):
-        if not self._evidence_tab_is_selected() or not self._evidence_gallery_dirty:
-            return
-        self._render_evidence_gallery()
-        self._update_evidence_controls()
+        if self._evidence_tab_is_selected() and self._evidence_gallery_dirty:
+            self._render_evidence_gallery()
+            self._update_evidence_controls()
+        elif self._activity_tab_is_selected():
+            self._refresh_behavior()
 
     def _evidence_page_count(self):
         count = len(self._evidence_snapshots)
@@ -1761,9 +1906,13 @@ class AnalyticsDesktopWindow:
         self._report_detail.insert("1.0", "\n".join(lines))
         self._report_detail.configure(state="disabled")
 
-    def _refresh_people(self):
+    def _refresh_people(self, profiles=None):
         service = self.face_service
-        profiles = service.list_profiles() if service else []
+        profiles = (
+            service.list_profiles()
+            if profiles is None and service
+            else list(profiles or [])
+        )
         summaries = self.store.list_profile_presence_summary(limit=100)
         summary_by_profile = {item["profile_id"]: item for item in summaries}
         rank_by_profile = {

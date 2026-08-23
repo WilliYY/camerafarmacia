@@ -85,6 +85,109 @@ class AnalyticsStoreTests(unittest.TestCase):
         with self.assertRaises(UnsafeAnalyticsPathError):
             AnalyticsStore(recording_root / "analytics.sqlite3", forbidden_roots=[recording_root])
 
+    def test_lists_only_profile_confirmations_in_descending_order(self):
+        for event in (
+            {
+                "event_id": "presence-old",
+                "event_type": "presence_confirmed",
+                "stream": "farmacia",
+                "occurred_at": "2026-08-23T10:00:00",
+                "profile_id": "profile-1",
+                "confidence": 0.88,
+            },
+            {
+                "event_id": "motion",
+                "event_type": "motion_start",
+                "stream": "farmacia",
+                "occurred_at": "2026-08-23T10:01:00",
+            },
+            {
+                "event_id": "presence-new",
+                "event_type": "presence_confirmed",
+                "stream": "farmacia2",
+                "occurred_at": "2026-08-23T10:02:00",
+                "profile_id": "profile-1",
+                "confidence": 0.91,
+            },
+        ):
+            self.store.record_vision_event(event)
+
+        observations = self.store.list_profile_observations(limit=10)
+
+        self.assertEqual(
+            [item["event_id"] for item in observations],
+            ["presence-new", "presence-old"],
+        )
+
+    def test_migrates_offset_vision_times_and_rebuilds_deterministic_index(self):
+        legacy_path = self.root / "legacy-vision" / "analytics.sqlite3"
+        legacy_path.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(legacy_path)) as connection:
+            with connection:
+                connection.execute("CREATE TABLE schema_meta (version INTEGER NOT NULL)")
+                connection.execute("INSERT INTO schema_meta(version) VALUES (5)")
+                connection.execute(
+                    """
+                    CREATE TABLE vision_events (
+                        event_id TEXT PRIMARY KEY,
+                        occurred_at TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        stream TEXT NOT NULL,
+                        count INTEGER,
+                        profile_id TEXT,
+                        confidence REAL,
+                        duration_seconds REAL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE INDEX idx_vision_profile_observations
+                    ON vision_events(event_type, occurred_at DESC, profile_id)
+                    WHERE profile_id IS NOT NULL
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO vision_events(
+                        event_id, occurred_at, event_type, stream, profile_id
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "aware-event",
+                        "2026-08-23T10:00:00-03:00",
+                        "presence_confirmed",
+                        "farmacia",
+                        "profile-1",
+                    ),
+                )
+
+        migrated = AnalyticsStore(legacy_path)
+        migrated.close()
+        expected = (
+            datetime.fromisoformat("2026-08-23T10:00:00-03:00")
+            .astimezone()
+            .replace(tzinfo=None)
+            .isoformat(timespec="seconds")
+        )
+        with closing(sqlite3.connect(legacy_path)) as connection:
+            occurred_at = connection.execute(
+                "SELECT occurred_at FROM vision_events WHERE event_id = 'aware-event'"
+            ).fetchone()[0]
+            index_columns = [
+                row[2]
+                for row in connection.execute(
+                    "PRAGMA index_info(idx_vision_profile_observations)"
+                )
+            ]
+            schema_version = connection.execute(
+                "SELECT MAX(version) FROM schema_meta"
+            ).fetchone()[0]
+
+        self.assertEqual(occurred_at, expected)
+        self.assertEqual(index_columns, ["event_type", "occurred_at", "event_id"])
+        self.assertEqual(schema_version, 6)
+
     def test_adds_connection_columns_to_existing_network_history(self):
         legacy_path = self.root / "legacy" / "analytics.sqlite3"
         legacy_path.parent.mkdir(parents=True)
@@ -177,7 +280,7 @@ class AnalyticsStoreTests(unittest.TestCase):
         self.assertEqual(first_summary, [])
         self.assertEqual(second_summary, [])
         self.assertEqual(migrated_events, [])
-        self.assertEqual(schema_version, 5)
+        self.assertEqual(schema_version, 6)
         self.assertNotIn(b"profile-consentido", legacy_path.read_bytes())
 
     def test_version_three_upgrade_preserves_current_presence_history(self):

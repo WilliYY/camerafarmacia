@@ -6,7 +6,8 @@ Data: 23/08/2026
 
 Melhorar a nitidez das evidencias anonimizadas e adicionar sinais objetivos de
 comportamento por camera sem abrir outro stream, enviar imagens ou interferir na
-gravacao.
+gravacao. Unificar esses sinais em Evidencias e apresentar a sequencia observada
+dos perfis consentidos sem afirmar localizacao fora do campo das cameras.
 
 ## Opcoes avaliadas
 
@@ -16,12 +17,16 @@ gravacao.
   152,9 ms em CPU.
 - OpenCV Zoo MP-PersonDet: adequado para deteccao e pontos corporais, mas o
   pos-processamento e maior e os pontos de pose nao sao necessarios nesta fase.
-- ByteTrack: referencia madura e MIT para trajetorias multiobjeto. Fica como
-  evolucao futura depois de validar detector, angulo das cameras e zonas reais;
-  nao e necessario para permanencia agregada por camera.
-- Supervision: oferece tracking e zonas, mas adicionaria uma dependencia ampla;
-  a propria classe ByteTrack esta em migracao para outro pacote nas versoes
-  atuais.
+- [ByteTrack](https://github.com/FoundationVision/ByteTrack): referencia MIT
+  para associar caixas detectadas dentro de um video. Exige detector e runtime
+  adicionais e nao resolve sozinho identidade consentida entre cameras.
+- [BoT-SORT](https://github.com/NirAharon/BoT-SORT): combina rastreamento com
+  ReID e compensacao de movimento, mas adiciona FastReID, modelos e instalacao
+  mais complexa. O custo e o modo de falha nao sao adequados ao processo 24h
+  antes de benchmark no hardware real.
+- [Supervision](https://github.com/roboflow/supervision): oferece ByteTrack,
+  zonas e utilitarios de video, mas adicionaria uma dependencia ampla e
+  redundante para uma linha do tempo que ja pode usar eventos locais existentes.
 - ONNX Runtime: runtime MIT eficiente, mas duplicaria a camada de inferencia que
   o OpenCV DNN ja fornece neste projeto.
 - Ultralytics YOLO: conjunto amplo e ativo, mas requer PyTorch no pacote Python
@@ -50,10 +55,14 @@ incompatibilidade do modelo degrada somente a metrica de pessoas e nao bloqueia
 gravacao, painel, movimento ou reconhecimento facial. Nao existe atualizacao
 automatica a partir de `main`.
 
-ByteTrack passa a ser considerado somente quando houver necessidade validada de
-trajetorias individuais. ONNX Runtime ou OpenVINO entram apenas depois de
-benchmark comparativo no hardware real. Ultralytics nao deve ser incorporado
-sem uma decisao explicita de licenca e um teste de carga prolongado.
+Nenhum rastreador externo foi incorporado. Para o requisito atual, a alternativa
+de menor risco e derivar a ordem observada dos `presence_confirmed` que o
+reconhecimento consentido ja produz, sem inferencia adicional, novo stream ou
+escrita de trajetoria. ByteTrack ou BoT-SORT passam a ser considerados somente
+se houver necessidade medida de tracking continuo dentro de uma camera. ONNX
+Runtime ou OpenVINO entram apenas depois de benchmark comparativo no hardware
+real. Ultralytics nao deve ser incorporado sem uma decisao explicita de licenca
+e um teste de carga prolongado.
 
 ## Decisao implementada
 
@@ -72,7 +81,19 @@ sem uma decisao explicita de licenca e um teste de carga prolongado.
    inalterados.
 7. A aba Evidencias usa cards responsivos e paginacao de 24 miniaturas. Selecao
    individual, marcar/desmarcar tudo e exclusao em lote reutilizam o arquivo
-   cifrado existente. A aba Comportamento e seu historico nao sao reiniciados.
+   cifrado existente.
+8. `Atividade e trajetos`, dentro de Evidencias, agrupa confirmacoes repetidas na
+   mesma camera e mostra a sequencia temporal confirmada entre cameras, sem
+   afirmar deslocamento. Confirmacoes no mesmo segundo aparecem como simultaneas.
+   Intervalos acima de 180 segundos sao `sem confirmacao visual`, nao ausencia ou
+   localizacao.
+9. A consulta indexada e limitada le no maximo 500 confirmacoes recentes. A
+   linha do tempo e calculada em memoria e nao cria imagens, eventos derivados
+   ou novas escritas no HD de gravacao.
+10. Eventos so aparecem se o `profile_id` continuar no cadastro consentido
+    atual. Perfil excluido ou indisponivel nao reaparece por historico atrasado.
+11. O schema 6 normaliza timestamps de visao com fuso para horario local sem
+    offset e ordena empates por `event_id`; o indice cobre essa ordem.
 
 ## Limites
 
@@ -80,17 +101,23 @@ sem uma decisao explicita de licenca e um teste de carga prolongado.
 - Rostos detectados recebem achatamento adicional; um rosto nao detectado fica
   protegido apenas pela pixelizacao global, pois nenhum detector e infalivel.
 - Permanencia pertence ao campo de visao da camera, nao a uma identidade.
-- Nao ha tracking individual, zonas, fila, emocao, intencao ou produtividade.
+- Nao ha tracking continuo de caixas, pessoas desconhecidas, zonas, fila,
+  emocao, intencao ou produtividade. A linha do tempo individual e apenas a
+  sequencia de confirmacoes de um perfil previamente cadastrado com consentimento.
 - Nao ha detector de uso de celular. Horario e camera de um perfil consentido
   sao fatos observados; qualquer acao corporal futura deve aparecer como
   `possivel evento`, com confianca e revisao humana, nunca como certeza.
-- Antes de adicionar ByteTrack, e necessario medir CPU/memoria por 24 horas e
-  calibrar zonas com imagens anonimizadas de cada camera.
+- Antes de adicionar ByteTrack ou BoT-SORT, e necessario medir CPU/memoria por
+  24 horas e calibrar zonas com imagens anonimizadas de cada camera.
 
 ## Validacao desta entrega
 
-- A suite completa passou `205` testes, incluindo renomeacao retrospectiva de
-  perfil, falso positivo isolado,
+- A suite completa passou `217` testes, incluindo revogacao de perfil, fuso
+  horario, totais alem do limite, migracao do indice, navegacao em `980x650`,
+  carregamento apenas com a aba visivel e linha do tempo consentida,
+  sequencia entre cameras, confirmacao simultanea sem falso deslocamento, lacuna
+  inconclusiva, consulta indexada,
+  renomeacao retrospectiva de perfil, falso positivo isolado,
   oscilacao de contagem, expiracao para estado desconhecido, encerramento seguro,
   anonimizacao defensiva e redimensionamento do preview.
 - O manifesto e os modelos locais passaram na verificacao de tamanho e SHA-256.

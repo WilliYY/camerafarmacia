@@ -79,9 +79,10 @@ O gerenciador compara a versão local com a versão publicada no GitHub, mas só
 ### 8. Painel Unificado WIMI Analytics
 
 O painel principal possui duas abas superiores: **Cameras** e **Analises**.
-Analises fica dentro da mesma janela e contem Visao geral, Cameras,
-Comportamento, Rede, Evidencias, Relatorios e Pessoas. Alternar entre elas nao
-reinicia o NVR, o coletor, a visao ou o banco local.
+Analises fica dentro da mesma janela e contem Visao geral, Cameras, Rede,
+Evidencias e Relatorios. Evidencias agrupa Capturas, Atividade e trajetos e
+Pessoas cadastradas. Alternar entre elas nao reinicia o NVR, o coletor, a visao
+ou o banco local.
 
 O historico persistente usa SQLite em `sistema/analytics/`, fora do HD de
 gravacoes. A visao reutiliza o preview existente, calibra de forma limitada o
@@ -90,21 +91,23 @@ pessoas, pico, variacao visual e permanencia observada com NanoDet local. Ela nu
 cria perfis faciais sozinha; o cadastro de identidade continua manual e
 consentido.
 
-A aba Pessoas ordena somente os perfis consentidos por visitas e tempo observado
-estimado. Confirmacoes simultaneas em cameras diferentes nao dobram o tempo e
-eventos repetidos sao idempotentes. O resumo permanece no banco local ate a
-exclusao do perfil; ao excluir, o resumo e os eventos associados tambem sao
-removidos com `secure_delete`, checkpoint e compactacao. Um hash irreversivel
-impede que uma confirmacao atrasada recrie o perfil; rostos desconhecidos
-continuam anonimos. Bancos antigos nao recriam ranking a partir de eventos
-historicos; eventos antigos de identidade sao descartados na migracao, evitando
-restaurar perfis cuja autorizacao possa ter sido revogada. A exclusao e a
-compactacao rodam fora do thread da interface; se a compactacao falhar, uma
+A subaba Pessoas cadastradas ordena somente os perfis consentidos por visitas e
+tempo observado estimado. Confirmacoes simultaneas em cameras diferentes nao
+dobram o tempo e eventos repetidos sao idempotentes. O resumo permanece no banco
+local ate a exclusao do perfil; ao excluir, o resumo e os eventos associados
+tambem sao removidos com `secure_delete`, checkpoint e compactacao. Um hash
+irreversivel impede que uma confirmacao atrasada recrie o perfil; rostos
+desconhecidos continuam anonimos. Bancos antigos nao recriam ranking a partir de
+eventos historicos; eventos antigos de identidade sao descartados na migracao,
+evitando restaurar perfis cuja autorizacao possa ter sido revogada. A exclusao e
+a compactacao rodam fora do thread da interface; se a compactacao falhar, uma
 pendencia persistente faz nova tentativa na proxima abertura.
 
-A aba Comportamento resume apenas fatos observaveis, como variacao visual,
-duracao e contagem estimada de pessoas. Nao classifica emocao, intencao,
-honestidade ou produtividade.
+A subaba Atividade e trajetos resume fatos observaveis: variacao visual, duracao,
+contagem estimada e a sequencia de confirmacoes dos perfis consentidos por
+camera. Um intervalo sem evento e exibido como `sem confirmacao visual`, nunca
+como localizacao conhecida, saida da farmacia ou acao da pessoa. O painel nao
+classifica emocao, intencao, honestidade ou produtividade.
 
 A aba Rede identifica o tipo de conexao deste PC, velocidade do link, resposta
 do gateway, contadores, variacoes entre amostras e picos relativos ao historico
@@ -199,10 +202,11 @@ pythonw.exe gerenciador.pyw --silent
 ```
 
 O WIMI Analytics roda integrado ao processo do NVR. No modo visual, use as abas
-superiores `Cameras` e `Analises`; a segunda contem seis subabas: Visao geral,
-Cameras, Comportamento, Rede, Evidencias e Relatorios. `Evidencias` agrupa
-`Capturas` e `Pessoas cadastradas`. Trocar de aba preserva a coleta, os previews
-e o historico; o fluxo normal nao abre navegador nem uma segunda janela.
+superiores `Cameras` e `Analises`; a segunda contem cinco subabas: Visao geral,
+Cameras, Rede, Evidencias e Relatorios. `Evidencias` agrupa `Capturas`,
+`Atividade e trajetos` e `Pessoas cadastradas`. Trocar de aba preserva a coleta,
+os previews e o historico; o fluxo normal nao abre navegador nem uma segunda
+janela.
 
 O historico fica em `sistema/analytics/`, fora do HD de gravacao. A visao usa os
 quadros ja decodificados pelo preview, sem abrir outra conexao com as cameras e
@@ -248,13 +252,23 @@ recebem nome nem `profile_id`. Capturas antigas nao sao reprocessadas.
 
 O NanoDet quantizado do OpenCV Zoo usa o mesmo quadro do preview, sem nova
 conexao com a camera, e roda no maximo uma vez a cada cinco segundos por camera.
-A aba Comportamento persiste somente contagem estabilizada, inicio e fim de
-presenca confirmada, pico e permanencia observada. A intensidade de variacao
-visual aparece apenas no estado atual da camera. Esses sinais,
-assim como rostos e reconhecimento consentido, exigem revisao humana e nao
-inferem emocao, intencao, desonestidade ou produtividade. A adaptacao automatica
-aprende somente o ruido visual de fundo dentro de janela e limites fixos; nao
-altera gravacao, retencao, camera, rede ou identidade.
+A subaba `Atividade e trajetos` apresenta a contagem estabilizada, inicio e fim
+de presenca, pico, permanencia observada e uma linha do tempo derivada das
+confirmacoes de perfis consentidos. Confirmacoes repetidas na mesma camera formam
+uma janela observada; uma confirmacao posterior em outra camera forma uma
+sequencia temporal, sem afirmar deslocamento. Confirmacoes no mesmo segundo sao
+marcadas como simultaneas. Depois de 180 segundos sem nova confirmacao, o
+intervalo fica explicitamente inconclusivo. A consulta usa indice dedicado, le
+Apenas perfis ainda presentes no cadastro consentido atual podem aparecer. Um
+evento atrasado de perfil excluido permanece oculto. Timestamps com fuso sao
+normalizados para o horario local antes da persistencia e empates usam
+`event_id`, preservando uma ordem deterministica. A consulta le no maximo 500
+confirmacoes recentes e nao grava novos eventos, imagens ou trajetorias no HD.
+A intensidade de variacao visual aparece apenas no estado atual da camera.
+Esses sinais exigem revisao humana e nao inferem emocao, intencao, desonestidade
+ou produtividade. A adaptacao automatica aprende somente o ruido visual de fundo
+dentro de janela e limites fixos; nao altera gravacao, retencao, camera, rede ou
+identidade.
 
 O sistema ainda nao afirma acoes individuais como `pegou o celular`. Um recurso
 desse tipo deve primeiro detectar apenas um evento possivel, manter o trecho

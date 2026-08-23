@@ -5,9 +5,10 @@ Data: 16/08/2026
 ## Objetivo
 
 Entregar as analises dentro do aplicativo Tkinter usado na farmacia, sem abrir
-um navegador. O operador deve alternar entre Visao geral, Cameras,
-Comportamento, Rede, Evidencias, Relatorios e Pessoas sem perder a coleta em
-memoria ou o historico persistido.
+um navegador. O operador deve alternar entre Visao geral, Cameras, Rede,
+Evidencias e Relatorios sem perder a coleta em memoria ou o historico
+persistido. Evidencias concentra Capturas, Atividade e trajetos e Pessoas
+cadastradas.
 
 O sistema observa somente evidencias tecnicas e operacionais. Movimento,
 presenca e identidade cadastrada sao sinais para revisao humana; nao inferem
@@ -88,10 +89,17 @@ todos os rostos impede a persistencia. Ao atingir o teto, a coleta visual para
 sem remover itens ainda dentro do prazo. O painel mostra a expiracao e oferece
 exclusao manual; nenhum item guarda `profile_id`, nome ou face identificavel.
 
-A analise de comportamento e agregada por camera. Duas amostras consecutivas
-sem pessoa encerram uma presenca observada; falta de amostra ou modelo
-indisponivel e estado inconclusivo e nao encerra sessao. Nao existe nesta fase
-tracking individual, inferencia de emocao, intencao ou produtividade.
+A analise tecnica de comportamento e agregada por camera. Duas amostras
+consecutivas sem pessoa encerram uma presenca observada; falta de amostra ou
+modelo indisponivel e estado inconclusivo e nao encerra sessao. A linha do tempo
+individual usa somente eventos `presence_confirmed` de perfis consentidos:
+agrupa confirmacoes repetidas por camera, registra a sequencia temporal entre
+cameras sem afirmar deslocamento, distingue confirmacoes simultaneas e descreve
+lacunas como `sem confirmacao visual`. Somente perfis presentes no cadastro
+consentido atual podem aparecer. Timestamps com fuso sao normalizados para a
+linha local antes de ordenar. Nao existe nesta fase
+tracking continuo, localizacao fora da imagem, inferencia de emocao, intencao ou
+produtividade.
 
 ## Interface nativa
 
@@ -99,14 +107,14 @@ tracking individual, inferencia de emocao, intencao ou produtividade.
 - **Cameras:** conectividade, gravacao, estado automatico da analise e as 200
   confirmacoes consentidas mais recentes, com horario, camera, funcao e
   confianca. A mesma lista permite renomear o perfil selecionado.
-- **Comportamento:** movimento e presenca agregados, com origem e horario.
 - **Rede:** conexao/gateway, dispositivos vistos e aplicativos TCP deste PC em
   subabas persistentes.
 - **Evidencias:** galeria responsiva de cards com miniaturas descaracterizadas,
   metadados de analise, expiracao, selecao individual, marcar/desmarcar tudo e
   exclusao manual em lote confirmada. A paginacao mantem no maximo 24 miniaturas
   descriptografadas em memoria e so as carrega com a aba visivel, sem alterar o
-  historico de comportamento. A mesma area possui a subaba `Pessoas cadastradas`
+  historico. A mesma area possui `Atividade e trajetos`, com a linha do tempo de
+  confirmacoes consentidas e eventos tecnicos agregados, e `Pessoas cadastradas`
   para cadastro, classificacao manual de funcao, ranking, renomeacao e exclusao
   de perfis consentidos.
 - **Relatorios:** coletas persistidas, filtros de periodo e detalhes.
