@@ -18,6 +18,8 @@ except ImportError as error:
     )
     sys.exit(1)
 
+from wimi_analytics.overlay import render_identity_overlay
+
 import tkinter as tk
 from tkinter import ttk, messagebox
 import os
@@ -2073,6 +2075,7 @@ class LiveCameraWidget(tk.Frame):
                             
                         if self.running:
                             self.app.submit_vision_frame(self.stream_name, source_image)
+                            image = self.apply_identity_overlay(image)
                             self.update_image(image)
                             last_frame_received_time = time.time()
                     except Exception:
@@ -2099,6 +2102,13 @@ class LiveCameraWidget(tk.Frame):
         self.connectivity_status = "reconnecting"
         self.app.root.after(0, lambda: self.video_lbl.configure(image="", text=msg, fg=ORANGE_COLOR, font=("Segoe UI", 9, "bold"), compound="center"))
         self.app.root.after(0, self.update_header_text)
+
+    def apply_identity_overlay(self, pil_image):
+        try:
+            overlay = self.app.get_vision_identity_overlay(self.stream_name)
+            return render_identity_overlay(pil_image, overlay)
+        except Exception:
+            return pil_image
 
     def update_image(self, pil_image):
         self.current_error_msg = ""
@@ -2197,6 +2207,8 @@ class LiveCameraWidget(tk.Frame):
                                 # Descarta frames com corrupção visual severa
                                 if self.is_corrupt_frame(image):
                                     continue
+
+                                image = self.apply_identity_overlay(image)
 
                                 photo = ImageTk.PhotoImage(image)
                                 fs_lbl.photo = photo
@@ -6542,7 +6554,7 @@ class CameraManagerApp:
                 person_detector=person_detector,
                 hardware_guard=self.vision_hardware_guard,
                 sample_interval_seconds=1.0,
-                face_interval_seconds=3.0,
+                face_interval_seconds=1.0,
                 person_interval_seconds=5.0,
                 queue_size=2,
             )
@@ -6650,6 +6662,15 @@ class CameraManagerApp:
             return vision.submit(stream, image)
         except Exception:
             return False
+
+    def get_vision_identity_overlay(self, stream):
+        vision = getattr(self, "_vision_coordinator", None)
+        if vision is None or getattr(self, "_analytics_shutdown", False):
+            return None
+        try:
+            return vision.get_identity_overlay(stream, max_age_seconds=2.5)
+        except Exception:
+            return None
 
     def vision_hardware_guard(self):
         if getattr(self, "_shutdown_executed", False) or getattr(self, "_analytics_shutdown", False):

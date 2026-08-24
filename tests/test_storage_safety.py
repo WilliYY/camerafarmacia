@@ -1043,6 +1043,17 @@ class StorageSafetyTests(unittest.TestCase):
         source = inspect.getsource(self.module.LiveCameraWidget.stream_loop)
         self.assertNotIn("check_process_go2rtc", source)
 
+    def test_preview_applies_transient_identity_overlay_without_new_stream(self):
+        stream_source = inspect.getsource(self.module.LiveCameraWidget.stream_loop)
+        overlay_source = inspect.getsource(
+            self.module.LiveCameraWidget.apply_identity_overlay
+        )
+
+        self.assertEqual(stream_source.count("_read_mjpeg_frames"), 1)
+        self.assertIn("apply_identity_overlay", stream_source)
+        self.assertIn("get_vision_identity_overlay", overlay_source)
+        self.assertIn("render_identity_overlay", overlay_source)
+
     def test_stop_sequence_never_kills_external_python_from_stale_lock(self):
         app = self.new_app()
         app.streams = ["cam"]

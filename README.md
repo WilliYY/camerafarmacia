@@ -232,6 +232,14 @@ resume quantas vezes cada perfil apareceu. O botao de analise muda sozinho para
 `Analise ja ativa` ou `Analise calibrando`, evitando solicitar uma ativacao que
 ja aconteceu.
 
+No preview ao vivo e na tela cheia, cada rosto detectado recebe uma caixa
+transitoria. Perfis consentidos mostram nome, funcao cadastrada e confianca;
+rostos sem correspondencia mostram apenas `Desconhecido`. A identificacao usa o
+mesmo quadro ja entregue ao preview, e atualizada no maximo uma vez por segundo,
+fica somente em memoria por ate 2,5 segundos e nao altera nem grava a camada
+visual nos arquivos de video ou nas evidencias. O bloqueio de hardware continua
+podendo pausar a analise sem interromper a gravacao.
+
 Um perfil consentido pode comecar com uma identificacao temporaria, como
 `Pessoa 1`, e ser renomeado depois pela ocorrencia ou por `Pessoas cadastradas`.
 O `profile_id` nao muda: nome, funcao e vetor continuam no payload DPAPI, e todo

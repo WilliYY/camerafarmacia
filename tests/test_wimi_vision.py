@@ -13,6 +13,7 @@ from wimi_analytics.biometric_storage import BiometricStore
 from wimi_analytics.face_engine import IdentityMatcher, OpenCvFaceBackend
 from wimi_analytics.face_engine import EnrollmentError, LocalFaceService
 from wimi_analytics.person_engine import OpenCvPersonDetector
+from wimi_analytics.overlay import render_identity_overlay
 from wimi_analytics.privacy import DataProtectionError, protect_bytes, unprotect_bytes
 from wimi_analytics.storage import AnalyticsStore
 from wimi_analytics.vision import BehaviorAnalyzer, MotionAnalyzer, VisionCoordinator
@@ -84,6 +85,15 @@ class FakeFaceBackend:
 
     def extract_embeddings(self, image):
         return [list(value) for value in self.embeddings]
+
+    def analyze_faces(self, image):
+        return [
+            {
+                "embedding": list(value),
+                "bbox": (8 + index * 24, 6, 20, 20),
+            }
+            for index, value in enumerate(self.embeddings)
+        ]
 
 
 class FakePersonDetector:
@@ -386,6 +396,8 @@ class BiometricStoreTests(unittest.TestCase):
 
             recognized = service.analyze_frame("farmacia", image)
             self.assertEqual(recognized["identities"][0]["role"], "employee")
+            self.assertEqual(recognized["identities"][0]["face_index"], 0)
+            self.assertEqual(recognized["identities"][0]["bbox"], (8, 6, 20, 20))
 
             backend.embeddings = [[0.0, 1.0, 0.0]]
             unknown = service.analyze_frame("farmacia", image)
@@ -540,6 +552,106 @@ class BiometricStoreTests(unittest.TestCase):
 
 
 class VisionCoordinatorTests(unittest.TestCase):
+    def test_identity_overlay_is_transient_and_keeps_unknown_faces_separate(self):
+        class TwoFaceService(FakeFaceService):
+            def analyze_frame(self, stream, image):
+                self.calls += 1
+                return {
+                    "face_count": 2,
+                    "face_boxes": [(8, 6, 20, 20), (36, 6, 20, 20)],
+                    "identities": [
+                        {
+                            "profile_id": "profile-1",
+                            "display_name": "Thiago",
+                            "role": "employee",
+                            "confidence": 0.93,
+                            "face_index": 1,
+                            "bbox": (36, 6, 20, 20),
+                        }
+                    ],
+                    "state": "active",
+                }
+
+        coordinator = VisionCoordinator(
+            store=FakeVisionStore(),
+            face_service=TwoFaceService(),
+            sample_interval_seconds=0,
+            face_interval_seconds=10,
+        )
+        snapshot = coordinator.process_frame_now(
+            "farmacia",
+            Image.new("RGB", (64, 36), "black"),
+            monotonic_now=10.0,
+        )
+        repeated_snapshot = coordinator.process_frame_now(
+            "farmacia",
+            Image.new("RGB", (64, 36), "black"),
+            monotonic_now=11.0,
+        )
+
+        overlay = coordinator.get_identity_overlay(
+            "farmacia", max_age_seconds=2.0, monotonic_now=11.0
+        )
+
+        self.assertEqual(overlay["source_size"], (64, 36))
+        self.assertEqual(len(overlay["faces"]), 2)
+        self.assertEqual(overlay["faces"][0]["display_name"], "Desconhecido")
+        self.assertFalse(overlay["faces"][0]["recognized"])
+        self.assertEqual(overlay["faces"][1]["display_name"], "Thiago")
+        self.assertTrue(overlay["faces"][1]["recognized"])
+        self.assertEqual(repeated_snapshot["identities"][0]["display_name"], "Thiago")
+        self.assertEqual(coordinator.face_service.calls, 1)
+        self.assertNotIn("bbox", snapshot["identities"][0])
+        self.assertNotIn("face_index", snapshot["identities"][0])
+        self.assertIsNone(
+            coordinator.get_identity_overlay(
+                "farmacia", max_age_seconds=2.0, monotonic_now=12.1
+            )
+        )
+
+    def test_renderer_draws_identification_without_mutating_source_frame(self):
+        source = Image.new("RGB", (320, 180), "#101010")
+        overlay = {
+            "source_size": (640, 360),
+            "faces": [
+                {
+                    "bbox": (64, 36, 128, 144),
+                    "recognized": True,
+                    "display_name": "Thiago",
+                    "role": "employee",
+                    "confidence": 0.93,
+                },
+                {
+                    "bbox": (384, 72, 96, 120),
+                    "recognized": False,
+                    "display_name": "Desconhecido",
+                },
+            ],
+        }
+
+        rendered = render_identity_overlay(source, overlay)
+
+        self.assertEqual(source.getpixel((32, 18)), (16, 16, 16))
+        self.assertNotEqual(rendered.tobytes(), source.tobytes())
+        self.assertNotEqual(rendered.getpixel((32, 18)), source.getpixel((32, 18)))
+
+        narrow = render_identity_overlay(
+            Image.new("RGB", (80, 45), "#101010"),
+            {
+                "source_size": (80, 45),
+                "faces": [
+                    {
+                        "bbox": (2, 2, 30, 35),
+                        "recognized": True,
+                        "display_name": "Nome muito longo para uma camera pequena",
+                        "role": "employee",
+                        "confidence": 0.91,
+                    }
+                ],
+            },
+        )
+        self.assertEqual(narrow.size, (80, 45))
+
     def test_person_detection_emits_bounded_observable_behavior_events(self):
         store = FakeVisionStore()
         detector = FakePersonDetector([2, 2, 0, 0])
@@ -777,6 +889,35 @@ class VisionCoordinatorTests(unittest.TestCase):
         self.assertEqual(snapshot["pause_reason"], "memory_limit")
         self.assertEqual(face_service.calls, 0)
         self.assertEqual(store.events, [])
+
+    def test_hardware_pause_clears_recent_identity_instead_of_showing_stale_name(self):
+        guard_reason = [None]
+        coordinator = VisionCoordinator(
+            store=FakeVisionStore(),
+            face_service=FakeFaceService(),
+            hardware_guard=lambda: guard_reason[0],
+            sample_interval_seconds=0,
+            face_interval_seconds=10,
+        )
+        image = Image.new("RGB", (64, 36), "black")
+        coordinator.process_frame_now("farmacia", image, monotonic_now=1.0)
+        guard_reason[0] = "memory_limit"
+
+        paused = coordinator.process_frame_now(
+            "farmacia", image, monotonic_now=2.0
+        )
+        guard_reason[0] = None
+        resumed = coordinator.process_frame_now(
+            "farmacia", image, monotonic_now=3.0
+        )
+
+        self.assertEqual(paused["identities"], [])
+        self.assertIsNone(
+            coordinator.get_identity_overlay(
+                "farmacia", max_age_seconds=2.5, monotonic_now=2.0
+            )
+        )
+        self.assertEqual(resumed["identities"], [])
 
     def test_async_queue_is_bounded_and_stop_is_clean(self):
         coordinator = VisionCoordinator(

@@ -103,6 +103,21 @@ produtividade.
 
 ## Interface nativa
 
+### Identificacao no preview
+
+- o preview principal e a tela cheia desenham a identificacao apenas na copia
+  exibida pela interface; o arquivo gravado permanece original;
+- cada perfil consentido confirmado mostra nome, funcao manual e confianca;
+- rostos sem correspondencia aparecem como `Desconhecido` e nunca criam perfil
+  ou funcao automaticamente;
+- a sobreposicao desenhada com caixas, nomes, funcoes e confianca fica somente
+  em memoria, expira apos 2,5 segundos e nao entra no snapshot persistente, no
+  banco biometrico ou nas evidencias;
+- o reconhecimento usa o quadro ja amostrado pelo preview, no maximo uma vez
+  por segundo por camera, sem abrir uma nova conexao com o stream;
+- o limite de memoria e o encerramento do NVR continuam prevalecendo sobre a
+  analise opcional.
+
 - **Visao geral:** estado do NVR, riscos, pontos fortes e atualidade da fonte.
 - **Cameras:** conectividade, gravacao, estado automatico da analise e as 200
   confirmacoes consentidas mais recentes, com horario, camera, funcao e

@@ -318,12 +318,15 @@ class LocalFaceService:
             face_boxes = []
             for index, face in enumerate(faces):
                 embedding = face["embedding"]
-                if face.get("bbox") is not None:
-                    face_boxes.append(tuple(face["bbox"]))
+                bbox = tuple(face["bbox"]) if face.get("bbox") is not None else None
+                if bbox is not None:
+                    face_boxes.append(bbox)
                 result = self.matcher.match(f"{stream}:{index}", embedding, self._profiles)
                 if result:
                     result["display_name"] = self._names.get(result["profile_id"], "Pessoa cadastrada")
                     result["role"] = self._roles.get(result["profile_id"], "authorized")
+                    result["face_index"] = index
+                    result["bbox"] = bbox
                     identities.append(result)
         return {
             "face_count": len(faces),

@@ -356,7 +356,7 @@ class VisionCoordinator:
         motion_analyzer=None,
         hardware_guard=None,
         sample_interval_seconds=1.0,
-        face_interval_seconds=3.0,
+        face_interval_seconds=1.0,
         queue_size=2,
         max_frame_size=(1280, 720),
         person_detector=None,
@@ -386,6 +386,9 @@ class VisionCoordinator:
         self._last_submitted = {}
         self._last_face_analysis = {}
         self._last_face_count = {}
+        self._last_face_state = {}
+        self._last_identities = {}
+        self._identity_overlays = {}
         self._last_person_analysis = {}
         self._last_person_state = {}
         self._last_presence = {}
@@ -441,6 +444,9 @@ class VisionCoordinator:
         self._thread = None
         with self._lock:
             self._latest_frames.clear()
+            self._identity_overlays.clear()
+            self._last_identities.clear()
+            self._last_face_state.clear()
         return events_flushed
 
     def submit(self, stream, image):
@@ -494,6 +500,7 @@ class VisionCoordinator:
                 self._queue.task_done()
 
     def _record_worker_error(self, stream, occurred_at, error):
+        self._clear_identity_state(stream)
         result = {
             "stream": stream,
             "state": "degraded",
@@ -535,6 +542,11 @@ class VisionCoordinator:
                 self._pending_events.append(event)
             return False
 
+    def _clear_identity_state(self, stream):
+        with self._lock:
+            self._identity_overlays.pop(stream, None)
+            self._last_identities[stream] = []
+
     def _flush_pending_events(self, limit=8):
         for _ in range(max(1, min(int(limit), 32))):
             with self._lock:
@@ -557,6 +569,7 @@ class VisionCoordinator:
         except Exception:
             pause_reason = "hardware_guard_error"
         if pause_reason:
+            self._clear_identity_state(stream)
             result = {
                 "stream": stream,
                 "state": "paused",
@@ -611,13 +624,17 @@ class VisionCoordinator:
             self._persist_event(event)
 
         face_count = self._last_face_count.get(stream)
-        identities = []
+        identities = list(self._last_identities.get(stream, []))
         face_boxes = []
-        face_state = "not_configured"
+        face_state = self._last_face_state.get(stream, "not_configured")
         face_service = self.face_service
         last_face_at = self._last_face_analysis.get(stream, -1e9)
         if face_service is not None:
             face_state = getattr(face_service, "status", "unavailable")
+        if face_service is None or not getattr(face_service, "available", False):
+            identities = []
+            face_count = 0
+            self._clear_identity_state(stream)
         if (
             face_service is not None
             and getattr(face_service, "available", False)
@@ -626,9 +643,57 @@ class VisionCoordinator:
             self._last_face_analysis[stream] = monotonic_now
             analyzed = face_service.analyze_frame(stream, image)
             face_count = max(0, int(analyzed.get("face_count") or 0))
-            identities = list(analyzed.get("identities") or [])
+            raw_identities = list(analyzed.get("identities") or [])
             face_boxes = list(analyzed.get("face_boxes") or [])
             face_state = analyzed.get("state", "active")
+            identity_by_index = {}
+            identity_by_bbox = {}
+            for identity_index, identity in enumerate(raw_identities):
+                face_index = identity.get("face_index", identity_index)
+                try:
+                    face_index = int(face_index)
+                except (TypeError, ValueError):
+                    face_index = identity_index
+                identity_by_index[face_index] = identity
+                identity_bbox = identity.get("bbox")
+                if isinstance(identity_bbox, (list, tuple)) and len(identity_bbox) == 4:
+                    identity_by_bbox[tuple(identity_bbox)] = identity
+            overlay_faces = []
+            for face_index, bbox in enumerate(face_boxes):
+                identity = identity_by_bbox.get(tuple(bbox)) or identity_by_index.get(
+                    face_index
+                )
+                overlay_faces.append(
+                    {
+                        "bbox": tuple(bbox),
+                        "recognized": identity is not None,
+                        "display_name": (
+                            identity.get("display_name", "Pessoa cadastrada")
+                            if identity is not None
+                            else "Desconhecido"
+                        ),
+                        "role": identity.get("role") if identity is not None else None,
+                        "confidence": (
+                            identity.get("confidence") if identity is not None else None
+                        ),
+                    }
+                )
+            identities = [
+                {
+                    key: value
+                    for key, value in identity.items()
+                    if key not in {"bbox", "face_index"}
+                }
+                for identity in raw_identities
+            ]
+            with self._lock:
+                self._identity_overlays[stream] = {
+                    "source_size": tuple(image.size),
+                    "faces": overlay_faces,
+                    "updated_at": monotonic_now,
+                }
+                self._last_identities[stream] = list(identities)
+                self._last_face_state[stream] = face_state
             if self._last_face_count.get(stream) != face_count:
                 self._persist_event(
                     {
@@ -706,3 +771,18 @@ class VisionCoordinator:
             if monotonic_now - captured_at > max(0.0, float(max_age_seconds)):
                 return None
             return image.copy()
+
+    def get_identity_overlay(
+        self, stream, max_age_seconds=2.5, monotonic_now=None
+    ):
+        monotonic_now = time.monotonic() if monotonic_now is None else float(monotonic_now)
+        with self._lock:
+            overlay = self._identity_overlays.get(stream)
+            if overlay is None:
+                return None
+            if monotonic_now - overlay["updated_at"] > max(0.0, float(max_age_seconds)):
+                return None
+            return {
+                "source_size": tuple(overlay["source_size"]),
+                "faces": [dict(face) for face in overlay["faces"]],
+            }
