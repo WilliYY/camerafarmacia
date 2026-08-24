@@ -183,6 +183,8 @@ class AnalyticsDesktopWindow:
         self._evidence_cards = {}
         self._evidence_selection_vars = {}
         self._evidence_photo_cache = {}
+        self._evidence_preview_window = None
+        self._evidence_preview_photo = None
         self._evidence_selected_ids = set()
         self._evidence_snapshots = []
         self._evidence_snapshot_signature = None
@@ -214,6 +216,7 @@ class AnalyticsDesktopWindow:
 
     def hide(self):
         self._cancel_refresh()
+        self._close_evidence_preview()
         if self.window is not None and self.window.winfo_exists():
             if self.embedded:
                 self.window.pack_forget()
@@ -226,6 +229,7 @@ class AnalyticsDesktopWindow:
             return
         self._destroyed = True
         self._cancel_refresh()
+        self._close_evidence_preview()
         self._evidence_photo_cache.clear()
         self._evidence_cards.clear()
         if self.window is not None and self.window.winfo_exists():
@@ -780,6 +784,8 @@ class AnalyticsDesktopWindow:
         self._evidence_gallery_canvas.bind(
             "<Configure>", self._layout_evidence_cards, add="+"
         )
+        self._bind_evidence_mousewheel(self._evidence_gallery_canvas)
+        self._bind_evidence_mousewheel(self._evidence_gallery_frame)
         self._build_people_panel(people_tab)
         self._evidence_notebook.bind(
             "<<NotebookTabChanged>>", self._on_notebook_tab_changed, add="+"
@@ -1556,6 +1562,7 @@ class AnalyticsDesktopWindow:
                 bg=BG,
             )
             empty.grid(row=0, column=0, padx=18, pady=40, sticky="w")
+            self._bind_evidence_mousewheel(empty)
         else:
             for item in page_items:
                 self._build_evidence_card(item)
@@ -1647,14 +1654,13 @@ class AnalyticsDesktopWindow:
             wraplength=self.EVIDENCE_THUMBNAIL_SIZE[0],
         )
         detail.pack(fill="x", padx=9, pady=(5, 7))
-        for widget in (preview, detail):
-            widget.bind(
-                "<Button-1>",
-                lambda _event, item_id=evidence_id: self._toggle_evidence_selected(
-                    item_id
-                ),
-                add="+",
-            )
+        preview.bind(
+            "<Button-1>",
+            lambda _event, item_id=evidence_id: self._open_evidence_preview(item_id),
+            add="+",
+        )
+        for widget in (card, header, checkbox, image_area, preview, detail):
+            self._bind_evidence_mousewheel(widget)
 
         self._evidence_cards[evidence_id] = {
             "frame": card,
@@ -1681,6 +1687,114 @@ class AnalyticsDesktopWindow:
         )
         thumbnail.paste(image, offset)
         return ImageTk.PhotoImage(thumbnail, master=self.window)
+
+    def _open_evidence_preview(self, evidence_id):
+        if self.evidence_archive is None:
+            return
+        try:
+            source = self.evidence_archive.read_image(evidence_id)
+        except Exception:
+            source = None
+        if source is None:
+            messagebox.showwarning(
+                "Evidência indisponível",
+                "Não foi possível abrir esta captura.",
+                parent=self.window,
+            )
+            return
+        item = next(
+            (
+                row
+                for row in self._evidence_snapshots
+                if str(row.get("evidence_id") or "") == str(evidence_id)
+            ),
+            {},
+        )
+        self._close_evidence_preview()
+        preview_window = tk.Toplevel(self.window)
+        preview_window.title(
+            f"Evidência - {str(item.get('stream') or 'câmera').upper()}"
+        )
+        preview_window.configure(bg=BG)
+        preview_window.protocol("WM_DELETE_WINDOW", self._close_evidence_preview)
+        preview_window.bind(
+            "<Escape>", lambda _event: self._close_evidence_preview(), add="+"
+        )
+        try:
+            preview_window.transient(self.window.winfo_toplevel())
+        except tk.TclError:
+            pass
+
+        image = source.convert("RGB")
+        max_width = max(320, preview_window.winfo_screenwidth() - 120)
+        max_height = max(180, preview_window.winfo_screenheight() - 210)
+        image.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
+        photo = ImageTk.PhotoImage(image, master=preview_window)
+        image_label = tk.Label(
+            preview_window,
+            image=photo,
+            bg=BG,
+            bd=0,
+            highlightthickness=0,
+        )
+        image_label.pack(padx=12, pady=(12, 8))
+
+        footer = tk.Frame(preview_window, bg=SURFACE)
+        footer.pack(fill="x", padx=12, pady=(0, 12))
+        captured = self._evidence_time_text(item.get("captured_at"))
+        expires = self._evidence_time_text(item.get("expires_at"))
+        details = tk.Label(
+            footer,
+            text=(
+                f"{str(item.get('stream') or '-').upper()}  |  {captured}\n"
+                f"Rostos detectados descaracterizados  |  Exclusão automática: {expires}"
+            ),
+            font=("Segoe UI", 9),
+            fg=TEXT,
+            bg=SURFACE,
+            justify="left",
+            anchor="w",
+        )
+        details.pack(side="left", fill="x", expand=True, padx=10, pady=8)
+        close_button = self._button(
+            footer, "Fechar", self._close_evidence_preview, SURFACE_ALT
+        )
+        close_button.pack(side="right", padx=10, pady=8)
+
+        self._evidence_preview_window = preview_window
+        self._evidence_preview_photo = photo
+        preview_window.focus_set()
+
+    def _close_evidence_preview(self):
+        preview_window = self._evidence_preview_window
+        self._evidence_preview_window = None
+        self._evidence_preview_photo = None
+        if preview_window is not None:
+            try:
+                if preview_window.winfo_exists():
+                    preview_window.destroy()
+            except tk.TclError:
+                pass
+
+    def _bind_evidence_mousewheel(self, widget):
+        widget.bind("<MouseWheel>", self._on_evidence_mousewheel, add="+")
+        widget.bind("<Button-4>", self._on_evidence_mousewheel, add="+")
+        widget.bind("<Button-5>", self._on_evidence_mousewheel, add="+")
+
+    def _on_evidence_mousewheel(self, event):
+        canvas = self._evidence_gallery_canvas
+        if canvas is None:
+            return None
+        delta = int(getattr(event, "delta", 0) or 0)
+        if delta:
+            units = -1 if delta > 0 else 1
+        else:
+            button = int(getattr(event, "num", 0) or 0)
+            if button not in (4, 5):
+                return None
+            units = -1 if button == 4 else 1
+        canvas.yview_scroll(units, "units")
+        return "break"
 
     def _layout_evidence_cards(self, event=None):
         canvas = self._evidence_gallery_canvas

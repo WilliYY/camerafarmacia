@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from PIL import Image, ImageStat
+from PIL import Image, ImageChops, ImageStat
 
 from wimi_analytics.evidence import AnonymizedEvidenceArchive
 from wimi_analytics.storage import AnalyticsStore
@@ -66,7 +66,7 @@ class AnonymizedEvidenceArchiveTests(unittest.TestCase):
         self.assertEqual(rows[0]["expires_at"], "2026-08-26T10:00:00")
         self.assertEqual(
             rows[0]["anonymization"],
-            "balanced_context_pixelated_faces_flattened_v3",
+            "clear_context_faces_flattened_v4",
         )
         self.assertNotIn("profile", str(rows).casefold())
         self.assertNotIn("name", str(rows).casefold())
@@ -82,11 +82,11 @@ class AnonymizedEvidenceArchiveTests(unittest.TestCase):
         context_variance = sum(ImageStat.Stat(restored.crop((0, 0, 72, 72))).stddev)
         self.assertGreater(context_variance, 45)
 
-    def test_global_pixelation_reduces_detail_outside_detected_face_boxes(self):
+    def test_context_outside_detected_faces_remains_legible(self):
         source = Image.new("RGB", (120, 120), "black")
         for x in range(source.width):
             for y in range(source.height):
-                value = 255 if (x + y) % 2 else 0
+                value = 255 if ((x // 6) + (y // 6)) % 2 else 0
                 source.putpixel((x, y), (value, value, value))
 
         jpeg = self.archive._anonymized_jpeg(source, face_boxes=[], face_count=0)
@@ -94,9 +94,9 @@ class AnonymizedEvidenceArchiveTests(unittest.TestCase):
             image.load()
             restored = image.convert("RGB")
 
-        original_variance = sum(ImageStat.Stat(source).stddev)
-        restored_variance = sum(ImageStat.Stat(restored).stddev)
-        self.assertLess(restored_variance, original_variance * 0.15)
+        difference = ImageChops.difference(source, restored)
+        mean_error = sum(ImageStat.Stat(difference).mean) / 3
+        self.assertLess(mean_error, 25)
 
     def test_large_capture_keeps_720p_context_without_upscaling(self):
         source = Image.new("RGB", (1920, 1080), "#17324D")

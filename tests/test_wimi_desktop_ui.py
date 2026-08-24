@@ -1,7 +1,8 @@
 import threading
 import tkinter as tk
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from PIL import Image
 
@@ -850,6 +851,15 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         controller._refresh_evidence()
         self.assertEqual(archive.read_ids, reads_after_render)
 
+        controller._open_evidence_preview("evidence-1")
+        self.root.update()
+        self.assertIsNotNone(controller._evidence_preview_window)
+        self.assertEqual(controller._evidence_preview_photo.width(), 320)
+        self.assertEqual(controller._evidence_preview_photo.height(), 180)
+        controller.hide()
+        self.assertIsNone(controller._evidence_preview_window)
+        controller.show()
+
         controller._select_all_evidence()
         self.assertEqual(controller._evidence_selected_ids, {"evidence-1", "evidence-2"})
         self.assertIn("2", controller._evidence_delete_button.cget("text"))
@@ -857,6 +867,22 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         self.assertEqual(controller._evidence_selected_ids, set())
         self.assertEqual(str(controller._evidence_delete_button.cget("state")), "disabled")
         controller.destroy()
+
+    def test_evidence_mousewheel_scrolls_gallery(self):
+        controller = AnalyticsDesktopWindow(
+            self.root,
+            FakeCollector(),
+            FakeStore(),
+            FakeVision(),
+            face_service=FakeFaceService(),
+        )
+        canvas = MagicMock()
+        controller._evidence_gallery_canvas = canvas
+
+        result = controller._on_evidence_mousewheel(SimpleNamespace(delta=-120))
+
+        self.assertEqual(result, "break")
+        canvas.yview_scroll.assert_called_once_with(1, "units")
 
     def test_people_subtab_does_not_decrypt_evidence_until_captures_are_visible(self):
         archive = FakeEvidenceArchive(

@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from PIL import Image, ImageFilter
+from PIL import Image
 
 from .privacy import DpapiProtector
 
@@ -98,14 +98,6 @@ class AnonymizedEvidenceArchive:
             )
         else:
             output = source.copy()
-        context_pixel_size = 12
-        context_size = (
-            max(1, output.width // context_pixel_size),
-            max(1, output.height // context_pixel_size),
-        )
-        output = output.resize(context_size, Image.Resampling.BOX).resize(
-            output.size, Image.Resampling.NEAREST
-        )
         scaled_boxes = [
             tuple(float(value) * scale for value in box[:4])
             for box in face_boxes or []
@@ -123,7 +115,6 @@ class AnonymizedEvidenceArchive:
             anonymized = region.resize((1, 1), Image.Resampling.BOX).resize(
                 region.size, Image.Resampling.NEAREST
             )
-            anonymized = anonymized.filter(ImageFilter.GaussianBlur(radius=4))
             output.paste(anonymized, region_box)
         buffer = io.BytesIO()
         output.save(
@@ -190,7 +181,7 @@ class AnonymizedEvidenceArchive:
                         "relative_path": relative_path,
                         "byte_count": len(protected),
                         "face_count": int(face_count),
-                        "anonymization": "balanced_context_pixelated_faces_flattened_v3",
+                        "anonymization": "clear_context_faces_flattened_v4",
                     }
                 )
             except Exception as error:
