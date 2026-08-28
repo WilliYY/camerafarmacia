@@ -1,9 +1,15 @@
+import base64
 import hashlib
+import io
 import json
 import math
 import sys
 import threading
+import time
+from datetime import datetime
 from pathlib import Path
+
+from PIL import Image
 
 from .privacy import DpapiProtector
 
@@ -17,6 +23,9 @@ class EnrollmentError(ValueError):
 
 
 PROFILE_ROLES = frozenset({"authorized", "contractor", "employee", "manager"})
+PROVISIONAL_PREFIX = "pending:"
+PROVISIONAL_RETENTION_DAYS = 10
+PROVISIONAL_WRITE_INTERVAL_SECONDS = 300.0
 
 
 def normalize_profile_role(value):
@@ -70,7 +79,14 @@ class IdentityMatcher:
 
 
 class OpenCvFaceBackend:
-    def __init__(self, model_dir=None, runtime_dir=None, max_input_size=(960, 540), max_faces=8):
+    def __init__(
+        self,
+        model_dir=None,
+        runtime_dir=None,
+        max_input_size=(960, 540),
+        max_faces=8,
+        score_threshold=0.80,
+    ):
         package_dir = Path(__file__).resolve().parent
         self.model_dir = Path(model_dir or package_dir / "models")
         runtime = Path(runtime_dir or package_dir / "runtime" / "python")
@@ -84,6 +100,7 @@ class OpenCvFaceBackend:
             max(180, int(max_input_size[1])),
         )
         self.max_faces = max(1, min(int(max_faces), 32))
+        self.score_threshold = max(0.70, min(float(score_threshold), 0.95))
         self._cv2 = None
         self._np = None
         self._detector = None
@@ -120,7 +137,12 @@ class OpenCvFaceBackend:
 
             models = self._load_manifest()
             self._detector = cv2.FaceDetectorYN.create(
-                str(models["yunet"]), "", (320, 320), 0.90, 0.30, max(32, self.max_faces * 4)
+                str(models["yunet"]),
+                "",
+                (320, 320),
+                self.score_threshold,
+                0.30,
+                max(32, self.max_faces * 4),
             )
             self._recognizer = cv2.FaceRecognizerSF.create(str(models["sface"]), "")
             self._cv2 = cv2
@@ -194,8 +216,16 @@ class LocalFaceService:
         self._profiles = {}
         self._names = {}
         self._roles = {}
+        self._provisional_profiles = {}
+        self._provisional_names = {}
+        self._provisional_crops = {}
+        self._provisional_metadata = {}
+        self._pending_unknowns = []
+        self._last_provisional_write = {}
+        self._frame_sequence = 0
         if self.available:
             self.refresh_profiles()
+            self.refresh_provisional_clusters()
 
     def _encode(self, display_name, embedding, role):
         value = {
@@ -223,6 +253,33 @@ class LocalFaceService:
             "embedding": [float(item) for item in embedding],
         }
 
+    def _encode_provisional(self, display_name, embedding, crop_jpeg):
+        value = {
+            "schema_version": 1,
+            "model_id": self.backend.model_id,
+            "display_name": display_name,
+            "embedding": [float(item) for item in embedding],
+            "crop_jpeg": base64.b64encode(bytes(crop_jpeg)).decode("ascii"),
+        }
+        return json.dumps(value, separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+    def _decode_provisional(self, protected):
+        payload = json.loads(self.protector.unprotect(bytes(protected)).decode("utf-8"))
+        if payload.get("schema_version") != 1 or payload.get("model_id") != self.backend.model_id:
+            raise ValueError("provisional_face_model_mismatch")
+        embedding = payload.get("embedding")
+        display_name = str(payload.get("display_name") or "").strip()
+        if not isinstance(embedding, list) or not embedding or not display_name:
+            raise ValueError("provisional_face_invalid")
+        crop_jpeg = base64.b64decode(payload.get("crop_jpeg") or "", validate=True)
+        if not crop_jpeg.startswith(b"\xff\xd8") or len(crop_jpeg) > 64 * 1024:
+            raise ValueError("provisional_face_crop_invalid")
+        return {
+            "display_name": display_name,
+            "embedding": [float(item) for item in embedding],
+            "crop_jpeg": crop_jpeg,
+        }
+
     def refresh_profiles(self):
         profiles = {}
         names = {}
@@ -239,6 +296,219 @@ class LocalFaceService:
             self._profiles = profiles
             self._names = names
             self._roles = roles
+
+    def refresh_provisional_clusters(self):
+        profiles = {}
+        names = {}
+        crops = {}
+        metadata = {}
+        list_clusters = getattr(self.store, "list_provisional_clusters", None)
+        if not callable(list_clusters):
+            return
+        for item in list_clusters(include_payload=True):
+            try:
+                decoded = self._decode_provisional(item["protected_cluster"])
+                cluster_id = str(item["cluster_id"])
+                profiles[cluster_id] = decoded["embedding"]
+                names[cluster_id] = decoded["display_name"]
+                crops[cluster_id] = decoded["crop_jpeg"]
+                metadata[cluster_id] = {
+                    "first_seen_at": item.get("first_seen_at"),
+                    "last_seen_at": item.get("last_seen_at"),
+                    "expires_at": item.get("expires_at"),
+                    "observation_count": max(1, int(item.get("observation_count") or 1)),
+                }
+            except Exception:
+                continue
+        with self._lock:
+            self._provisional_profiles = profiles
+            self._provisional_names = names
+            self._provisional_crops = crops
+            self._provisional_metadata = metadata
+
+    @staticmethod
+    def _face_crop_jpeg(image, bbox):
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            return None
+        try:
+            x, y, width, height = (int(round(float(value))) for value in bbox)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if width < 8 or height < 8:
+            return None
+        padding = max(8, round(max(width, height) * 0.35))
+        left = max(0, x - padding)
+        top = max(0, y - padding)
+        right = min(image.width, x + width + padding)
+        bottom = min(image.height, y + height + padding)
+        if right <= left or bottom <= top:
+            return None
+        crop = image.convert("RGB").crop((left, top, right, bottom))
+        scale = min(384 / max(crop.size), max(1.0, 224 / max(crop.size)))
+        if scale != 1.0:
+            crop = crop.resize(
+                (max(1, round(crop.width * scale)), max(1, round(crop.height * scale))),
+                Image.Resampling.LANCZOS,
+            )
+        for quality in (90, 82, 74):
+            buffer = io.BytesIO()
+            crop.save(
+                buffer,
+                format="JPEG",
+                quality=quality,
+                optimize=True,
+                progressive=False,
+            )
+            value = buffer.getvalue()
+            if len(value) <= 64 * 1024:
+                return value
+        return None
+
+    def _next_provisional_name(self):
+        used = set()
+        for name in self._provisional_names.values():
+            prefix, separator, number = str(name).rpartition(" ")
+            if separator and prefix == "Pessoa" and number.isdigit():
+                used.add(int(number))
+        number = 1
+        while number in used:
+            number += 1
+        return f"Pessoa {number}"
+
+    def _match_provisional(self, embedding):
+        scored = sorted(
+            (
+                (_cosine_similarity(embedding, candidate), cluster_id)
+                for cluster_id, candidate in self._provisional_profiles.items()
+            ),
+            reverse=True,
+        )
+        if not scored or scored[0][0] < 0.55:
+            return None
+        best_score, cluster_id = scored[0]
+        second_score = scored[1][0] if len(scored) > 1 else -1.0
+        if best_score - second_score < 0.06:
+            return None
+        return cluster_id, max(0.0, min(float(best_score), 1.0))
+
+    def _resembles_confirmed_profile(self, embedding):
+        scored = sorted(
+            _cosine_similarity(embedding, candidate)
+            for candidate in self._profiles.values()
+        )
+        if not scored or scored[-1] < self.matcher.threshold:
+            return False
+        second = scored[-2] if len(scored) > 1 else -1.0
+        return scored[-1] - second >= self.matcher.minimum_margin
+
+    def _touch_provisional(self, cluster_id, monotonic_now):
+        previous = self._last_provisional_write.get(cluster_id, -1e9)
+        if monotonic_now - previous < PROVISIONAL_WRITE_INTERVAL_SECONDS:
+            return
+        metadata = self._provisional_metadata.get(cluster_id) or {}
+        crop_jpeg = self._provisional_crops.get(cluster_id)
+        embedding = self._provisional_profiles.get(cluster_id)
+        display_name = self._provisional_names.get(cluster_id)
+        if not crop_jpeg or embedding is None or not display_name:
+            return
+        try:
+            protected = self.protector.protect(
+                self._encode_provisional(display_name, embedding, crop_jpeg)
+            )
+            update = getattr(self.store, "update_provisional_cluster", None)
+            updated = callable(update) and update(
+                cluster_id,
+                protected,
+                observed_at=datetime.now(),
+                retention_days=PROVISIONAL_RETENTION_DAYS,
+            )
+        except Exception:
+            updated = False
+        if not updated:
+            return
+        self._last_provisional_write[cluster_id] = monotonic_now
+        metadata["observation_count"] = max(
+            1, int(metadata.get("observation_count") or 1) + 1
+        )
+        metadata["last_seen_at"] = datetime.now().isoformat(timespec="seconds")
+        self._provisional_metadata[cluster_id] = metadata
+
+    def _observe_unknown(self, image, bbox, embedding, frame_token, monotonic_now):
+        match = self._match_provisional(embedding)
+        if match is not None:
+            cluster_id, confidence = match
+            self._touch_provisional(cluster_id, monotonic_now)
+            return cluster_id, confidence
+
+        self._pending_unknowns = [
+            item
+            for item in self._pending_unknowns
+            if monotonic_now - item["last_seen"] <= 30.0
+        ]
+        best = None
+        best_score = -1.0
+        for item in self._pending_unknowns:
+            if item.get("frame_token") == frame_token:
+                continue
+            score = _cosine_similarity(embedding, item["embedding"])
+            if score > best_score:
+                best = item
+                best_score = score
+        if best is None or best_score < 0.62:
+            self._pending_unknowns.append(
+                {
+                    "embedding": list(embedding),
+                    "count": 1,
+                    "last_seen": monotonic_now,
+                    "frame_token": frame_token,
+                }
+            )
+            self._pending_unknowns = self._pending_unknowns[-16:]
+            return None
+
+        count = max(1, int(best["count"])) + 1
+        best["embedding"] = [
+            ((float(previous) * (count - 1)) + float(current)) / count
+            for previous, current in zip(best["embedding"], embedding)
+        ]
+        best["count"] = count
+        best["last_seen"] = monotonic_now
+        best["frame_token"] = frame_token
+        if count < 3:
+            return None
+
+        crop_jpeg = self._face_crop_jpeg(image, bbox)
+        if crop_jpeg is None:
+            self._pending_unknowns.remove(best)
+            return None
+        display_name = self._next_provisional_name()
+        try:
+            protected = self.protector.protect(
+                self._encode_provisional(display_name, best["embedding"], crop_jpeg)
+            )
+            create = getattr(self.store, "create_provisional_cluster", None)
+            if not callable(create):
+                return None
+            cluster_id = create(
+                protected,
+                observed_at=datetime.now(),
+                retention_days=PROVISIONAL_RETENTION_DAYS,
+            )
+        except Exception:
+            self._pending_unknowns.remove(best)
+            return None
+        self._pending_unknowns.remove(best)
+        self._provisional_profiles[cluster_id] = list(best["embedding"])
+        self._provisional_names[cluster_id] = display_name
+        self._provisional_crops[cluster_id] = crop_jpeg
+        self._provisional_metadata[cluster_id] = {
+            "first_seen_at": datetime.now().isoformat(timespec="seconds"),
+            "last_seen_at": datetime.now().isoformat(timespec="seconds"),
+            "expires_at": None,
+            "observation_count": 1,
+        }
+        self._last_provisional_write[cluster_id] = monotonic_now
+        return cluster_id, max(0.0, min(float(best_score), 1.0))
 
     def enroll(self, display_name, image, consent=False, role="authorized"):
         if not consent:
@@ -262,7 +532,7 @@ class LocalFaceService:
 
     def list_profiles(self):
         with self._lock:
-            return [
+            confirmed = [
                 {
                     "profile_id": profile_id,
                     "display_name": self._names[profile_id],
@@ -270,14 +540,52 @@ class LocalFaceService:
                 }
                 for profile_id in sorted(self._names, key=lambda value: self._names[value].casefold())
             ]
+            provisional = [
+                {
+                    "profile_id": f"{PROVISIONAL_PREFIX}{cluster_id}",
+                    "display_name": self._provisional_names[cluster_id],
+                    "role": "pending",
+                    "provisional": True,
+                    **dict(self._provisional_metadata.get(cluster_id) or {}),
+                }
+                for cluster_id in sorted(
+                    self._provisional_names,
+                    key=lambda value: self._provisional_names[value].casefold(),
+                )
+            ]
+            return confirmed + provisional
 
-    def rename_profile(self, profile_id, display_name):
+    def rename_profile(self, profile_id, display_name, role="authorized", consent=False):
         if not self.available:
             raise FaceEngineUnavailable(self.status)
         profile_id = str(profile_id)
         display_name = " ".join(str(display_name).split())[:80]
         if not display_name:
             raise EnrollmentError("display_name_required")
+        if profile_id.startswith(PROVISIONAL_PREFIX):
+            if not consent:
+                raise EnrollmentError("explicit_consent_required")
+            cluster_id = profile_id[len(PROVISIONAL_PREFIX) :]
+            with self._lock:
+                embedding = self._provisional_profiles.get(cluster_id)
+                if embedding is None:
+                    return False
+                protected = self.protector.protect(
+                    self._encode(display_name, embedding, normalize_profile_role(role))
+                )
+                promote = getattr(self.store, "promote_provisional_cluster", None)
+                if not callable(promote):
+                    return False
+                new_profile_id = promote(cluster_id, protected)
+                if not new_profile_id:
+                    return False
+                self._provisional_profiles.pop(cluster_id, None)
+                self._provisional_names.pop(cluster_id, None)
+                self._provisional_crops.pop(cluster_id, None)
+                self._provisional_metadata.pop(cluster_id, None)
+                self._last_provisional_write.pop(cluster_id, None)
+            self.refresh_profiles()
+            return new_profile_id
         with self._lock:
             embedding = self._profiles.get(profile_id)
             if embedding is None:
@@ -292,9 +600,41 @@ class LocalFaceService:
         return True
 
     def delete_profile(self, profile_id):
+        profile_id = str(profile_id)
+        if profile_id.startswith(PROVISIONAL_PREFIX):
+            cluster_id = profile_id[len(PROVISIONAL_PREFIX) :]
+            delete = getattr(self.store, "delete_provisional_cluster", None)
+            deleted = bool(callable(delete) and delete(cluster_id))
+            if deleted:
+                self.refresh_provisional_clusters()
+            return deleted
         deleted = self.store.delete_profile(profile_id)
         if deleted:
             self.refresh_profiles()
+        return deleted
+
+    def read_profile_face(self, profile_id):
+        profile_id = str(profile_id)
+        if not profile_id.startswith(PROVISIONAL_PREFIX):
+            return None
+        with self._lock:
+            jpeg = self._provisional_crops.get(profile_id[len(PROVISIONAL_PREFIX) :])
+        if not jpeg:
+            return None
+        try:
+            with Image.open(io.BytesIO(jpeg)) as image:
+                image.load()
+                return image.convert("RGB")
+        except Exception:
+            return None
+
+    def cleanup_provisional(self, now=None):
+        cleanup = getattr(self.store, "cleanup_provisional_clusters", None)
+        if not callable(cleanup):
+            return 0
+        deleted = cleanup(now=now)
+        if deleted:
+            self.refresh_provisional_clusters()
         return deleted
 
     def analyze_frame(self, stream, image):
@@ -316,6 +656,9 @@ class LocalFaceService:
                 ]
             identities = []
             face_boxes = []
+            self._frame_sequence += 1
+            frame_token = self._frame_sequence
+            monotonic_now = time.monotonic()
             for index, face in enumerate(faces):
                 embedding = face["embedding"]
                 bbox = tuple(face["bbox"]) if face.get("bbox") is not None else None
@@ -328,6 +671,29 @@ class LocalFaceService:
                     result["face_index"] = index
                     result["bbox"] = bbox
                     identities.append(result)
+                elif bbox is not None and not self._resembles_confirmed_profile(embedding):
+                    provisional = self._observe_unknown(
+                        image,
+                        bbox,
+                        embedding,
+                        frame_token,
+                        monotonic_now,
+                    )
+                    if provisional is not None:
+                        cluster_id, confidence = provisional
+                        identities.append(
+                            {
+                                "profile_id": f"{PROVISIONAL_PREFIX}{cluster_id}",
+                                "display_name": self._provisional_names.get(
+                                    cluster_id, "Pessoa em análise"
+                                ),
+                                "role": "pending",
+                                "provisional": True,
+                                "confidence": confidence,
+                                "face_index": index,
+                                "bbox": bbox,
+                            }
+                        )
         return {
             "face_count": len(faces),
             "face_boxes": face_boxes,

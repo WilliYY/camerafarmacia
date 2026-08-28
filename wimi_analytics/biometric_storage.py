@@ -3,13 +3,14 @@ import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from .storage import UnsafeAnalyticsPathError, _is_within, _iso
 
 
 MAX_PROFILES = 100
+MAX_PROVISIONAL_CLUSTERS = 100
 MAX_PROTECTED_PROFILE_BYTES = 128 * 1024
 MAX_DATABASE_BYTES = 16 * 1024 * 1024
 
@@ -65,16 +66,26 @@ class BiometricStore:
                     action TEXT NOT NULL,
                     profile_id TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS provisional_face_clusters (
+                    cluster_id TEXT PRIMARY KEY,
+                    protected_cluster BLOB NOT NULL,
+                    first_seen_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    observation_count INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_provisional_faces_expires
+                    ON provisional_face_clusters(expires_at);
                 """
             )
-        if previous_version < 1:
+        if previous_version < 2:
             try:
                 self._compact_sensitive_store()
             except Exception as error:
                 self.last_cleanup_error = str(error)[:160]
             else:
                 with self._lock, self._connection() as connection:
-                    connection.execute("PRAGMA user_version=1")
+                    connection.execute("PRAGMA user_version=2")
         try:
             os.chmod(self.path, 0o600)
         except OSError:
@@ -172,6 +183,206 @@ class BiometricStore:
                         connection.execute("PRAGMA user_version=0")
                 except Exception:
                     pass
+        return deleted
+
+    def create_provisional_cluster(
+        self,
+        protected_cluster,
+        observed_at=None,
+        retention_days=10,
+    ):
+        if not isinstance(protected_cluster, (bytes, bytearray)):
+            raise ValueError("invalid_protected_cluster")
+        protected_cluster = bytes(protected_cluster)
+        if not protected_cluster or len(protected_cluster) > MAX_PROTECTED_PROFILE_BYTES:
+            raise ValueError("invalid_protected_cluster")
+        observed_at = observed_at or datetime.now()
+        retention_days = max(1, min(int(retention_days), 30))
+        cluster_id = str(uuid.uuid4())
+        with self._lock, self._connection() as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) FROM provisional_face_clusters"
+            ).fetchone()[0]
+            if count >= MAX_PROVISIONAL_CLUSTERS:
+                raise ValueError("provisional_face_limit_reached")
+            connection.execute(
+                """
+                INSERT INTO provisional_face_clusters(
+                    cluster_id, protected_cluster, first_seen_at, last_seen_at,
+                    expires_at, observation_count
+                ) VALUES (?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    cluster_id,
+                    protected_cluster,
+                    _iso(observed_at),
+                    _iso(observed_at),
+                    _iso(observed_at + timedelta(days=retention_days)),
+                ),
+            )
+            connection.execute(
+                "INSERT INTO biometric_audit(occurred_at, action, profile_id) VALUES (?, ?, ?)",
+                (_iso(observed_at), "provisional_created", f"pending:{cluster_id}"),
+            )
+        return cluster_id
+
+    def update_provisional_cluster(
+        self,
+        cluster_id,
+        protected_cluster,
+        observed_at=None,
+        retention_days=10,
+        increment=1,
+    ):
+        if not isinstance(protected_cluster, (bytes, bytearray)):
+            raise ValueError("invalid_protected_cluster")
+        protected_cluster = bytes(protected_cluster)
+        if not protected_cluster or len(protected_cluster) > MAX_PROTECTED_PROFILE_BYTES:
+            raise ValueError("invalid_protected_cluster")
+        observed_at = observed_at or datetime.now()
+        retention_days = max(1, min(int(retention_days), 30))
+        increment = max(0, min(int(increment), 1000))
+        with self._lock, self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE provisional_face_clusters
+                SET protected_cluster = ?, last_seen_at = ?, expires_at = ?,
+                    observation_count = observation_count + ?
+                WHERE cluster_id = ?
+                """,
+                (
+                    protected_cluster,
+                    _iso(observed_at),
+                    _iso(observed_at + timedelta(days=retention_days)),
+                    increment,
+                    str(cluster_id),
+                ),
+            )
+        return cursor.rowcount > 0
+
+    def list_provisional_clusters(self, include_payload=False):
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT cluster_id, protected_cluster, first_seen_at, last_seen_at,
+                       expires_at, observation_count
+                FROM provisional_face_clusters
+                ORDER BY first_seen_at, cluster_id
+                """
+            ).fetchall()
+        results = []
+        for row in rows:
+            item = {
+                "cluster_id": row["cluster_id"],
+                "first_seen_at": row["first_seen_at"],
+                "last_seen_at": row["last_seen_at"],
+                "expires_at": row["expires_at"],
+                "observation_count": max(1, int(row["observation_count"] or 1)),
+            }
+            if include_payload:
+                item["protected_cluster"] = bytes(row["protected_cluster"])
+            results.append(item)
+        return results
+
+    def get_provisional_cluster(self, cluster_id, include_payload=False):
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT cluster_id, protected_cluster, first_seen_at, last_seen_at,
+                       expires_at, observation_count
+                FROM provisional_face_clusters WHERE cluster_id = ?
+                """,
+                (str(cluster_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        item = {
+            "cluster_id": row["cluster_id"],
+            "first_seen_at": row["first_seen_at"],
+            "last_seen_at": row["last_seen_at"],
+            "expires_at": row["expires_at"],
+            "observation_count": max(1, int(row["observation_count"] or 1)),
+        }
+        if include_payload:
+            item["protected_cluster"] = bytes(row["protected_cluster"])
+        return item
+
+    def promote_provisional_cluster(
+        self,
+        cluster_id,
+        protected_profile,
+        consent_at=None,
+    ):
+        if not isinstance(protected_profile, (bytes, bytearray)):
+            raise ValueError("invalid_protected_profile")
+        protected_profile = bytes(protected_profile)
+        if not protected_profile or len(protected_profile) > MAX_PROTECTED_PROFILE_BYTES:
+            raise ValueError("invalid_protected_profile")
+        cluster_id = str(cluster_id)
+        profile_id = str(uuid.uuid4())
+        now = datetime.now()
+        consent_at = _iso(consent_at or now)
+        with self._lock, self._connection() as connection:
+            candidate = connection.execute(
+                "SELECT 1 FROM provisional_face_clusters WHERE cluster_id = ?",
+                (cluster_id,),
+            ).fetchone()
+            if candidate is None:
+                return None
+            count = connection.execute("SELECT COUNT(*) FROM biometric_profiles").fetchone()[0]
+            if count >= MAX_PROFILES:
+                raise ValueError("biometric_profile_limit_reached")
+            connection.execute(
+                """
+                INSERT INTO biometric_profiles(
+                    profile_id, protected_profile, consent_at, created_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (profile_id, protected_profile, consent_at, _iso(now)),
+            )
+            connection.execute(
+                "DELETE FROM provisional_face_clusters WHERE cluster_id = ?",
+                (cluster_id,),
+            )
+            connection.execute(
+                "INSERT INTO biometric_audit(occurred_at, action, profile_id) VALUES (?, ?, ?)",
+                (_iso(now), "provisional_promoted", profile_id),
+            )
+        return profile_id
+
+    def delete_provisional_cluster(self, cluster_id, compact=True):
+        with self._lock, self._connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM provisional_face_clusters WHERE cluster_id = ?",
+                (str(cluster_id),),
+            )
+            if cursor.rowcount:
+                connection.execute(
+                    "INSERT INTO biometric_audit(occurred_at, action, profile_id) VALUES (?, ?, ?)",
+                    (_iso(datetime.now()), "provisional_deleted", f"pending:{cluster_id}"),
+                )
+        if cursor.rowcount and compact:
+            try:
+                self._compact_sensitive_store()
+                self.last_cleanup_error = None
+            except Exception as error:
+                self.last_cleanup_error = str(error)[:160]
+        return cursor.rowcount > 0
+
+    def cleanup_provisional_clusters(self, now=None):
+        now = now or datetime.now()
+        with self._lock, self._connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM provisional_face_clusters WHERE expires_at <= ?",
+                (_iso(now),),
+            )
+            deleted = max(0, int(cursor.rowcount or 0))
+        if deleted:
+            try:
+                self._compact_sensitive_store()
+                self.last_cleanup_error = None
+            except Exception as error:
+                self.last_cleanup_error = str(error)[:160]
         return deleted
 
     def _compact_sensitive_store(self):

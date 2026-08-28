@@ -6534,8 +6534,20 @@ class CameraManagerApp:
                 os.path.join(runtime_dir, "evidence"),
                 retention_days=10,
                 min_interval_seconds=900,
-                max_total_bytes=256 * 1024 * 1024,
+                max_total_bytes=768 * 1024 * 1024,
+                store_identifiable_face_previews=True,
             )
+            def run_analytics_maintenance():
+                result = dict(evidence_archive.cleanup())
+                try:
+                    result["provisional_faces_deleted"] = int(
+                        face_service.cleanup_provisional()
+                    )
+                except Exception as error:
+                    result["provisional_faces_deleted"] = 0
+                    result["provisional_faces_error"] = type(error).__name__
+                return result
+
             network_identifier_key = None
             try:
                 network_identifier_key = load_or_create_identifier_key(
@@ -6567,7 +6579,7 @@ class CameraManagerApp:
                 analytics_store,
                 interval_seconds=60,
                 runtime_status_provider=self.wimi_runtime_status,
-                daily_maintenance=evidence_archive.cleanup,
+                daily_maintenance=run_analytics_maintenance,
             )
             with self._analytics_start_lock:
                 self._analytics_starting = False

@@ -11,7 +11,7 @@ from pathlib import Path
 from statistics import median
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 MAX_PAYLOAD_BYTES = 256 * 1024
 JOURNAL_SIZE_LIMIT = 8 * 1024 * 1024
 MAX_DATABASE_BYTES = 256 * 1024 * 1024
@@ -300,6 +300,7 @@ class AnalyticsStore:
                     stream TEXT NOT NULL,
                     category TEXT NOT NULL,
                     relative_path TEXT NOT NULL UNIQUE,
+                    face_relative_path TEXT,
                     byte_count INTEGER NOT NULL,
                     face_count INTEGER NOT NULL,
                     anonymization TEXT NOT NULL
@@ -308,6 +309,17 @@ class AnalyticsStore:
                     ON evidence_snapshots(captured_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_evidence_expires
                     ON evidence_snapshots(expires_at);
+
+                CREATE TABLE IF NOT EXISTS evidence_face_links (
+                    evidence_id TEXT NOT NULL,
+                    face_index INTEGER NOT NULL,
+                    profile_id TEXT NOT NULL,
+                    PRIMARY KEY(evidence_id, face_index),
+                    FOREIGN KEY(evidence_id) REFERENCES evidence_snapshots(evidence_id)
+                        ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_evidence_faces_profile
+                    ON evidence_face_links(profile_id);
 
                 """
             )
@@ -337,6 +349,13 @@ class AnalyticsStore:
                     connection.execute(
                         f"ALTER TABLE network_samples ADD COLUMN {column} {declaration}"
                     )
+            evidence_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(evidence_snapshots)")
+            }
+            if "face_relative_path" not in evidence_columns:
+                connection.execute(
+                    "ALTER TABLE evidence_snapshots ADD COLUMN face_relative_path TEXT"
+                )
             if previous_version < 3:
                 event_cursor = connection.execute(
                     "DELETE FROM vision_events WHERE event_type = 'presence_confirmed'"
@@ -953,6 +972,8 @@ class AnalyticsStore:
         evidence_id = str(metadata.get("evidence_id") or "")
         relative_path = str(metadata.get("relative_path") or "")
         relative = Path(relative_path)
+        face_relative_path = str(metadata.get("face_relative_path") or "")
+        face_relative = Path(face_relative_path) if face_relative_path else None
         if (
             not evidence_id
             or len(evidence_id) > 80
@@ -960,6 +981,10 @@ class AnalyticsStore:
             or len(relative_path) > 160
             or relative.is_absolute()
             or ".." in relative.parts
+            or (
+                face_relative is not None
+                and (face_relative.is_absolute() or ".." in face_relative.parts)
+            )
         ):
             raise ValueError("invalid_evidence_metadata")
         captured_at = _iso(metadata.get("captured_at"))
@@ -971,8 +996,9 @@ class AnalyticsStore:
                 """
                 INSERT INTO evidence_snapshots(
                     evidence_id, captured_at, expires_at, stream, category,
-                    relative_path, byte_count, face_count, anonymization
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    relative_path, face_relative_path, byte_count, face_count,
+                    anonymization
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     evidence_id,
@@ -981,18 +1007,75 @@ class AnalyticsStore:
                     str(metadata.get("stream") or "unknown")[:80],
                     str(metadata.get("category") or "service_observation")[:40],
                     relative.as_posix(),
+                    (
+                        face_relative.as_posix()[:160]
+                        if face_relative is not None
+                        else None
+                    ),
                     max(0, int(metadata.get("byte_count") or 0)),
                     max(0, min(int(metadata.get("face_count") or 0), 32)),
                     str(metadata.get("anonymization") or "unknown")[:64],
                 ),
             )
+            for link in list(metadata.get("face_links") or [])[:32]:
+                profile_id = str(link.get("profile_id") or "")[:120]
+                if not profile_id:
+                    continue
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO evidence_face_links(
+                        evidence_id, face_index, profile_id
+                    ) VALUES (?, ?, ?)
+                    """,
+                    (
+                        evidence_id,
+                        max(0, min(int(link.get("face_index") or 0), 31)),
+                        profile_id,
+                    ),
+                )
         return evidence_id
+
+    @staticmethod
+    def _attach_evidence_faces(connection, rows):
+        results = [dict(row) for row in rows]
+        if not results:
+            return results
+        by_evidence = {}
+        evidence_ids = [item["evidence_id"] for item in results]
+        for start in range(0, len(evidence_ids), 500):
+            batch = evidence_ids[start : start + 500]
+            placeholders = ",".join("?" for _ in batch)
+            links = connection.execute(
+                f"""
+                SELECT evidence_id, face_index, profile_id
+                FROM evidence_face_links
+                WHERE evidence_id IN ({placeholders})
+                ORDER BY evidence_id, face_index
+                """,
+                batch,
+            ).fetchall()
+            for link in links:
+                by_evidence.setdefault(link["evidence_id"], []).append(
+                    {
+                        "face_index": int(link["face_index"]),
+                        "profile_id": link["profile_id"],
+                    }
+                )
+        for item in results:
+            face_links = by_evidence.get(item["evidence_id"], [])
+            if face_links:
+                item["face_links"] = face_links
+                item["profile_ids"] = [
+                    link["profile_id"] for link in face_links
+                ]
+        return results
 
     def list_evidence_snapshots(self, limit=200, expires_before=None):
         limit = max(1, min(int(limit), 2500))
         query = """
             SELECT evidence_id, captured_at, expires_at, stream, category,
-                   relative_path, byte_count, face_count, anonymization
+                   relative_path, face_relative_path, byte_count, face_count,
+                   anonymization
             FROM evidence_snapshots
         """
         parameters = []
@@ -1003,32 +1086,38 @@ class AnalyticsStore:
         parameters.append(limit)
         with self._lock, self._connection() as connection:
             rows = connection.execute(query, parameters).fetchall()
-        return [dict(row) for row in rows]
+            return self._attach_evidence_faces(connection, rows)
 
     def get_evidence_snapshot(self, evidence_id):
         with self._lock, self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT evidence_id, captured_at, expires_at, stream, category,
-                       relative_path, byte_count, face_count, anonymization
+                       relative_path, face_relative_path, byte_count, face_count,
+                       anonymization
                 FROM evidence_snapshots WHERE evidence_id = ?
                 """,
                 (str(evidence_id),),
             ).fetchone()
-        return dict(row) if row is not None else None
+            rows = self._attach_evidence_faces(connection, [row] if row is not None else [])
+        return rows[0] if rows else None
 
     def summarize_evidence_storage(self):
         with self._lock, self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT COUNT(*) AS item_count,
-                       COALESCE(SUM(byte_count), 0) AS total_bytes
+                       COALESCE(SUM(byte_count), 0) AS total_bytes,
+                       COUNT(face_relative_path) AS identifiable_face_count
                 FROM evidence_snapshots
                 """
             ).fetchone()
         return {
             "count": max(0, int(row["item_count"] or 0)),
             "total_bytes": max(0, int(row["total_bytes"] or 0)),
+            "identifiable_face_count": max(
+                0, int(row["identifiable_face_count"] or 0)
+            ),
         }
 
     def delete_evidence_snapshot(self, evidence_id):
@@ -1484,6 +1573,104 @@ class AnalyticsStore:
             for row in rows
         ]
 
+    def merge_profile_presence(self, source_profile_id, target_profile_id):
+        source_profile_id = str(source_profile_id).strip()[:80]
+        target_profile_id = str(target_profile_id).strip()[:80]
+        if not source_profile_id or not target_profile_id or source_profile_id == target_profile_id:
+            return False
+        with self._lock, self._connection() as connection:
+            source = connection.execute(
+                "SELECT * FROM profile_presence_stats WHERE profile_id = ?",
+                (source_profile_id,),
+            ).fetchone()
+            target = connection.execute(
+                "SELECT * FROM profile_presence_stats WHERE profile_id = ?",
+                (target_profile_id,),
+            ).fetchone()
+            if source is not None:
+                if target is None:
+                    connection.execute(
+                        """
+                        INSERT INTO profile_presence_stats(
+                            profile_id, first_seen_at, last_seen_at, visit_count,
+                            observation_count, observed_seconds
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            target_profile_id,
+                            source["first_seen_at"],
+                            source["last_seen_at"],
+                            source["visit_count"],
+                            source["observation_count"],
+                            source["observed_seconds"],
+                        ),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        UPDATE profile_presence_stats
+                        SET first_seen_at = MIN(first_seen_at, ?),
+                            last_seen_at = MAX(last_seen_at, ?),
+                            visit_count = visit_count + ?,
+                            observation_count = observation_count + ?,
+                            observed_seconds = observed_seconds + ?
+                        WHERE profile_id = ?
+                        """,
+                        (
+                            source["first_seen_at"],
+                            source["last_seen_at"],
+                            source["visit_count"],
+                            source["observation_count"],
+                            source["observed_seconds"],
+                            target_profile_id,
+                        ),
+                    )
+                streams = connection.execute(
+                    "SELECT * FROM profile_presence_streams WHERE profile_id = ?",
+                    (source_profile_id,),
+                ).fetchall()
+                for stream in streams:
+                    connection.execute(
+                        """
+                        INSERT INTO profile_presence_streams(
+                            profile_id, stream, first_seen_at, last_seen_at,
+                            observation_count
+                        ) VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(profile_id, stream) DO UPDATE SET
+                            first_seen_at = MIN(first_seen_at, excluded.first_seen_at),
+                            last_seen_at = MAX(last_seen_at, excluded.last_seen_at),
+                            observation_count = observation_count + excluded.observation_count
+                        """,
+                        (
+                            target_profile_id,
+                            stream["stream"],
+                            stream["first_seen_at"],
+                            stream["last_seen_at"],
+                            stream["observation_count"],
+                        ),
+                    )
+                connection.execute(
+                    "UPDATE profile_presence_sessions SET profile_id = ? WHERE profile_id = ?",
+                    (target_profile_id, source_profile_id),
+                )
+                connection.execute(
+                    "DELETE FROM profile_presence_streams WHERE profile_id = ?",
+                    (source_profile_id,),
+                )
+                connection.execute(
+                    "DELETE FROM profile_presence_stats WHERE profile_id = ?",
+                    (source_profile_id,),
+                )
+            event_cursor = connection.execute(
+                "UPDATE vision_events SET profile_id = ? WHERE profile_id = ?",
+                (target_profile_id, source_profile_id),
+            )
+            link_cursor = connection.execute(
+                "UPDATE evidence_face_links SET profile_id = ? WHERE profile_id = ?",
+                (target_profile_id, source_profile_id),
+            )
+        return source is not None or event_cursor.rowcount > 0 or link_cursor.rowcount > 0
+
     def delete_profile_presence(self, profile_id):
         profile_id = str(profile_id).strip()[:80]
         if not profile_id:
@@ -1501,6 +1688,10 @@ class AnalyticsStore:
                 "DELETE FROM vision_events WHERE profile_id = ?",
                 (profile_id,),
             )
+            link_cursor = connection.execute(
+                "DELETE FROM evidence_face_links WHERE profile_id = ?",
+                (profile_id,),
+            )
             stats_cursor = connection.execute(
                 "DELETE FROM profile_presence_stats WHERE profile_id = ?",
                 (profile_id,),
@@ -1509,6 +1700,7 @@ class AnalyticsStore:
                 tombstone_cursor.rowcount > 0
                 or stats_cursor.rowcount > 0
                 or event_cursor.rowcount > 0
+                or link_cursor.rowcount > 0
             )
             if deleted:
                 connection.execute(

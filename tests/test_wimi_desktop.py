@@ -186,7 +186,7 @@ class AnalyticsStoreTests(unittest.TestCase):
 
         self.assertEqual(occurred_at, expected)
         self.assertEqual(index_columns, ["event_type", "occurred_at", "event_id"])
-        self.assertEqual(schema_version, 6)
+        self.assertEqual(schema_version, 7)
 
     def test_adds_connection_columns_to_existing_network_history(self):
         legacy_path = self.root / "legacy" / "analytics.sqlite3"
@@ -280,7 +280,7 @@ class AnalyticsStoreTests(unittest.TestCase):
         self.assertEqual(first_summary, [])
         self.assertEqual(second_summary, [])
         self.assertEqual(migrated_events, [])
-        self.assertEqual(schema_version, 6)
+        self.assertEqual(schema_version, 7)
         self.assertNotIn(b"profile-consentido", legacy_path.read_bytes())
 
     def test_version_three_upgrade_preserves_current_presence_history(self):

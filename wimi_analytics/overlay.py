@@ -33,6 +33,13 @@ def _load_font(size=14):
 
 
 def _face_label(face):
+    if face.get("provisional"):
+        name = _clean_label(face.get("display_name"), "Pessoa em analise")
+        confidence = face.get("confidence")
+        parts = [name, "Em analise"]
+        if isinstance(confidence, (int, float)):
+            parts.append(f"{max(0, min(round(confidence * 100), 100))}%")
+        return " | ".join(parts)
     if not face.get("recognized"):
         return "Desconhecido"
     name = _clean_label(face.get("display_name"), "Pessoa cadastrada")

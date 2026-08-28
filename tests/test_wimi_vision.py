@@ -551,6 +551,120 @@ class BiometricStoreTests(unittest.TestCase):
             store.close()
 
 
+    def test_recurring_unknown_face_becomes_provisional_and_requires_manual_consent(self):
+        with tempfile.TemporaryDirectory() as temp:
+            db_path = Path(temp) / "biometric.sqlite3"
+            store = BiometricStore(db_path)
+            service = LocalFaceService(
+                store,
+                backend=FakeFaceBackend(embeddings=[[0.0, 1.0, 0.0]]),
+                protector=FakeProtector(),
+                matcher=IdentityMatcher(confirmations=1),
+            )
+            image = Image.new("RGB", (96, 96), "white")
+
+            self.assertEqual(service.analyze_frame("farmacia", image)["identities"], [])
+            self.assertEqual(service.analyze_frame("farmacia", image)["identities"], [])
+            result = service.analyze_frame("farmacia", image)
+
+            provisional = result["identities"][0]
+            self.assertTrue(provisional["provisional"])
+            self.assertEqual(provisional["display_name"], "Pessoa 1")
+            self.assertTrue(provisional["profile_id"].startswith("pending:"))
+            self.assertIsNotNone(service.read_profile_face(provisional["profile_id"]))
+            self.assertEqual(len(store.list_provisional_clusters()), 1)
+            self.assertNotIn(b"Pessoa 1", db_path.read_bytes())
+            with self.assertRaises(EnrollmentError):
+                service.rename_profile(provisional["profile_id"], "Thiago")
+
+            confirmed_id = service.rename_profile(
+                provisional["profile_id"],
+                "Thiago",
+                role="employee",
+                consent=True,
+            )
+
+            self.assertTrue(confirmed_id)
+            self.assertEqual(store.list_provisional_clusters(), [])
+            self.assertEqual(
+                service.list_profiles(),
+                [
+                    {
+                        "profile_id": confirmed_id,
+                        "display_name": "Thiago",
+                        "role": "employee",
+                    }
+                ],
+            )
+            self.assertNotIn(b"Thiago", db_path.read_bytes())
+            store.close()
+
+    def test_provisional_faces_expire_after_ten_days(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = BiometricStore(Path(temp) / "biometric.sqlite3")
+            service = LocalFaceService(
+                store,
+                backend=FakeFaceBackend(embeddings=[[0.0, 1.0, 0.0]]),
+                protector=FakeProtector(),
+            )
+            image = Image.new("RGB", (96, 96), "white")
+            for _ in range(3):
+                service.analyze_frame("farmacia", image)
+
+            self.assertEqual(len(store.list_provisional_clusters()), 1)
+            deleted = service.cleanup_provisional(
+                now=datetime.now() + timedelta(days=11)
+            )
+            self.assertEqual(deleted, 1)
+            self.assertEqual(service.list_profiles(), [])
+            store.close()
+
+    def test_promoted_face_keeps_presence_and_evidence_history(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = AnalyticsStore(Path(temp) / "analytics.sqlite3")
+            source_id = "pending:cluster-1"
+            target_id = "profile-confirmed"
+            observed_at = datetime(2026, 8, 28, 10, 0, 0)
+            store.record_vision_event(
+                {
+                    "event_type": "presence_confirmed",
+                    "stream": "farmacia",
+                    "profile_id": source_id,
+                    "occurred_at": observed_at,
+                    "confidence": 0.81,
+                }
+            )
+            store.record_evidence_snapshot(
+                {
+                    "evidence_id": "evidence-1",
+                    "captured_at": observed_at,
+                    "expires_at": observed_at + timedelta(days=10),
+                    "stream": "farmacia",
+                    "relative_path": "evidence-1.wimi",
+                    "face_relative_path": "faces/evidence-1.wimi",
+                    "byte_count": 100,
+                    "face_count": 1,
+                    "anonymization": "test",
+                    "face_links": [{"face_index": 0, "profile_id": source_id}],
+                }
+            )
+
+            self.assertTrue(store.merge_profile_presence(source_id, target_id))
+
+            self.assertEqual(
+                store.list_vision_events(limit=10)[0]["profile_id"], target_id
+            )
+            self.assertEqual(
+                store.list_evidence_snapshots(limit=10)[0]["profile_ids"],
+                [target_id],
+            )
+            self.assertEqual(
+                store.list_profile_presence_summary(limit=10)[0]["profile_id"],
+                target_id,
+            )
+            store.close()
+
+
 class VisionCoordinatorTests(unittest.TestCase):
     def test_identity_overlay_is_transient_and_keeps_unknown_faces_separate(self):
         class TwoFaceService(FakeFaceService):
@@ -871,6 +985,32 @@ class VisionCoordinatorTests(unittest.TestCase):
         self.assertEqual(evidence.captures[0]["captured_at"], captured_at)
         self.assertNotIn("face_boxes", result)
 
+    def test_preserves_anonymized_capture_before_a_face_is_identified(self):
+        class UnknownFaceService(FakeFaceService):
+            def analyze_frame(self, stream, image):
+                result = super().analyze_frame(stream, image)
+                result["identities"] = []
+                return result
+
+        evidence = FakeEvidenceArchive()
+        coordinator = VisionCoordinator(
+            store=FakeVisionStore(),
+            face_service=UnknownFaceService(),
+            evidence_archive=evidence,
+            motion_analyzer=MotionAnalyzer(start_frames=1, end_frames=1),
+            sample_interval_seconds=0,
+            face_interval_seconds=0,
+        )
+
+        coordinator.process_frame_now(
+            "farmacia",
+            Image.new("RGB", (64, 36), "black"),
+            monotonic_now=1,
+        )
+
+        self.assertEqual(len(evidence.captures), 1)
+        self.assertEqual(evidence.captures[0]["face_count"], 1)
+
     def test_hardware_guard_pauses_analysis_before_face_work(self):
         store = FakeVisionStore()
         face_service = FakeFaceService()
@@ -1109,6 +1249,17 @@ class VisionCoordinatorTests(unittest.TestCase):
 
 
 class FaceBackendLimitsTests(unittest.TestCase):
+    def test_backend_uses_calibrated_bounded_detection_threshold(self):
+        backend = OpenCvFaceBackend()
+
+        self.assertEqual(backend.score_threshold, 0.80)
+        if backend.available:
+            self.assertAlmostEqual(
+                backend._detector.getScoreThreshold(),
+                0.80,
+                places=6,
+            )
+
     def test_backend_limits_resolution_and_faces_per_frame(self):
         class FakeFrame:
             shape = (540, 960, 3)

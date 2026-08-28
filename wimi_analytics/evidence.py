@@ -21,6 +21,7 @@ class AnonymizedEvidenceArchive:
         max_total_bytes=256 * 1024 * 1024,
         max_image_size=(1280, 720),
         jpeg_quality=82,
+        store_identifiable_face_previews=False,
     ):
         self.store = store
         self.root = Path(root).resolve()
@@ -34,6 +35,7 @@ class AnonymizedEvidenceArchive:
             max(180, min(int(max_image_size[1]), 1080)),
         )
         self.jpeg_quality = max(45, min(int(jpeg_quality), 85))
+        self.store_identifiable_face_previews = bool(store_identifiable_face_previews)
         self._lock = threading.RLock()
         self._last_capture = {}
         self._last_error = None
@@ -126,6 +128,41 @@ class AnonymizedEvidenceArchive:
         )
         return buffer.getvalue()
 
+    def _face_review_jpeg(self, image, face_boxes, face_count):
+        regions = self._normalize_boxes(
+            face_boxes,
+            int(face_count),
+            image.width,
+            image.height,
+        )
+        if len(regions) != int(face_count):
+            return None
+        tile_size = 240
+        columns = min(4, len(regions))
+        rows = (len(regions) + columns - 1) // columns
+        preview = Image.new("RGB", (columns * tile_size, rows * tile_size), "#111722")
+        source = image.convert("RGB")
+        for index, region_box in enumerate(regions):
+            crop = source.crop(region_box)
+            scale = min(tile_size / crop.width, tile_size / crop.height)
+            crop = crop.resize(
+                (max(1, round(crop.width * scale)), max(1, round(crop.height * scale))),
+                Image.Resampling.LANCZOS,
+            )
+            left = (index % columns) * tile_size + (tile_size - crop.width) // 2
+            top = (index // columns) * tile_size + (tile_size - crop.height) // 2
+            preview.paste(crop, (left, top))
+        buffer = io.BytesIO()
+        preview.save(
+            buffer,
+            format="JPEG",
+            quality=90,
+            optimize=True,
+            progressive=False,
+        )
+        value = buffer.getvalue()
+        return value if len(value) <= 2 * 1024 * 1024 else None
+
     def capture(
         self,
         stream,
@@ -134,6 +171,7 @@ class AnonymizedEvidenceArchive:
         face_count,
         captured_at=None,
         category="service_observation",
+        identities=None,
     ):
         captured_at = captured_at or datetime.now()
         stream = str(stream)[:80]
@@ -152,15 +190,36 @@ class AnonymizedEvidenceArchive:
             except Exception as error:
                 self._last_error = str(error)[:160]
                 return None
+            protected_faces = None
+            if self.store_identifiable_face_previews:
+                face_jpeg = self._face_review_jpeg(image, face_boxes, face_count)
+                if face_jpeg:
+                    try:
+                        protected_faces = self.protector.protect(face_jpeg)
+                    except Exception:
+                        protected_faces = None
             current = self.status()
-            if current["total_bytes"] + len(protected) > self.max_total_bytes:
+            required_bytes = len(protected) + len(protected_faces or b"")
+            if current["total_bytes"] + required_bytes > self.max_total_bytes:
+                protected_faces = None
+                required_bytes = len(protected)
+            if current["total_bytes"] + required_bytes > self.max_total_bytes:
                 self._last_error = "capacity_reached"
                 return None
 
             evidence_id = str(uuid.uuid4())
             relative_path = f"{evidence_id}.wimi"
+            face_relative_path = (
+                f"faces/{evidence_id}.wimi" if protected_faces is not None else None
+            )
             final_path = self._path_for(relative_path)
             temporary_path = final_path.with_suffix(".tmp")
+            face_final_path = (
+                self._path_for(face_relative_path) if face_relative_path else None
+            )
+            face_temporary_path = (
+                face_final_path.with_suffix(".tmp") if face_final_path else None
+            )
             try:
                 with open(temporary_path, "xb") as handle:
                     handle.write(protected)
@@ -171,6 +230,28 @@ class AnonymizedEvidenceArchive:
                     os.chmod(final_path, 0o600)
                 except OSError:
                     pass
+                if face_final_path is not None:
+                    face_final_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(face_temporary_path, "xb") as handle:
+                        handle.write(protected_faces)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    os.replace(face_temporary_path, face_final_path)
+                    try:
+                        os.chmod(face_final_path, 0o600)
+                    except OSError:
+                        pass
+                face_links = []
+                for identity in list(identities or [])[:32]:
+                    profile_id = str(identity.get("profile_id") or "")
+                    if not profile_id:
+                        continue
+                    face_links.append(
+                        {
+                            "face_index": identity.get("face_index", len(face_links)),
+                            "profile_id": profile_id,
+                        }
+                    )
                 self.store.record_evidence_snapshot(
                     {
                         "evidence_id": evidence_id,
@@ -179,14 +260,23 @@ class AnonymizedEvidenceArchive:
                         "stream": stream,
                         "category": category,
                         "relative_path": relative_path,
-                        "byte_count": len(protected),
+                        "face_relative_path": face_relative_path,
+                        "byte_count": required_bytes,
                         "face_count": int(face_count),
                         "anonymization": "clear_context_faces_flattened_v4",
+                        "face_links": face_links,
                     }
                 )
             except Exception as error:
                 self._last_error = str(error)[:160]
-                for path in (temporary_path, final_path):
+                for path in (
+                    temporary_path,
+                    final_path,
+                    face_temporary_path,
+                    face_final_path,
+                ):
+                    if path is None:
+                        continue
                     try:
                         path.unlink(missing_ok=True)
                     except OSError:
@@ -217,11 +307,33 @@ class AnonymizedEvidenceArchive:
             self._last_error = str(error)[:160]
             return None
 
+    def read_face_preview(self, evidence_id):
+        metadata = self.store.get_evidence_snapshot(evidence_id)
+        relative_path = metadata.get("face_relative_path") if metadata else None
+        if not relative_path:
+            return None
+        try:
+            path = self._path_for(relative_path)
+            if not path.is_file() or path.stat().st_size > 2 * 1024 * 1024:
+                return None
+            jpeg = self.protector.unprotect(path.read_bytes())
+            if not jpeg.startswith(b"\xff\xd8") or len(jpeg) > 2 * 1024 * 1024:
+                return None
+            with Image.open(io.BytesIO(jpeg)) as image:
+                image.load()
+                return image.convert("RGB")
+        except Exception as error:
+            self._last_error = str(error)[:160]
+            return None
+
     def delete(self, evidence_id):
         try:
             metadata = self.store.get_evidence_snapshot(evidence_id)
             if metadata is None:
                 return False
+            face_relative_path = metadata.get("face_relative_path")
+            if face_relative_path:
+                self._path_for(face_relative_path).unlink(missing_ok=True)
             path = self._path_for(metadata["relative_path"])
             path.unlink(missing_ok=True)
             deleted = self.store.delete_evidence_snapshot(evidence_id)
@@ -268,5 +380,7 @@ class AnonymizedEvidenceArchive:
             "max_total_bytes": self.max_total_bytes,
             "retention_days": self.retention_days,
             "last_error": self._last_error,
-            "identifiable_faces_stored": False,
+            "identifiable_faces_stored": bool(
+                summary.get("identifiable_face_count", 0)
+            ),
         }

@@ -666,7 +666,13 @@ class VisionCoordinator:
                 overlay_faces.append(
                     {
                         "bbox": tuple(bbox),
-                        "recognized": identity is not None,
+                        "recognized": (
+                            identity is not None
+                            and not bool(identity.get("provisional"))
+                        ),
+                        "provisional": bool(
+                            identity is not None and identity.get("provisional")
+                        ),
                         "display_name": (
                             identity.get("display_name", "Pessoa cadastrada")
                             if identity is not None
@@ -705,15 +711,31 @@ class VisionCoordinator:
                 )
                 self._last_face_count[stream] = face_count
             archive = self.evidence_archive
-            if archive is not None and face_count > 0 and len(face_boxes) >= face_count:
+            if (
+                archive is not None
+                and face_count > 0
+                and len(face_boxes) >= face_count
+            ):
                 try:
-                    archive.capture(
-                        stream,
-                        image,
-                        face_boxes=face_boxes,
-                        face_count=face_count,
-                        captured_at=occurred_at,
-                    )
+                    try:
+                        archive.capture(
+                            stream,
+                            image,
+                            face_boxes=face_boxes,
+                            face_count=face_count,
+                            captured_at=occurred_at,
+                            identities=raw_identities,
+                        )
+                    except TypeError as error:
+                        if "identities" not in str(error):
+                            raise
+                        archive.capture(
+                            stream,
+                            image,
+                            face_boxes=face_boxes,
+                            face_count=face_count,
+                            captured_at=occurred_at,
+                        )
                 except Exception:
                     pass
             for identity in identities:

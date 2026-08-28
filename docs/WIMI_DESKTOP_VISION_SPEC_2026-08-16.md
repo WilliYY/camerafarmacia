@@ -7,8 +7,8 @@ Data: 16/08/2026
 Entregar as analises dentro do aplicativo Tkinter usado na farmacia, sem abrir
 um navegador. O operador deve alternar entre Visao geral, Cameras, Rede,
 Evidencias e Relatorios sem perder a coleta em memoria ou o historico
-persistido. Evidencias concentra Capturas, Atividade e trajetos e Pessoas
-cadastradas.
+persistido. Evidencias concentra galeria, Atividade e trajetos e Pessoas
+observadas na unica area `Capturas e analises`.
 
 O sistema observa somente evidencias tecnicas e operacionais. Movimento,
 presenca e identidade cadastrada sao sinais para revisao humana; nao inferem
@@ -40,17 +40,19 @@ sensivel.
    NanoDet quantizado do OpenCV Zoo no maximo a cada cinco segundos; rosto e
    identidade usam YuNet/SFace. Todos ficam opcionais e so carregam quando o
    runtime e os modelos com SHA-256 aprovado estiverem presentes.
-9. Cadastro facial e manual, consentido e exige exatamente um rosto. Nenhuma
-   imagem identificavel e salva; somente o vetor biometrico protegido pelo
-   DPAPI do Windows. Capturas operacionais preservam ate `1280x720` em JPEG 82,
-   pixelizam o contexto em blocos de 12 pixels e achatam todos os rostos
-   detectados antes de qualquer persistencia; nao recebem identidade.
+9. Perfil facial confirmado e manual, consentido e exige exatamente um rosto.
+   Rostos recorrentes podem formar agrupamentos provisorios depois de tres
+   quadros diferentes, sem nome real ou funcao inferida. Vetor e recorte de
+   revisao ficam no payload DPAPI e expiram em 10 dias sem confirmacao. Capturas
+   operacionais preservam ate `1280x720` em JPEG 82 e achatam os rostos no
+   contexto; uma prancha facial nitida separada e cifrada permite revisao local.
 10. Uma identidade so e exibida apos correspondencia acima do limiar, margem
     contra o segundo candidato e confirmacao em amostras consecutivas.
 11. A visao pausa se a protecao de hardware bloquear manutencao pesada, se a
     memoria do processo ultrapassar 750 MB ou se o encerramento iniciar.
-12. O detector recebe no maximo `960x540` e processa no maximo oito rostos por
-    quadro. O quadro usado no cadastro expira em cinco segundos.
+12. O detector recebe no maximo `960x540`, usa limiar YuNet `0.80` calibrado em
+    quadro local e processa no maximo oito rostos por quadro. O quadro usado no
+    cadastro expira em cinco segundos.
 13. Cadastro e encerramento nao executam chamadas Tkinter em thread auxiliar.
     Erros transitorios por quadro nao encerram permanentemente a visao.
 
@@ -71,23 +73,32 @@ Tabelas versionadas:
 - `vision_events`: inicio/fim de movimento, contagem de rostos e pessoas,
   inicio/fim de presenca observada, falha limitada e presenca consentida
   confirmada, sem imagem;
-- `evidence_snapshots`: indice sem nome ou perfil para capturas de atendimento
-  descaracterizadas e cifradas em diretorio separado.
+- `evidence_snapshots`: indice sem nome copiado para capturas de atendimento
+  descaracterizadas e cifradas em diretorio separado;
+- `evidence_face_links`: liga posicoes detectadas a um `profile_id` provisorio
+  ou confirmado, permitindo que uma nomeacao posterior atualize todo o historico.
 
 Os perfis nao ficam no banco operacional. O banco separado
 `sistema/analytics/wimi_biometrics.sqlite3` contem `biometric_profiles` e
-`biometric_audit`. Nome e vetor estao no mesmo payload DPAPI; a exclusao usa
-`secure_delete`, compactacao e truncamento do WAL.
+`biometric_audit`. Perfis provisorios ficam em `provisional_face_clusters`, com
+limite de 100 e expiracao. Nome, vetor e recorte ficam em payloads DPAPI; a
+exclusao usa `secure_delete`, compactacao e truncamento do WAL.
 
 Retencao padrao: 90 dias para amostras e eventos. A limpeza e limitada, roda no
 maximo uma vez por dia e nunca acessa diretorios de video. O WAL e limitado e
 recebe checkpoint depois da manutencao.
 
 As evidencias visuais usam retencao fixa de 10 dias, uma captura no maximo a
-cada 15 minutos por camera e teto de 256 MB. A falta de caixas completas para
+cada 15 minutos por camera e teto operacional de 768 MB. Esse teto cobre duas
+cameras com margem sobre o tamanho medido das capturas locais. A falta de caixas
+completas para
 todos os rostos impede a persistencia. Ao atingir o teto, a coleta visual para
 sem remover itens ainda dentro do prazo. O painel mostra a expiracao e oferece
-exclusao manual; nenhum item guarda `profile_id`, nome ou face identificavel.
+exclusao manual. O contexto achatado e a prancha facial protegida contam juntos
+no teto; o nome nao e copiado para arquivos e a promocao troca apenas o vinculo
+de `profile_id` em transacao local. Uma captura anonima continua sendo criada
+antes de existir agrupamento provisorio; o vinculo so e salvo quando a
+correspondencia ja esta disponivel.
 
 A analise tecnica de comportamento e agregada por camera. Duas amostras
 consecutivas sem pessoa encerram uma presenca observada; falta de amostra ou

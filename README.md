@@ -80,32 +80,34 @@ O gerenciador compara a versão local com a versão publicada no GitHub, mas só
 
 O painel principal possui duas abas superiores: **Cameras** e **Analises**.
 Analises fica dentro da mesma janela e contem Visao geral, Cameras, Rede,
-Evidencias e Relatorios. Evidencias agrupa Capturas, Atividade e trajetos e
-Pessoas cadastradas. Alternar entre elas nao reinicia o NVR, o coletor, a visao
-ou o banco local.
+Evidencias e Relatorios. Evidencias usa uma unica area `Capturas e analises`,
+com galeria, trajetos observados e pessoas lado a lado. Alternar entre as abas
+nao reinicia o NVR, o coletor, a visao ou o banco local.
 
 O historico persistente usa SQLite em `sistema/analytics/`, fora do HD de
 gravacoes. A visao reutiliza o preview existente, calibra de forma limitada o
 ruido de movimento de cada camera e, a cada cinco segundos, mede contagem de
-pessoas, pico, variacao visual e permanencia observada com NanoDet local. Ela nunca
-cria perfis faciais sozinha; o cadastro de identidade continua manual e
-consentido.
+pessoas, pico, variacao visual e permanencia observada com NanoDet local. Rostos
+recorrentes podem formar agrupamentos locais provisórios (`Pessoa 1`, `Pessoa 2`),
+mas nome real e funcao continuam manuais e exigem confirmacao explicita.
 
-A subaba Pessoas cadastradas ordena somente os perfis consentidos por visitas e
-tempo observado estimado. Confirmacoes simultaneas em cameras diferentes nao
+A area Pessoas observadas mostra agrupamentos provisórios e perfis consentidos,
+ordenando os confirmados por visitas e tempo observado estimado. Confirmacoes
+simultaneas em cameras diferentes nao
 dobram o tempo e eventos repetidos sao idempotentes. O resumo permanece no banco
 local ate a exclusao do perfil; ao excluir, o resumo e os eventos associados
 tambem sao removidos com `secure_delete`, checkpoint e compactacao. Um hash
-irreversivel impede que uma confirmacao atrasada recrie o perfil; rostos
-desconhecidos continuam anonimos. Bancos antigos nao recriam ranking a partir de
+irreversivel impede que uma confirmacao atrasada recrie o perfil. Agrupamentos
+provisorios ficam cifrados, limitados a 100 e expiram em 10 dias se nao forem
+confirmados. Bancos antigos nao recriam ranking a partir de
 eventos historicos; eventos antigos de identidade sao descartados na migracao,
 evitando restaurar perfis cuja autorizacao possa ter sido revogada. A exclusao e
 a compactacao rodam fora do thread da interface; se a compactacao falhar, uma
 pendencia persistente faz nova tentativa na proxima abertura.
 
-A subaba Atividade e trajetos resume fatos observaveis: variacao visual, duracao,
-contagem estimada e a sequencia de confirmacoes dos perfis consentidos por
-camera. Um intervalo sem evento e exibido como `sem confirmacao visual`, nunca
+A area Atividade e trajetos resume fatos observaveis: variacao visual, duracao,
+contagem estimada e a sequencia de identificacoes locais por camera. Um intervalo
+sem evento e exibido como `sem confirmacao visual`, nunca
 como localizacao conhecida, saida da farmacia ou acao da pessoa. O painel nao
 classifica emocao, intencao, honestidade ou produtividade.
 
@@ -203,8 +205,8 @@ pythonw.exe gerenciador.pyw --silent
 
 O WIMI Analytics roda integrado ao processo do NVR. No modo visual, use as abas
 superiores `Cameras` e `Analises`; a segunda contem cinco subabas: Visao geral,
-Cameras, Rede, Evidencias e Relatorios. `Evidencias` agrupa `Capturas`,
-`Atividade e trajetos` e `Pessoas cadastradas`. Trocar de aba preserva a coleta,
+Cameras, Rede, Evidencias e Relatorios. `Evidencias` concentra galeria,
+atividade, trajetos e pessoas na unica area `Capturas e analises`. Trocar de aba preserva a coleta,
 os previews e o historico; o fluxo normal nao abre navegador nem uma segunda
 janela.
 
@@ -218,13 +220,15 @@ python tools\setup_wimi_vision.py
 python tools\setup_wimi_vision.py --verify-only
 ```
 
-O cadastro facial exige consentimento explicito e um quadro recente com
-exatamente um rosto. Nenhuma imagem identificavel e salva: nome e vetor ficam
-juntos em um banco biometrico separado, protegido pelo DPAPI do Windows. A
+O cadastro facial confirmado exige consentimento explicito e um quadro recente
+com exatamente um rosto. Nome e vetor ficam juntos em um banco biometrico
+separado, protegido pelo DPAPI do Windows. A
 funcao da pessoa (`employee`, `manager`, `contractor` ou `authorized`) e
 selecionada manualmente no cadastro e permanece dentro do payload protegido.
-Depois do cadastro, o reconhecimento e automatico; um rosto desconhecido nao
-cria perfil nem recebe funcao automaticamente. Perfis anteriores a essa
+Antes do cadastro, tres observacoes compatíveis em quadros diferentes podem criar
+um agrupamento provisório com nome tecnico `Pessoa N`, vetor e recorte facial
+cifrados. Ele nao recebe nome real nem funcao automaticamente, tem limite de 100
+itens e expira em 10 dias. Perfis anteriores a essa
 classificacao continuam validos como `authorized`. Quando um perfil e
 confirmado, a aba `Cameras` mostra nome e funcao cadastrada. Essa aba tambem
 lista as 200 confirmacoes mais recentes, com camera, horario e confianca, e
@@ -234,36 +238,49 @@ ja aconteceu.
 
 No preview ao vivo e na tela cheia, cada rosto detectado recebe uma caixa
 transitoria. Perfis consentidos mostram nome, funcao cadastrada e confianca;
-rostos sem correspondencia mostram apenas `Desconhecido`. A identificacao usa o
+rostos sem correspondencia mostram `Desconhecido`; agrupamentos recorrentes
+mostram `Pessoa N | Em analise` em amarelo. A identificacao usa o
 mesmo quadro ja entregue ao preview, e atualizada no maximo uma vez por segundo,
 fica somente em memoria por ate 2,5 segundos e nao altera nem grava a camada
-visual nos arquivos de video ou nas evidencias. O bloqueio de hardware continua
+visual nos arquivos de video. O bloqueio de hardware continua
 podendo pausar a analise sem interromper a gravacao.
 
-Um perfil consentido pode comecar com uma identificacao temporaria, como
-`Pessoa 1`, e ser renomeado depois pela ocorrencia ou por `Pessoas cadastradas`.
-O `profile_id` nao muda: nome, funcao e vetor continuam no payload DPAPI, e todo
-o historico exibido passa a resolver o novo nome sem copiar ou reescrever
-eventos.
-Capturas de atendimento usam apenas deteccoes com caixas completas, preservam
+O YuNet usa limiar de deteccao `0.80`, calibrado localmente com um quadro real da
+camera em 28/08/2026: o limiar anterior `0.90` nao encontrou o rosto distante no
+recorte do preview. A entrada permanece limitada a `960x540`, no maximo oito
+rostos por quadro, e um agrupamento ainda exige tres observacoes distintas.
+
+Um agrupamento provisório pode ser nomeado pelo cartao da captura ou em Pessoas
+observadas. A confirmacao promove o agrupamento para um novo perfil consentido e
+move, em uma transacao local, os vinculos de captura e o historico operacional
+para o identificador confirmado.
+Capturas de atendimento continuam sendo criadas mesmo antes de uma identidade
+provisoria existir, desde que todas as caixas faciais estejam completas. Elas
+preservam
 um quadro de contexto legivel de ate `1280x720` em JPEG 82 e achatam somente as
-regioes ampliadas de todos os rostos detectados antes da persistencia. Sao
-cifradas com DPAPI e ficam limitadas a 256 MB. O painel informa a exclusao
+regioes ampliadas de todos os rostos detectados antes da persistencia. Quando um
+rosto e detectado, o sistema tambem guarda uma prancha facial nítida para revisao
+exclusivamente local; o vinculo de identidade so e incluido quando ja existe uma
+correspondencia segura. Contexto e prancha sao cifrados com DPAPI, contam juntos
+no teto operacional de 768 MB e expiram em 10 dias. O teto considera duas
+cameras, uma captura a cada 15 minutos e margem sobre os tamanhos medidos; ao
+atingi-lo, novas evidencias param sem apagar as existentes. O painel informa a
+exclusao
 automatica em 10 dias e apresenta as capturas em uma galeria responsiva. Cada
-card mostra a miniatura anonimizada, camera, horario, quantidade de rostos
-descaracterizados, tamanho e expiracao. Clicar na miniatura abre a copia protegida
+card mostra contexto, recorte de revisao, identificacao provisória ou confirmada,
+camera, horario, tamanho e expiracao. Clicar na miniatura abre contexto e rostos
 em tamanho adaptado a tela; a roda do mouse funciona sobre imagens, textos e
 cartoes. A interface permite selecionar varias capturas, marcar ou desmarcar
 todas e confirmar uma exclusao em lote. Sao mantidas no maximo 24 miniaturas
 descriptografadas em memoria por pagina e elas so sao abertas quando a aba
 Evidencias esta visivel; marcar tudo inclui o historico listado sem carregar
-todas as imagens. As capturas nao recebem nome nem `profile_id`. Capturas antigas
-nao sao reprocessadas e continuam com a pixelizacao da versao em que foram
-criadas.
+todas as imagens. O vinculo usa apenas `profile_id`; nomes nao sao copiados para
+o arquivo. Capturas antigas nao sao reprocessadas e continuam com a protecao da
+versao em que foram criadas.
 
 O NanoDet quantizado do OpenCV Zoo usa o mesmo quadro do preview, sem nova
 conexao com a camera, e roda no maximo uma vez a cada cinco segundos por camera.
-A subaba `Atividade e trajetos` apresenta a contagem estabilizada, inicio e fim
+A area `Atividade e trajetos` apresenta a contagem estabilizada, inicio e fim
 de presenca, pico, permanencia observada e uma linha do tempo derivada das
 confirmacoes de perfis consentidos. Confirmacoes repetidas na mesma camera formam
 uma janela observada; uma confirmacao posterior em outra camera forma uma

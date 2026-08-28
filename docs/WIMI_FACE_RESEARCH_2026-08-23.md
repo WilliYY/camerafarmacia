@@ -32,10 +32,21 @@ confirmacoes consecutivas. Falha do modelo degrada apenas a analise; nao altera
 stream, gravacao, retencao ou armazenamento.
 
 Nome, funcao e vetor ficam juntos no payload DPAPI do banco biometrico separado.
-A funcao e escolhida manualmente no cadastro consentido. O motor reconhece
-automaticamente apenas perfis existentes; desconhecidos nao sao cadastrados nem
-classificados como funcionarios. As capturas anonimizadas continuam sem nome,
-funcao ou `profile_id`.
+A funcao e escolhida manualmente no cadastro consentido. A revisao de 28/08/2026
+manteve YuNet + SFace e adicionou agrupamento provisorio local: tres observacoes
+compatíveis em quadros distintos podem criar `Pessoa N`, sem inferir nome ou
+funcao. O payload DPAPI contem vetor e recorte de revisao, possui limite de 100
+itens e expira em 10 dias. Somente a confirmacao humana promove o agrupamento a
+perfil. A captura guarda contexto anonimizado, prancha facial cifrada e apenas o
+`profile_id`; nomes nao sao duplicados nos arquivos.
+
+No teste local com recorte do preview real, o limiar YuNet `0.90` encontrou zero
+rostos e `0.80` encontrou um. O padrao foi ajustado para `0.80`, sem aumentar a
+entrada maxima de `960x540`, o teto de oito rostos ou a frequencia da analise.
+
+Nenhum novo repositorio ou runtime foi adicionado. O OpenCV ja fixado atende a
+comparacao vetorial, reduzindo CPU, superficie de falha e risco operacional em
+relacao a DeepFace, dlib/`face_recognition` ou InsightFace.
 
 ## Proximas validacoes
 

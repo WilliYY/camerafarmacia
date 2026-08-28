@@ -29,6 +29,7 @@ PROFILE_ROLE_OPTIONS = (
 )
 PROFILE_ROLE_BY_LABEL = dict(PROFILE_ROLE_OPTIONS)
 PROFILE_ROLE_LABELS = {code: label for label, code in PROFILE_ROLE_OPTIONS}
+PROFILE_ROLE_LABELS["pending"] = "Em análise"
 
 
 def _status_text(value):
@@ -116,7 +117,7 @@ class AnalyticsDesktopWindow:
     REFRESH_MS = 3000
     EVIDENCE_PAGE_SIZE = 24
     EVIDENCE_CARD_WIDTH = 252
-    EVIDENCE_CARD_HEIGHT = 230
+    EVIDENCE_CARD_HEIGHT = 270
     EVIDENCE_THUMBNAIL_SIZE = (232, 131)
 
     def __init__(
@@ -187,6 +188,7 @@ class AnalyticsDesktopWindow:
         self._evidence_preview_photo = None
         self._evidence_selected_ids = set()
         self._evidence_snapshots = []
+        self._evidence_profiles = {}
         self._evidence_snapshot_signature = None
         self._evidence_status_snapshot = {}
         self._evidence_gallery_dirty = True
@@ -262,7 +264,7 @@ class AnalyticsDesktopWindow:
             window = tk.Toplevel(self.root)
             window.title("WIMI Analytics - Análise local do NVR")
             window.geometry("1180x760")
-            window.minsize(980, 650)
+            window.minsize(980, 760)
             window.configure(bg=BG)
             window.protocol("WM_DELETE_WINDOW", self.hide)
         self.window = window
@@ -356,7 +358,22 @@ class AnalyticsDesktopWindow:
                 wraplength=920,
             )
             subtitle_label.pack(anchor="w", pady=(3, 0))
-            self._responsive_labels.append(subtitle_label)
+            self._bind_local_wrap(subtitle_label, area)
+
+    @staticmethod
+    def _bind_local_wrap(label, parent, padding=16, minimum=180, maximum=1180):
+        def update_wrap(event=None):
+            if not label.winfo_exists() or not parent.winfo_exists():
+                return
+            width = int(event.width if event is not None else parent.winfo_width())
+            if width <= 1:
+                return
+            label.configure(
+                wraplength=max(minimum, min(maximum, width - padding))
+            )
+
+        parent.bind("<Configure>", update_wrap, add="+")
+        parent.after_idle(update_wrap)
 
     def _on_resize(self, event):
         if event.widget is not self.window:
@@ -526,11 +543,11 @@ class AnalyticsDesktopWindow:
         self._section_title(
             tab,
             "Atividade e trajetos observados",
-            "Confirmações consentidas por câmera e intervalos sem confirmação. O sistema não conhece a localização fora da imagem.",
+            "Identificações por câmera e intervalos sem confirmação. O sistema não conhece a localização fora da imagem.",
         )
         self._labels["profile_activity_summary"] = tk.Label(
             tab,
-            text="Nenhum trajeto consentido registrado.",
+            text="Nenhum trajeto identificado registrado.",
             font=("Segoe UI", 10, "bold"),
             fg=GREEN,
             bg=BG,
@@ -541,14 +558,14 @@ class AnalyticsDesktopWindow:
         self._labels["profile_activity_summary"].pack(
             fill="x", padx=8, pady=(0, 10)
         )
-        self._responsive_labels.append(
-            self._labels["profile_activity_summary"]
+        self._bind_local_wrap(
+            self._labels["profile_activity_summary"], tab, padding=32
         )
         body = ttk.Notebook(tab, style="Wimi.TNotebook")
         body.pack(fill="both", expand=True, padx=8, pady=(0, 12))
         activity_panel = tk.Frame(body, bg=BG)
         event_panel = tk.Frame(body, bg=BG)
-        body.add(activity_panel, text="Trajetos consentidos")
+        body.add(activity_panel, text="Trajetos identificados")
         body.add(event_panel, text="Eventos técnicos")
         self._behavior_notebook = body
         self._tree(
@@ -678,25 +695,14 @@ class AnalyticsDesktopWindow:
     def _build_evidence_tab(self):
         tab = self._tab("Evidências")
         self._evidence_tab = tab
-
-        self._evidence_notebook = ttk.Notebook(tab, style="Wimi.TNotebook")
-        self._evidence_notebook.pack(fill="both", expand=True)
-        self._evidence_notebook.enable_traversal()
-        captures_tab = tk.Frame(self._evidence_notebook, bg=BG)
-        activity_tab = tk.Frame(self._evidence_notebook, bg=BG)
-        people_tab = tk.Frame(self._evidence_notebook, bg=BG)
-        self._evidence_notebook.add(captures_tab, text="Capturas")
-        self._evidence_notebook.add(activity_tab, text="Atividade e trajetos")
-        self._evidence_notebook.add(people_tab, text="Pessoas cadastradas")
+        self._evidence_notebook = None
+        captures_tab = tab
         self._evidence_capture_tab = captures_tab
-        self._evidence_activity_tab = activity_tab
-        self._evidence_people_tab = people_tab
-        self._build_behavior_panel(activity_tab)
 
         self._section_title(
             captures_tab,
-            "Capturas de atendimento anonimizadas",
-            "Os rostos detectados são descaracterizados antes da gravação. Exclusão automática após 10 dias; nenhuma captura contém nome ou perfil biométrico.",
+            "Capturas, identificações e trajetos",
+            "Contexto protegido e revisão facial local criptografada. Agrupamentos provisórios expiram em 10 dias; nomes reais exigem confirmação manual.",
         )
         actions = tk.Frame(captures_tab, bg=BG)
         actions.pack(fill="x", padx=8, pady=(0, 8))
@@ -749,10 +755,18 @@ class AnalyticsDesktopWindow:
             wraplength=1100,
         )
         self._labels["evidence_status"].pack(fill="x")
-        self._responsive_labels.append(self._labels["evidence_status"])
+        self._bind_local_wrap(self._labels["evidence_status"], status_row)
 
-        gallery_shell = tk.Frame(captures_tab, bg=BG)
-        gallery_shell.pack(fill="both", expand=True, padx=8, pady=(0, 12))
+        content_pane = tk.PanedWindow(
+            captures_tab,
+            orient=tk.VERTICAL,
+            bg=BORDER,
+            bd=0,
+            sashwidth=6,
+            sashrelief="flat",
+        )
+        content_pane.pack(fill="both", expand=True, padx=8, pady=(0, 12))
+        gallery_shell = tk.Frame(content_pane, bg=BG)
         self._evidence_gallery_canvas = tk.Canvas(
             gallery_shell,
             bg=BG,
@@ -786,9 +800,34 @@ class AnalyticsDesktopWindow:
         )
         self._bind_evidence_mousewheel(self._evidence_gallery_canvas)
         self._bind_evidence_mousewheel(self._evidence_gallery_frame)
+
+        analysis_shell = tk.PanedWindow(
+            content_pane,
+            orient=tk.HORIZONTAL,
+            bg=BORDER,
+            bd=0,
+            sashwidth=6,
+            sashrelief="flat",
+        )
+        activity_tab = tk.Frame(analysis_shell, bg=BG)
+        people_tab = tk.Frame(analysis_shell, bg=BG)
+        self._evidence_activity_tab = activity_tab
+        self._evidence_people_tab = people_tab
+        self._build_behavior_panel(activity_tab)
         self._build_people_panel(people_tab)
-        self._evidence_notebook.bind(
-            "<<NotebookTabChanged>>", self._on_notebook_tab_changed, add="+"
+        analysis_shell.add(activity_tab, minsize=500, width=720, stretch="always")
+        analysis_shell.add(people_tab, minsize=390, width=480, stretch="always")
+        content_pane.add(
+            gallery_shell,
+            minsize=100,
+            height=130,
+            stretch="never",
+        )
+        content_pane.add(
+            analysis_shell,
+            minsize=320,
+            height=390,
+            stretch="always",
         )
 
     def _build_reports_tab(self):
@@ -825,13 +864,15 @@ class AnalyticsDesktopWindow:
     def _build_people_panel(self, tab):
         self._section_title(
             tab,
-            "Perfis consentidos mais observados",
-            "A função é definida no cadastro. Depois disso, as câmeras reconhecem o perfil automaticamente; desconhecidos nunca são cadastrados sozinhos.",
+            "Pessoas observadas",
+            "Rostos recorrentes recebem nomes provisórios. Um nome real e uma função só são mantidos após confirmação manual.",
         )
         actions = tk.Frame(tab, bg=BG)
-        actions.pack(fill="x", padx=8, pady=(0, 10))
+        actions.pack(fill="x", padx=8, pady=(0, 6))
+        primary_actions = tk.Frame(actions, bg=BG)
+        primary_actions.pack(fill="x")
         tk.Label(
-            actions,
+            primary_actions,
             text="Função:",
             font=("Segoe UI", 9),
             fg=MUTED,
@@ -839,7 +880,7 @@ class AnalyticsDesktopWindow:
         ).pack(side="left")
         self._profile_role_var = tk.StringVar(value="Funcionário")
         role_selector = ttk.Combobox(
-            actions,
+            primary_actions,
             textvariable=self._profile_role_var,
             values=[label for label, _code in PROFILE_ROLE_OPTIONS],
             state="readonly",
@@ -847,22 +888,31 @@ class AnalyticsDesktopWindow:
         )
         role_selector.pack(side="left", padx=(6, 10))
         self._enroll_button = self._button(
-            actions, "Cadastrar rosto", self._enroll_person, GREEN
+            primary_actions, "Cadastrar rosto", self._enroll_person, GREEN
         )
         self._enroll_button.pack(side="left")
+        secondary_actions = tk.Frame(actions, bg=BG)
+        secondary_actions.pack(fill="x", pady=(6, 0))
         self._rename_button = self._button(
-            actions, "Renomear", self._rename_selected_person, BLUE
+            secondary_actions, "Renomear", self._rename_selected_person, BLUE
         )
-        self._rename_button.pack(side="left", padx=(8, 0))
+        self._rename_button.pack(side="left")
         self._rename_button.configure(state="disabled", disabledforeground=MUTED)
         self._delete_button = self._button(
-            actions, "Excluir selecionado", self._delete_person, RED
+            secondary_actions, "Excluir selecionado", self._delete_person, RED
         )
         self._delete_button.pack(side="left", padx=8)
         self._labels["face_status"] = tk.Label(
-            actions, text="Reconhecimento: verificando", font=("Segoe UI", 9), fg=MUTED, bg=BG
+            tab,
+            text="Reconhecimento: verificando",
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg=BG,
+            anchor="w",
+            justify="left",
         )
-        self._labels["face_status"].pack(side="left", padx=10)
+        self._labels["face_status"].pack(fill="x", padx=8, pady=(0, 8))
+        self._bind_local_wrap(self._labels["face_status"], tab, padding=32)
         people = self._tree(
             tab,
             "people",
@@ -1163,7 +1213,7 @@ class AnalyticsDesktopWindow:
             )
         else:
             self._labels["profile_activity_summary"].configure(
-                text="Nenhum trajeto consentido registrado.",
+                text="Nenhum trajeto identificado registrado.",
                 fg=MUTED,
             )
         activity_rows = []
@@ -1226,7 +1276,7 @@ class AnalyticsDesktopWindow:
                 f"Últimos {len(events)} eventos | Sessões concluídas: {counts['observed_presence_end']} "
                 f"({_duration_text(presence_seconds)}) | Pico amostrado: {peak_people} pessoa(s) | "
                 f"Movimentos: {counts['motion_start']} ({_duration_text(motion_seconds)}) | "
-                f"Perfis consentidos: {len(recognized_profiles)}"
+                f"Identificações locais: {len(recognized_profiles)}"
             )
         )
         names = {
@@ -1468,17 +1518,36 @@ class AnalyticsDesktopWindow:
 
         snapshots = list(snapshots or [])
         status = dict(status or {})
-        signature = tuple(
-            (
-                item.get("evidence_id"),
-                item.get("captured_at"),
-                item.get("expires_at"),
-                item.get("stream"),
-                item.get("face_count"),
-                item.get("byte_count"),
-                item.get("anonymization"),
+        profiles = self.face_service.list_profiles() if self.face_service else []
+        self._evidence_profiles = {
+            str(item.get("profile_id")): item
+            for item in profiles
+            if item.get("profile_id")
+        }
+        signature = (
+            tuple(
+                (
+                    item.get("evidence_id"),
+                    item.get("captured_at"),
+                    item.get("expires_at"),
+                    item.get("stream"),
+                    item.get("face_count"),
+                    item.get("face_relative_path"),
+                    tuple(item.get("profile_ids") or []),
+                    item.get("byte_count"),
+                    item.get("anonymization"),
+                )
+                for item in snapshots
+            ),
+            tuple(
+                (
+                    profile_id,
+                    item.get("display_name"),
+                    item.get("provisional"),
+                    item.get("observation_count"),
+                )
+                for profile_id, item in sorted(self._evidence_profiles.items())
             )
-            for item in snapshots
         )
         evidence_ids = {
             item.get("evidence_id") for item in snapshots if item.get("evidence_id")
@@ -1504,15 +1573,15 @@ class AnalyticsDesktopWindow:
         if (
             self.notebook is None
             or self._evidence_tab is None
-            or self._evidence_notebook is None
             or subtab is None
         ):
             return False
         try:
-            return (
-                self.notebook.select() == str(self._evidence_tab)
-                and self._evidence_notebook.select() == str(subtab)
-            )
+            if self.notebook.select() != str(self._evidence_tab):
+                return False
+            if self._evidence_notebook is None:
+                return subtab is self._evidence_capture_tab
+            return self._evidence_notebook.select() == str(subtab)
         except tk.TclError:
             return False
 
@@ -1520,13 +1589,13 @@ class AnalyticsDesktopWindow:
         return self._evidence_subtab_is_selected(self._evidence_capture_tab)
 
     def _activity_tab_is_selected(self):
-        return self._evidence_subtab_is_selected(self._evidence_activity_tab)
+        return self._evidence_tab_is_selected()
 
     def _on_notebook_tab_changed(self, _event=None):
         if self._evidence_tab_is_selected() and self._evidence_gallery_dirty:
             self._render_evidence_gallery()
             self._update_evidence_controls()
-        elif self._activity_tab_is_selected():
+        if self._activity_tab_is_selected():
             self._refresh_behavior()
 
     def _evidence_page_count(self):
@@ -1638,12 +1707,25 @@ class AnalyticsDesktopWindow:
         captured = self._evidence_time_text(item.get("captured_at"))
         expires = self._evidence_time_text(item.get("expires_at"))
         faces = max(0, int(item.get("face_count") or 0))
+        profiles = [
+            self._evidence_profiles[profile_id]
+            for profile_id in item.get("profile_ids") or []
+            if profile_id in self._evidence_profiles
+        ]
+        identity_parts = []
+        for profile in profiles:
+            label = str(profile.get("display_name") or "Pessoa")
+            if profile.get("provisional"):
+                confirmations = max(1, int(profile.get("observation_count") or 1))
+                label = f"{label} · {confirmations} confirmação(ões)"
+            identity_parts.append(label)
+        identity_text = ", ".join(identity_parts) or "Aguardando recorrência"
         detail = tk.Label(
             card,
             text=(
                 f"{captured}\n"
-                f"Análise: {faces} rosto(s) anonimizado(s)  |  "
-                f"{_byte_size_text(item.get('byte_count'))}\n"
+                f"Identificação: {identity_text}\n"
+                f"{faces} rosto(s) | {_byte_size_text(item.get('byte_count'))} | "
                 f"Exclusão automática: {expires}"
             ),
             font=("Segoe UI", 8),
@@ -1654,12 +1736,29 @@ class AnalyticsDesktopWindow:
             wraplength=self.EVIDENCE_THUMBNAIL_SIZE[0],
         )
         detail.pack(fill="x", padx=9, pady=(5, 7))
+        provisional = next(
+            (profile for profile in profiles if profile.get("provisional")),
+            None,
+        )
+        name_button = None
+        if provisional is not None:
+            name_button = self._button(
+                card,
+                "Nomear pessoa",
+                lambda profile_id=provisional["profile_id"]: self._prompt_profile_rename(
+                    profile_id
+                ),
+                BLUE,
+            )
+            name_button.pack(fill="x", padx=8, pady=(0, 7))
         preview.bind(
             "<Button-1>",
             lambda _event, item_id=evidence_id: self._open_evidence_preview(item_id),
             add="+",
         )
-        for widget in (card, header, checkbox, image_area, preview, detail):
+        for widget in (card, header, checkbox, image_area, preview, detail, name_button):
+            if widget is None:
+                continue
             self._bind_evidence_mousewheel(widget)
 
         self._evidence_cards[evidence_id] = {
@@ -1686,6 +1785,23 @@ class AnalyticsDesktopWindow:
             (self.EVIDENCE_THUMBNAIL_SIZE[1] - image.height) // 2,
         )
         thumbnail.paste(image, offset)
+        read_face_preview = getattr(self.evidence_archive, "read_face_preview", None)
+        try:
+            face_preview = read_face_preview(evidence_id) if callable(read_face_preview) else None
+        except Exception:
+            face_preview = None
+        if face_preview is not None:
+            face = face_preview.convert("RGB")
+            face.thumbnail((78, 78), Image.Resampling.LANCZOS)
+            border = Image.new("RGB", (face.width + 4, face.height + 4), YELLOW)
+            border.paste(face, (2, 2))
+            thumbnail.paste(
+                border,
+                (
+                    thumbnail.width - border.width - 5,
+                    thumbnail.height - border.height - 5,
+                ),
+            )
         return ImageTk.PhotoImage(thumbnail, master=self.window)
 
     def _open_evidence_preview(self, evidence_id):
@@ -1702,6 +1818,13 @@ class AnalyticsDesktopWindow:
                 parent=self.window,
             )
             return
+        read_face_preview = getattr(self.evidence_archive, "read_face_preview", None)
+        try:
+            face_source = (
+                read_face_preview(evidence_id) if callable(read_face_preview) else None
+            )
+        except Exception:
+            face_source = None
         item = next(
             (
                 row
@@ -1726,28 +1849,64 @@ class AnalyticsDesktopWindow:
             pass
 
         image = source.convert("RGB")
-        max_width = max(320, preview_window.winfo_screenwidth() - 120)
+        face_width = 300 if face_source is not None else 0
+        max_width = max(320, preview_window.winfo_screenwidth() - 140 - face_width)
         max_height = max(180, preview_window.winfo_screenheight() - 210)
         image.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
         photo = ImageTk.PhotoImage(image, master=preview_window)
+        image_panel = tk.Frame(preview_window, bg=BG)
+        image_panel.pack(fill="both", expand=True, padx=12, pady=(12, 8))
         image_label = tk.Label(
-            preview_window,
+            image_panel,
             image=photo,
             bg=BG,
             bd=0,
             highlightthickness=0,
         )
-        image_label.pack(padx=12, pady=(12, 8))
+        image_label.pack(side="left", fill="both", expand=True)
+        face_photo = None
+        if face_source is not None:
+            face_image = face_source.convert("RGB")
+            face_image.thumbnail((280, max_height), Image.Resampling.LANCZOS)
+            face_photo = ImageTk.PhotoImage(face_image, master=preview_window)
+            face_panel = tk.Frame(
+                image_panel,
+                bg=SURFACE,
+                highlightbackground=YELLOW,
+                highlightthickness=2,
+            )
+            face_panel.pack(side="right", fill="y", padx=(10, 0))
+            tk.Label(
+                face_panel,
+                text="REVISÃO FACIAL LOCAL",
+                font=("Segoe UI", 9, "bold"),
+                fg=YELLOW,
+                bg=SURFACE,
+            ).pack(fill="x", padx=8, pady=(7, 5))
+            tk.Label(
+                face_panel,
+                image=face_photo,
+                bg=SURFACE,
+                bd=0,
+            ).pack(padx=8, pady=(0, 8))
 
         footer = tk.Frame(preview_window, bg=SURFACE)
         footer.pack(fill="x", padx=12, pady=(0, 12))
         captured = self._evidence_time_text(item.get("captured_at"))
         expires = self._evidence_time_text(item.get("expires_at"))
+        profiles = [
+            self._evidence_profiles[profile_id]
+            for profile_id in item.get("profile_ids") or []
+            if profile_id in self._evidence_profiles
+        ]
+        identities = ", ".join(
+            str(profile.get("display_name") or "Pessoa") for profile in profiles
+        ) or "Aguardando recorrência suficiente"
         details = tk.Label(
             footer,
             text=(
                 f"{str(item.get('stream') or '-').upper()}  |  {captured}\n"
-                f"Rostos detectados descaracterizados  |  Exclusão automática: {expires}"
+                f"Identificação: {identities}  |  Exclusão automática: {expires}"
             ),
             font=("Segoe UI", 9),
             fg=TEXT,
@@ -1760,9 +1919,23 @@ class AnalyticsDesktopWindow:
             footer, "Fechar", self._close_evidence_preview, SURFACE_ALT
         )
         close_button.pack(side="right", padx=10, pady=8)
+        provisional = next(
+            (profile for profile in profiles if profile.get("provisional")),
+            None,
+        )
+        if provisional is not None:
+            name_button = self._button(
+                footer,
+                "Nomear pessoa",
+                lambda profile_id=provisional["profile_id"]: self._prompt_profile_rename(
+                    profile_id
+                ),
+                BLUE,
+            )
+            name_button.pack(side="right", pady=8)
 
         self._evidence_preview_window = preview_window
-        self._evidence_preview_photo = photo
+        self._evidence_preview_photo = (photo, face_photo)
         preview_window.focus_set()
 
     def _close_evidence_preview(self):
@@ -1897,7 +2070,7 @@ class AnalyticsDesktopWindow:
                 f"Retenção: {status.get('retention_days', 10)} dias | "
                 f"{count} captura(s) | {selected_count} selecionada(s) | "
                 f"{_byte_size_text(status.get('total_bytes'))} | "
-                "proteção: contexto pixelizado + rostos detectados descaracterizados"
+                "proteção: contexto anonimizado + revisão facial local criptografada"
             )
             if unavailable:
                 text = "Retenção: 10 dias | arquivo de evidências indisponível"
@@ -2040,6 +2213,8 @@ class AnalyticsDesktopWindow:
             )
         )
         status = getattr(service, "status", "not_configured") if service else "not_configured"
+        confirmed_count = sum(not item.get("provisional") for item in profiles)
+        provisional_count = sum(bool(item.get("provisional")) for item in profiles)
         most_observed = ""
         if summaries:
             top_profile = next(
@@ -2058,7 +2233,7 @@ class AnalyticsDesktopWindow:
         self._labels["face_status"].configure(
             text=(
                 f"Reconhecimento: {_status_text(status)} | Perfis consentidos: "
-                f"{len(profiles)}{most_observed}"
+                f"{confirmed_count} | Em análise: {provisional_count}{most_observed}"
             ),
             fg=GREEN if getattr(service, "available", False) else YELLOW,
         )
@@ -2177,7 +2352,30 @@ class AnalyticsDesktopWindow:
         display_name = display_name.strip()
         if not display_name or display_name == profile.get("display_name"):
             return
-        if not self._start_profile_rename(profile_id, display_name):
+        consent = False
+        role = profile.get("role", "authorized")
+        if profile.get("provisional"):
+            role = PROFILE_ROLE_BY_LABEL.get(
+                self._profile_role_var.get() if self._profile_role_var else "",
+                "authorized",
+            )
+            consent = messagebox.askyesno(
+                "Confirmar identificação local",
+                (
+                    f"Confirmar {display_name} como perfil reconhecível neste computador?\n\n"
+                    "O vetor facial ficará protegido pelo Windows. Confirme somente com "
+                    "autorização para este cadastro."
+                ),
+                parent=self.window,
+            )
+            if not consent:
+                return
+        if not self._start_profile_rename(
+            profile_id,
+            display_name,
+            role=role,
+            consent=consent,
+        ):
             messagebox.showinfo(
                 "Alteração em andamento",
                 "Aguarde a conclusão da alteração atual.",
@@ -2347,7 +2545,13 @@ class AnalyticsDesktopWindow:
         with self._rename_lock:
             return self._rename_busy
 
-    def _start_profile_rename(self, profile_id, display_name):
+    def _start_profile_rename(
+        self,
+        profile_id,
+        display_name,
+        role="authorized",
+        consent=False,
+    ):
         if self.deletion_running:
             return False
         with self._rename_lock:
@@ -2357,7 +2561,7 @@ class AnalyticsDesktopWindow:
         self._update_profile_action_controls()
         thread = threading.Thread(
             target=self._profile_rename_worker,
-            args=(str(profile_id), str(display_name)),
+            args=(str(profile_id), str(display_name), str(role), bool(consent)),
             name="wimi-profile-rename",
             daemon=True,
         )
@@ -2365,12 +2569,32 @@ class AnalyticsDesktopWindow:
         thread.start()
         return True
 
-    def _profile_rename_worker(self, profile_id, display_name):
-        result = {"renamed": False, "error": None}
+    def _profile_rename_worker(
+        self,
+        profile_id,
+        display_name,
+        role="authorized",
+        consent=False,
+    ):
+        result = {"renamed": False, "error": None, "warning": None}
         try:
-            result["renamed"] = bool(
-                self.face_service.rename_profile(profile_id, display_name)
-            )
+            if consent:
+                renamed = self.face_service.rename_profile(
+                    profile_id,
+                    display_name,
+                    role=role,
+                    consent=True,
+                )
+            else:
+                renamed = self.face_service.rename_profile(profile_id, display_name)
+            result["renamed"] = bool(renamed)
+            if isinstance(renamed, str):
+                merge_history = getattr(self.store, "merge_profile_presence", None)
+                if callable(merge_history):
+                    try:
+                        merge_history(profile_id, renamed)
+                    except Exception as error:
+                        result["warning"] = str(error)[:200]
         except Exception as caught:
             result["error"] = str(caught)[:200]
         try:
@@ -2395,6 +2619,15 @@ class AnalyticsDesktopWindow:
             messagebox.showwarning(
                 "Perfil não encontrado",
                 "O perfil não está mais disponível no banco biométrico.",
+                parent=self.window,
+            )
+        elif result.get("warning"):
+            messagebox.showwarning(
+                "Nome atualizado parcialmente",
+                (
+                    "O perfil foi nomeado, mas parte do histórico não pôde ser "
+                    "vinculada agora. O reconhecimento continua ativo."
+                ),
                 parent=self.window,
             )
         else:

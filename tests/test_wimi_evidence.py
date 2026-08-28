@@ -112,6 +112,38 @@ class AnonymizedEvidenceArchiveTests(unittest.TestCase):
         restored = self.archive.read_image(evidence_id)
         self.assertEqual(restored.size, (1280, 720))
 
+    def test_optional_review_preview_keeps_faces_legible_encrypted_and_linked(self):
+        archive = AnonymizedEvidenceArchive(
+            self.store,
+            self.root / "runtime" / "review-evidence",
+            protector=FakeProtector(),
+            min_interval_seconds=0,
+            max_total_bytes=4 * 1024 * 1024,
+            store_identifiable_face_previews=True,
+        )
+        source = self.patterned_frame()
+        profile_id = "pending:cluster-1"
+
+        evidence_id = archive.capture(
+            "farmacia",
+            source,
+            face_boxes=[(80, 40, 80, 80)],
+            face_count=1,
+            identities=[{"profile_id": profile_id, "face_index": 0}],
+        )
+
+        metadata = archive.list_snapshots(limit=10)[0]
+        context = archive.read_image(evidence_id)
+        review = archive.read_face_preview(evidence_id)
+        self.assertEqual(metadata["profile_ids"], [profile_id])
+        self.assertIsNotNone(metadata["face_relative_path"])
+        self.assertLess(sum(ImageStat.Stat(context.crop((60, 14, 180, 146))).var), 10.0)
+        self.assertGreater(sum(ImageStat.Stat(review).var), 100.0)
+        protected_review = archive._path_for(metadata["face_relative_path"]).read_bytes()
+        self.assertFalse(protected_review.startswith(b"\xff\xd8"))
+        self.assertTrue(archive.delete(evidence_id))
+        self.assertFalse(archive._path_for(metadata["face_relative_path"]).exists())
+
     def test_refuses_capture_without_complete_face_boxes(self):
         image = self.patterned_frame()
 
