@@ -79,10 +79,12 @@ O gerenciador compara a versão local com a versão publicada no GitHub, mas só
 ### 8. Painel Unificado WIMI Analytics
 
 O painel principal possui duas abas superiores: **Cameras** e **Analises**.
-Analises fica dentro da mesma janela e contem Visao geral, Cameras, Rede,
-Evidencias e Relatorios. Evidencias usa uma unica area `Capturas e analises`,
-com galeria, trajetos observados e pessoas lado a lado. Alternar entre as abas
-nao reinicia o NVR, o coletor, a visao ou o banco local.
+Analises fica dentro da mesma janela e possui tres areas: `Operacao`,
+`Evidencias` e `Rede e relatorios`. Operacao agrupa Visao geral e Cameras;
+Rede e relatorios mantem suas duas visoes em subabas. Evidencias usa uma unica
+area com galeria rolavel e subabas de largura total para Atividade e trajetos e
+Pessoas observadas. Alternar entre as abas nao reinicia o NVR, o coletor, a
+visao ou o banco local.
 
 O historico persistente usa SQLite em `sistema/analytics/`, fora do HD de
 gravacoes. A visao reutiliza o preview existente, calibra de forma limitada o
@@ -204,11 +206,12 @@ pythonw.exe gerenciador.pyw --silent
 ```
 
 O WIMI Analytics roda integrado ao processo do NVR. No modo visual, use as abas
-superiores `Cameras` e `Analises`; a segunda contem cinco subabas: Visao geral,
-Cameras, Rede, Evidencias e Relatorios. `Evidencias` concentra galeria,
-atividade, trajetos e pessoas na unica area `Capturas e analises`. Trocar de aba preserva a coleta,
-os previews e o historico; o fluxo normal nao abre navegador nem uma segunda
-janela.
+superiores `Cameras` e `Analises`; a segunda contem `Operacao`, `Evidencias` e
+`Rede e relatorios`. Visao geral e Cameras ficam em Operacao, enquanto Rede e
+Relatorios compartilham a ultima area. Evidencias concentra galeria, atividade,
+trajetos e pessoas, com as analises em subabas de largura total. Trocar de aba
+preserva a coleta, os previews e o historico; o fluxo normal nao abre navegador
+nem uma segunda janela.
 
 O historico fica em `sistema/analytics/`, fora do HD de gravacao. A visao usa os
 quadros ja decodificados pelo preview, sem abrir outra conexao com as cameras e
@@ -240,10 +243,19 @@ No preview ao vivo e na tela cheia, cada rosto detectado recebe uma caixa
 transitoria. Perfis consentidos mostram nome, funcao cadastrada e confianca;
 rostos sem correspondencia mostram `Desconhecido`; agrupamentos recorrentes
 mostram `Pessoa N | Em analise` em amarelo. A identificacao usa o
-mesmo quadro ja entregue ao preview, e atualizada no maximo uma vez por segundo,
+mesmo quadro ja entregue ao preview, e atualizada no maximo duas vezes por segundo,
 fica somente em memoria por ate 2,5 segundos e nao altera nem grava a camada
 visual nos arquivos de video. O bloqueio de hardware continua
 podendo pausar a analise sem interromper a gravacao.
+
+O preview e a fila de visao mantem somente o quadro mais recente quando o PC nao
+consegue acompanhar a chegada, evitando acumular atraso ao longo das horas. A
+tela Cameras mostra separadamente o atraso de fila e o tempo de processamento
+da IA. O agrupamento provisório combina vetor facial e continuidade espacial da
+mesma camera por uma janela curta; empates só sao reaproveitados quando os
+proprios agrupamentos tambem sao compatíveis. Isso reduz fragmentacao, mas nao
+torna reconhecimento facial infalivel: nome real e funcao continuam exigindo
+confirmacao humana.
 
 O YuNet usa limiar de deteccao `0.80`, calibrado localmente com um quadro real da
 camera em 28/08/2026: o limiar anterior `0.90` nao encontrou o rosto distante no

@@ -5,10 +5,11 @@ Data: 16/08/2026
 ## Objetivo
 
 Entregar as analises dentro do aplicativo Tkinter usado na farmacia, sem abrir
-um navegador. O operador deve alternar entre Visao geral, Cameras, Rede,
-Evidencias e Relatorios sem perder a coleta em memoria ou o historico
-persistido. Evidencias concentra galeria, Atividade e trajetos e Pessoas
-observadas na unica area `Capturas e analises`.
+um navegador. O operador deve alternar entre Operacao, Evidencias e Rede e
+relatorios sem perder a coleta em memoria ou o historico persistido. Operacao
+agrupa Visao geral e Cameras; Rede e relatorios usa duas subabas. Evidencias
+concentra a galeria e subabas de largura total para Atividade e trajetos e
+Pessoas observadas.
 
 O sistema observa somente evidencias tecnicas e operacionais. Movimento,
 presenca e identidade cadastrada sao sinais para revisao humana; nao inferem
@@ -32,8 +33,10 @@ sensivel.
 6. A visao reutiliza quadros que o preview Tkinter ja decodificou. Nao abre uma
    segunda conexao, nao liga transcodificacao escondida e nao toca no fluxo
    `/api/stream.ts` usado pela gravacao.
-7. A fila de visao possui no maximo dois quadros no total e aceita no maximo uma
-   amostra por segundo por camera. Quadros antigos sao descartados.
+7. A fila de visao possui no maximo dois quadros no total e aceita no maximo
+   duas amostras por segundo por camera. A fila da IA e a fila de desenho do
+   Tkinter substituem quadros antigos pelo mais recente e registram atraso de
+   fila, tempo de processamento e quantidade de substituicoes.
 8. Movimento funciona com Pillow e nao depende de modelo. Cada camera passa por
    calibracao local limitada antes dos alertas; o limiar adaptativo tem piso,
    teto, janela finita e nao aprende mudancas grandes como ruido. Pessoa usa o
@@ -46,8 +49,11 @@ sensivel.
    revisao ficam no payload DPAPI e expiram em 10 dias sem confirmacao. Capturas
    operacionais preservam ate `1280x720` em JPEG 82 e achatam os rostos no
    contexto; uma prancha facial nitida separada e cifrada permite revisao local.
-10. Uma identidade so e exibida apos correspondencia acima do limiar, margem
-    contra o segundo candidato e confirmacao em amostras consecutivas.
+10. Uma identidade confirmada so e exibida apos correspondencia acima do
+    limiar, margem contra o segundo candidato e confirmacao em amostras
+    consecutivas. Agrupamentos provisorios usam tambem continuidade espacial de
+    ate dois segundos na mesma camera. Candidatos empatados so sao reutilizados
+    quando seus vetores tambem formam um conjunto compativel.
 11. A visao pausa se a protecao de hardware bloquear manutencao pesada, se a
     memoria do processo ultrapassar 750 MB ou se o encerramento iniciar.
 12. O detector recebe no maximo `960x540`, usa limiar YuNet `0.80` calibrado em
@@ -124,26 +130,31 @@ produtividade.
 - a sobreposicao desenhada com caixas, nomes, funcoes e confianca fica somente
   em memoria, expira apos 2,5 segundos e nao entra no snapshot persistente, no
   banco biometrico ou nas evidencias;
-- o reconhecimento usa o quadro ja amostrado pelo preview, no maximo uma vez
+- o reconhecimento usa o quadro ja amostrado pelo preview, no maximo duas vezes
   por segundo por camera, sem abrir uma nova conexao com o stream;
 - o limite de memoria e o encerramento do NVR continuam prevalecendo sobre a
   analise opcional.
 
-- **Visao geral:** estado do NVR, riscos, pontos fortes e atualidade da fonte.
-- **Cameras:** conectividade, gravacao, estado automatico da analise e as 200
+- **Operacao / Visao geral:** estado do NVR, riscos, pontos fortes e atualidade
+  da fonte.
+- **Operacao / Cameras:** conectividade, gravacao, atraso interno da IA, estado
+  automatico da analise e as 200
   confirmacoes consentidas mais recentes, com horario, camera, funcao e
   confianca. A mesma lista permite renomear o perfil selecionado.
-- **Rede:** conexao/gateway, dispositivos vistos e aplicativos TCP deste PC em
-  subabas persistentes.
+- **Rede e relatorios / Rede:** conexao/gateway, dispositivos vistos e
+  aplicativos TCP deste PC em subabas persistentes.
 - **Evidencias:** galeria responsiva de cards com miniaturas descaracterizadas,
   metadados de analise, expiracao, selecao individual, marcar/desmarcar tudo e
-  exclusao manual em lote confirmada. A paginacao mantem no maximo 24 miniaturas
-  descriptografadas em memoria e so as carrega com a aba visivel, sem alterar o
+  exclusao manual em lote confirmada. A galeria permanece rolavel e divide o
+  espaco vertical com subabas de largura total para Atividade e Pessoas. A
+  paginacao mantem no maximo 24 miniaturas descriptografadas em memoria e so as
+  carrega com a aba visivel, sem alterar o
   historico. A mesma area possui `Atividade e trajetos`, com a linha do tempo de
   confirmacoes consentidas e eventos tecnicos agregados, e `Pessoas cadastradas`
   para cadastro, classificacao manual de funcao, ranking, renomeacao e exclusao
   de perfis consentidos.
-- **Relatorios:** coletas persistidas, filtros de periodo e detalhes.
+- **Rede e relatorios / Relatorios:** coletas persistidas, filtros de periodo e
+  detalhes.
 
 O reconhecimento retorna automaticamente o nome e a funcao de perfis ja
 cadastrados. A funcao nunca e inferida pela aparencia: e selecionada durante o

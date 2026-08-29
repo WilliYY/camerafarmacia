@@ -26,6 +26,12 @@ PROFILE_ROLES = frozenset({"authorized", "contractor", "employee", "manager"})
 PROVISIONAL_PREFIX = "pending:"
 PROVISIONAL_RETENTION_DAYS = 10
 PROVISIONAL_WRITE_INTERVAL_SECONDS = 300.0
+PROVISIONAL_MATCH_THRESHOLD = 0.42
+PROVISIONAL_MINIMUM_MARGIN = 0.04
+PROVISIONAL_EQUIVALENT_CLUSTER_THRESHOLD = 0.65
+PROVISIONAL_PENDING_THRESHOLD = 0.45
+PROVISIONAL_TRACK_THRESHOLD = 0.20
+PROVISIONAL_TRACK_MAX_AGE_SECONDS = 2.0
 
 
 def normalize_profile_role(value):
@@ -221,6 +227,7 @@ class LocalFaceService:
         self._provisional_crops = {}
         self._provisional_metadata = {}
         self._pending_unknowns = []
+        self._provisional_tracks = {}
         self._last_provisional_write = {}
         self._frame_sequence = 0
         if self.available:
@@ -375,21 +382,144 @@ class LocalFaceService:
             number += 1
         return f"Pessoa {number}"
 
-    def _match_provisional(self, embedding):
+    def _match_provisional(self, embedding, excluded_cluster_ids=None):
+        excluded_cluster_ids = set(excluded_cluster_ids or ())
         scored = sorted(
             (
                 (_cosine_similarity(embedding, candidate), cluster_id)
                 for cluster_id, candidate in self._provisional_profiles.items()
+                if cluster_id not in excluded_cluster_ids
             ),
             reverse=True,
         )
-        if not scored or scored[0][0] < 0.55:
+        if not scored or scored[0][0] < PROVISIONAL_MATCH_THRESHOLD:
             return None
         best_score, cluster_id = scored[0]
+        selected_score = best_score
         second_score = scored[1][0] if len(scored) > 1 else -1.0
-        if best_score - second_score < 0.06:
+        if best_score - second_score < PROVISIONAL_MINIMUM_MARGIN:
+            equivalent = [
+                (score, candidate_id)
+                for score, candidate_id in scored
+                if best_score - score < PROVISIONAL_MINIMUM_MARGIN
+            ]
+            for index, (_score, candidate_id) in enumerate(equivalent):
+                for _other_score, other_id in equivalent[index + 1 :]:
+                    if _cosine_similarity(
+                        self._provisional_profiles[candidate_id],
+                        self._provisional_profiles[other_id],
+                    ) < PROVISIONAL_EQUIVALENT_CLUSTER_THRESHOLD:
+                        return None
+            selected_score, cluster_id = max(
+                equivalent,
+                key=lambda item: (
+                    int(
+                        (
+                            self._provisional_metadata.get(item[1]) or {}
+                        ).get("observation_count")
+                        or 0
+                    ),
+                    item[0],
+                    item[1],
+                ),
+            )
+        return cluster_id, max(0.0, min(float(selected_score), 1.0))
+
+    @staticmethod
+    def _track_geometry_score(current_bbox, previous_bbox):
+        try:
+            current_x, current_y, current_width, current_height = (
+                float(value) for value in current_bbox
+            )
+            previous_x, previous_y, previous_width, previous_height = (
+                float(value) for value in previous_bbox
+            )
+        except (TypeError, ValueError, OverflowError):
             return None
-        return cluster_id, max(0.0, min(float(best_score), 1.0))
+        if min(current_width, current_height, previous_width, previous_height) <= 0:
+            return None
+        current_right = current_x + current_width
+        current_bottom = current_y + current_height
+        previous_right = previous_x + previous_width
+        previous_bottom = previous_y + previous_height
+        intersection_width = max(
+            0.0, min(current_right, previous_right) - max(current_x, previous_x)
+        )
+        intersection_height = max(
+            0.0, min(current_bottom, previous_bottom) - max(current_y, previous_y)
+        )
+        intersection = intersection_width * intersection_height
+        union = (
+            current_width * current_height
+            + previous_width * previous_height
+            - intersection
+        )
+        overlap = intersection / union if union > 0 else 0.0
+        current_center = (
+            current_x + current_width / 2.0,
+            current_y + current_height / 2.0,
+        )
+        previous_center = (
+            previous_x + previous_width / 2.0,
+            previous_y + previous_height / 2.0,
+        )
+        distance = math.hypot(
+            current_center[0] - previous_center[0],
+            current_center[1] - previous_center[1],
+        )
+        scale = max(current_width, current_height, previous_width, previous_height)
+        normalized_distance = distance / scale
+        if overlap < 0.10 and normalized_distance > 0.75:
+            return None
+        return max(overlap, max(0.0, 1.0 - normalized_distance))
+
+    def _match_provisional_track(
+        self,
+        stream,
+        bbox,
+        embedding,
+        monotonic_now,
+        excluded_cluster_ids=None,
+    ):
+        excluded_cluster_ids = set(excluded_cluster_ids or ())
+        tracks = self._provisional_tracks.get(str(stream)) or {}
+        best = None
+        best_score = -1.0
+        for cluster_id, track in tracks.items():
+            if cluster_id in excluded_cluster_ids:
+                continue
+            if cluster_id not in self._provisional_profiles:
+                continue
+            if monotonic_now - float(track.get("last_seen") or 0.0) > PROVISIONAL_TRACK_MAX_AGE_SECONDS:
+                continue
+            similarity = _cosine_similarity(
+                embedding, self._provisional_profiles[cluster_id]
+            )
+            if similarity < PROVISIONAL_TRACK_THRESHOLD:
+                continue
+            geometry = self._track_geometry_score(bbox, track.get("bbox"))
+            if geometry is None:
+                continue
+            score = geometry * 0.65 + max(0.0, similarity) * 0.35
+            if score > best_score:
+                best = (cluster_id, max(0.0, min(float(similarity), 1.0)))
+                best_score = score
+        return best
+
+    def _remember_provisional_track(self, stream, cluster_id, bbox, monotonic_now):
+        stream = str(stream)
+        tracks = self._provisional_tracks.setdefault(stream, {})
+        tracks[cluster_id] = {
+            "bbox": tuple(bbox),
+            "last_seen": float(monotonic_now),
+        }
+        stale = sorted(
+            tracks,
+            key=lambda value: float(tracks[value].get("last_seen") or 0.0),
+            reverse=True,
+        )[16:]
+        for stale_cluster_id in stale:
+            tracks.pop(stale_cluster_id, None)
 
     def _resembles_confirmed_profile(self, embedding):
         scored = sorted(
@@ -433,13 +563,32 @@ class LocalFaceService:
         metadata["last_seen_at"] = datetime.now().isoformat(timespec="seconds")
         self._provisional_metadata[cluster_id] = metadata
 
-    def _observe_unknown(self, image, bbox, embedding, frame_token, monotonic_now):
-        match = self._match_provisional(embedding)
+    def _observe_unknown(
+        self,
+        stream,
+        image,
+        bbox,
+        embedding,
+        frame_token,
+        monotonic_now,
+        excluded_cluster_ids=None,
+    ):
+        match = self._match_provisional(embedding, excluded_cluster_ids)
+        if match is None:
+            match = self._match_provisional_track(
+                stream,
+                bbox,
+                embedding,
+                monotonic_now,
+                excluded_cluster_ids,
+            )
         if match is not None:
             cluster_id, confidence = match
+            self._remember_provisional_track(stream, cluster_id, bbox, monotonic_now)
             self._touch_provisional(cluster_id, monotonic_now)
             return cluster_id, confidence
 
+        stream = str(stream)
         self._pending_unknowns = [
             item
             for item in self._pending_unknowns
@@ -448,15 +597,18 @@ class LocalFaceService:
         best = None
         best_score = -1.0
         for item in self._pending_unknowns:
+            if item.get("stream") != stream:
+                continue
             if item.get("frame_token") == frame_token:
                 continue
             score = _cosine_similarity(embedding, item["embedding"])
             if score > best_score:
                 best = item
                 best_score = score
-        if best is None or best_score < 0.62:
+        if best is None or best_score < PROVISIONAL_PENDING_THRESHOLD:
             self._pending_unknowns.append(
                 {
+                    "stream": stream,
                     "embedding": list(embedding),
                     "count": 1,
                     "last_seen": monotonic_now,
@@ -508,6 +660,7 @@ class LocalFaceService:
             "observation_count": 1,
         }
         self._last_provisional_write[cluster_id] = monotonic_now
+        self._remember_provisional_track(stream, cluster_id, bbox, monotonic_now)
         return cluster_id, max(0.0, min(float(best_score), 1.0))
 
     def enroll(self, display_name, image, consent=False, role="authorized"):
@@ -656,6 +809,7 @@ class LocalFaceService:
                 ]
             identities = []
             face_boxes = []
+            used_provisional_clusters = set()
             self._frame_sequence += 1
             frame_token = self._frame_sequence
             monotonic_now = time.monotonic()
@@ -673,14 +827,17 @@ class LocalFaceService:
                     identities.append(result)
                 elif bbox is not None and not self._resembles_confirmed_profile(embedding):
                     provisional = self._observe_unknown(
+                        stream,
                         image,
                         bbox,
                         embedding,
                         frame_token,
                         monotonic_now,
+                        used_provisional_clusters,
                     )
                     if provisional is not None:
                         cluster_id, confidence = provisional
+                        used_provisional_clusters.add(cluster_id)
                         identities.append(
                             {
                                 "profile_id": f"{PROVISIONAL_PREFIX}{cluster_id}",

@@ -144,6 +144,8 @@ class AnalyticsDesktopWindow:
         self.activate_cameras = activate_cameras
         self.window = None
         self.notebook = None
+        self._operation_notebook = None
+        self._network_reports_notebook = None
         self._after_id = None
         self._destroyed = False
         self._trees = {}
@@ -177,10 +179,12 @@ class AnalyticsDesktopWindow:
         self._evidence_capture_tab = None
         self._evidence_activity_tab = None
         self._evidence_people_tab = None
+        self._evidence_analysis_notebook = None
         self._behavior_notebook = None
         self._evidence_gallery_canvas = None
         self._evidence_gallery_frame = None
         self._evidence_canvas_window = None
+        self._evidence_content_pane = None
         self._evidence_cards = {}
         self._evidence_selection_vars = {}
         self._evidence_photo_cache = {}
@@ -322,20 +326,37 @@ class AnalyticsDesktopWindow:
         self.notebook = ttk.Notebook(window, style="Wimi.TNotebook")
         self.notebook.pack(fill="both", expand=True, padx=14 if self.embedded else 18, pady=(0, 12 if self.embedded else 18))
         self.notebook.enable_traversal()
-        self._build_overview_tab()
-        self._build_cameras_tab()
-        self._build_network_tab()
+        self._build_operation_tab()
         self._build_evidence_tab()
-        self._build_reports_tab()
+        self._build_network_reports_tab()
         self.notebook.bind(
             "<<NotebookTabChanged>>", self._on_notebook_tab_changed, add="+"
         )
         window.bind("<Configure>", self._on_resize, add="+")
 
-    def _tab(self, title):
-        frame = tk.Frame(self.notebook, bg=BG)
-        self.notebook.add(frame, text=title)
+    def _tab(self, title, notebook=None):
+        notebook = notebook or self.notebook
+        frame = tk.Frame(notebook, bg=BG)
+        notebook.add(frame, text=title)
         return frame
+
+    def _build_operation_tab(self):
+        tab = self._tab("Operação")
+        notebook = ttk.Notebook(tab, style="Wimi.TNotebook")
+        notebook.pack(fill="both", expand=True, padx=8, pady=(8, 0))
+        notebook.enable_traversal()
+        self._operation_notebook = notebook
+        self._build_overview_tab(notebook)
+        self._build_cameras_tab(notebook)
+
+    def _build_network_reports_tab(self):
+        tab = self._tab("Rede e relatórios")
+        notebook = ttk.Notebook(tab, style="Wimi.TNotebook")
+        notebook.pack(fill="both", expand=True, padx=8, pady=(8, 0))
+        notebook.enable_traversal()
+        self._network_reports_notebook = notebook
+        self._build_network_tab(notebook)
+        self._build_reports_tab(notebook)
 
     def _section_title(self, parent, title, subtitle=None):
         area = tk.Frame(parent, bg=BG)
@@ -422,8 +443,8 @@ class AnalyticsDesktopWindow:
             cursor="hand2",
         )
 
-    def _build_overview_tab(self):
-        tab = self._tab("Visão geral")
+    def _build_overview_tab(self, notebook=None):
+        tab = self._tab("Visão geral", notebook)
         self._section_title(tab, "Estado operacional", "Resumo persistente do NVR, hardware e módulos locais.")
         summary = tk.Frame(tab, bg=SURFACE, highlightbackground=BORDER, highlightthickness=1)
         summary.pack(fill="x", padx=8, pady=(0, 12))
@@ -449,8 +470,8 @@ class AnalyticsDesktopWindow:
             height=11,
         )
 
-    def _build_cameras_tab(self):
-        tab = self._tab("Câmeras")
+    def _build_cameras_tab(self, notebook=None):
+        tab = self._tab("Câmeras", notebook)
         self._section_title(
             tab,
             "Análise por câmera",
@@ -489,9 +510,10 @@ class AnalyticsDesktopWindow:
                 ("dwell", "Permanência"),
                 ("faces", "Rostos"),
                 ("identity", "Pessoa"),
+                ("latency", "IA: fila + proc."),
                 ("updated", "Última amostra"),
             ),
-            (115, 85, 90, 90, 90, 70, 105, 65, 135, 145),
+            (105, 80, 85, 85, 85, 65, 95, 60, 125, 115, 135),
             height=6,
         )
 
@@ -605,8 +627,8 @@ class AnalyticsDesktopWindow:
             height=11,
         )
 
-    def _build_network_tab(self):
-        tab = self._tab("Rede")
+    def _build_network_tab(self, notebook=None):
+        tab = self._tab("Rede", notebook)
         self._section_title(
             tab,
             "Saúde de rede deste computador",
@@ -766,6 +788,7 @@ class AnalyticsDesktopWindow:
             sashrelief="flat",
         )
         content_pane.pack(fill="both", expand=True, padx=8, pady=(0, 12))
+        self._evidence_content_pane = content_pane
         gallery_shell = tk.Frame(content_pane, bg=BG)
         self._evidence_gallery_canvas = tk.Canvas(
             gallery_shell,
@@ -801,37 +824,47 @@ class AnalyticsDesktopWindow:
         self._bind_evidence_mousewheel(self._evidence_gallery_canvas)
         self._bind_evidence_mousewheel(self._evidence_gallery_frame)
 
-        analysis_shell = tk.PanedWindow(
-            content_pane,
-            orient=tk.HORIZONTAL,
-            bg=BORDER,
-            bd=0,
-            sashwidth=6,
-            sashrelief="flat",
-        )
+        analysis_shell = ttk.Notebook(content_pane, style="Wimi.TNotebook")
         activity_tab = tk.Frame(analysis_shell, bg=BG)
         people_tab = tk.Frame(analysis_shell, bg=BG)
         self._evidence_activity_tab = activity_tab
         self._evidence_people_tab = people_tab
+        self._evidence_analysis_notebook = analysis_shell
         self._build_behavior_panel(activity_tab)
         self._build_people_panel(people_tab)
-        analysis_shell.add(activity_tab, minsize=500, width=720, stretch="always")
-        analysis_shell.add(people_tab, minsize=390, width=480, stretch="always")
+        analysis_shell.add(activity_tab, text="Atividade e trajetos")
+        analysis_shell.add(people_tab, text="Pessoas observadas")
+        analysis_shell.enable_traversal()
         content_pane.add(
             gallery_shell,
-            minsize=100,
-            height=130,
-            stretch="never",
+            minsize=110,
+            height=300,
+            stretch="always",
         )
         content_pane.add(
             analysis_shell,
-            minsize=320,
-            height=390,
+            minsize=280,
+            height=330,
             stretch="always",
         )
+        content_pane.after_idle(self._position_initial_evidence_split)
 
-    def _build_reports_tab(self):
-        tab = self._tab("Relatórios")
+    def _position_initial_evidence_split(self):
+        pane = self._evidence_content_pane
+        if pane is None or not pane.winfo_exists():
+            return
+        total_height = pane.winfo_height()
+        if total_height <= 1:
+            pane.after(25, self._position_initial_evidence_split)
+            return
+        gallery_height = max(110, min(300, total_height - 320))
+        try:
+            pane.sash_place(0, 0, gallery_height)
+        except tk.TclError:
+            return
+
+    def _build_reports_tab(self, notebook=None):
+        tab = self._tab("Relatórios", notebook)
         self._section_title(tab, "Histórico persistente", "Snapshots são gravados por mudança ou intervalo de segurança.")
         body = tk.PanedWindow(tab, orient="vertical", bg=BG, sashwidth=5, bd=0)
         body.pack(fill="both", expand=True, padx=8, pady=(0, 12))
@@ -1062,6 +1095,15 @@ class AnalyticsDesktopWindow:
                     f"{display_name} ({role_label})" if role_label else display_name
                 )
             identity = ", ".join(identity_labels) or "-"
+            queue_delay = vision_item.get("queue_delay_ms")
+            processing_duration = vision_item.get("processing_duration_ms")
+            try:
+                latency = (
+                    f"{max(0.0, float(queue_delay)):.0f} + "
+                    f"{max(0.0, float(processing_duration)):.0f} ms"
+                )
+            except (TypeError, ValueError, OverflowError):
+                latency = "-"
             rows.append(
                 (
                     f"camera-{index}",
@@ -1077,6 +1119,7 @@ class AnalyticsDesktopWindow:
                         _duration_text(vision_item.get("presence_duration_seconds")),
                         vision_item.get("face_count") if vision_item.get("face_count") is not None else "-",
                         identity,
+                        latency,
                         vision_item.get("last_analyzed_at") or "-",
                     ),
                 )

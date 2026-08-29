@@ -306,19 +306,28 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         self.assertTrue(controller.show())
         controller.window.geometry("980x760")
         controller.notebook.select(controller._evidence_tab)
+        controller._evidence_analysis_notebook.select(
+            controller._evidence_activity_tab
+        )
         controller._behavior_notebook.select(1)
         self.root.update()
 
         self.assertGreaterEqual(controller.window.winfo_width(), 980)
         self.assertGreaterEqual(controller.window.winfo_height(), 760)
-        self.assertGreater(controller._trees["events"].winfo_height(), 80)
-        self.assertGreater(controller._trees["people"].winfo_height(), 80)
+        self.assertGreater(controller._evidence_gallery_canvas.winfo_height(), 100)
+        self.assertGreater(controller._trees["events"].winfo_height(), 40)
+        controller._evidence_analysis_notebook.select(
+            controller._evidence_people_tab
+        )
+        self.root.update()
+        self.assertGreater(controller._trees["people"].winfo_height(), 40)
 
         controller.notebook.select(0)
         self.root.update()
         controller.notebook.select(controller._evidence_tab)
         self.root.update()
         self.assertEqual(controller._behavior_notebook.index("current"), 1)
+        self.assertEqual(controller._evidence_analysis_notebook.index("current"), 1)
         controller.destroy()
 
     def test_camera_tab_shows_manually_assigned_role_after_recognition(self):
@@ -327,6 +336,8 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
                 return {
                     "farmacia": {
                         "state": "active",
+                        "queue_delay_ms": 12.4,
+                        "processing_duration_ms": 136.2,
                         "identities": [
                             {
                                 "display_name": "Maria",
@@ -349,6 +360,7 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         camera_values = controller._trees["cameras"].item("camera-0", "values")
 
         self.assertIn("Maria (Funcionário)", camera_values)
+        self.assertIn("12 + 136 ms", camera_values)
         controller.destroy()
 
     def test_camera_tab_unifies_repeated_identifications_and_active_state(self):
@@ -506,17 +518,38 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         top_level_tabs = [
             controller.notebook.tab(tab, "text") for tab in controller.notebook.tabs()
         ]
-        self.assertEqual(len(top_level_tabs), 5)
-        self.assertIn("Evidências", top_level_tabs)
-        self.assertNotIn("Comportamento", top_level_tabs)
-        self.assertNotIn("Pessoas", top_level_tabs)
+        self.assertEqual(
+            top_level_tabs,
+            ["Operação", "Evidências", "Rede e relatórios"],
+        )
+        self.assertEqual(
+            [
+                controller._operation_notebook.tab(tab, "text")
+                for tab in controller._operation_notebook.tabs()
+            ],
+            ["Visão geral", "Câmeras"],
+        )
+        self.assertEqual(
+            [
+                controller._network_reports_notebook.tab(tab, "text")
+                for tab in controller._network_reports_notebook.tabs()
+            ],
+            ["Rede", "Relatórios"],
+        )
         self.assertIsNone(controller._evidence_notebook)
         self.assertIs(controller._evidence_capture_tab, controller._evidence_tab)
+        self.assertEqual(
+            [
+                controller._evidence_analysis_notebook.tab(tab, "text")
+                for tab in controller._evidence_analysis_notebook.tabs()
+            ],
+            ["Atividade e trajetos", "Pessoas observadas"],
+        )
 
         controller.hide()
         self.assertTrue(controller.show())
         self.assertIs(controller.window, first_window)
-        self.assertEqual(len(controller.notebook.tabs()), 5)
+        self.assertEqual(len(controller.notebook.tabs()), 3)
 
         controller.destroy()
         self.assertIsNone(controller.window)
@@ -557,7 +590,7 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
 
         self.assertIsInstance(embedded_frame, tk.Frame)
         self.assertIs(embedded_frame.winfo_toplevel(), self.root)
-        self.assertEqual(len(controller.notebook.tabs()), 5)
+        self.assertEqual(len(controller.notebook.tabs()), 3)
 
         controller.hide()
         self.assertTrue(controller.show())

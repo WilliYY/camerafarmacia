@@ -19,6 +19,7 @@ import time
 import types
 import unittest
 import urllib.error
+from unittest.mock import patch
 
 
 def load_manager_copy():
@@ -1053,6 +1054,64 @@ class StorageSafetyTests(unittest.TestCase):
         self.assertIn("apply_identity_overlay", stream_source)
         self.assertIn("get_vision_identity_overlay", overlay_source)
         self.assertIn("render_identity_overlay", overlay_source)
+
+    def test_preview_keeps_only_latest_pending_ui_frame(self):
+        callbacks = []
+
+        class FakeRoot:
+            def after(self, _delay, callback):
+                callbacks.append(callback)
+
+            def call(self, *_args):
+                return None
+
+        class FakeLabel:
+            def __init__(self):
+                self.image = None
+
+            def configure(self, **values):
+                self.image = values.get("image")
+
+        widget = self.module.LiveCameraWidget.__new__(self.module.LiveCameraWidget)
+        widget.app = types.SimpleNamespace(root=FakeRoot())
+        widget.video_lbl = FakeLabel()
+        widget.running = True
+        widget.photo = None
+        widget.current_error_msg = ""
+        widget.is_online = False
+        widget.connectivity_status = "connecting"
+        widget.last_frame_at = None
+        widget._display_lock = threading.Lock()
+        widget._pending_display_image = None
+        widget._display_update_scheduled = False
+        widget.update_header_text = lambda: None
+        first = object()
+        latest = object()
+
+        with patch.object(
+            self.module.ImageTk,
+            "PhotoImage",
+            side_effect=lambda image: image,
+            create=True,
+        ):
+            widget.update_image(first)
+            widget.update_image(latest)
+            self.assertEqual(len(callbacks), 1)
+            callbacks.pop()()
+
+        self.assertIs(widget.photo, latest)
+        self.assertIs(widget.video_lbl.image, latest)
+
+    def test_analytics_maintenance_forwards_collector_time(self):
+        source = inspect.getsource(
+            self.module.CameraManagerApp._start_wimi_analytics_worker
+        )
+
+        self.assertIn("def run_analytics_maintenance(now=None):", source)
+        self.assertIn("evidence_archive.cleanup(now=now)", source)
+        self.assertIn("face_service.cleanup_provisional(now=now)", source)
+        self.assertIn("sample_interval_seconds=0.5", source)
+        self.assertIn("face_interval_seconds=0.5", source)
 
     def test_stop_sequence_never_kills_external_python_from_stale_lock(self):
         app = self.new_app()

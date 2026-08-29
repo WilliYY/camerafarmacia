@@ -397,6 +397,8 @@ class VisionCoordinator:
         self._last_worker_error_at = -1e9
         self._pending_events = deque(maxlen=64)
         self._dropped_event_count = 0
+        self._submitted_frame_count = 0
+        self._replaced_frame_count = 0
 
     @property
     def running(self):
@@ -474,12 +476,16 @@ class VisionCoordinator:
             try:
                 self._queue.get_nowait()
                 self._queue.task_done()
+                with self._lock:
+                    self._replaced_frame_count += 1
             except queue.Empty:
                 pass
             try:
                 self._queue.put_nowait(item)
             except queue.Full:
                 return False
+        with self._lock:
+            self._submitted_frame_count += 1
         return True
 
     def _worker(self):
@@ -491,13 +497,40 @@ class VisionCoordinator:
             try:
                 if item is None:
                     continue
+                processing_started = time.monotonic()
                 try:
                     self.process_frame_now(*item[:3], monotonic_now=item[3])
                 except Exception as error:
                     self._record_worker_error(item[0], item[2], error)
                     time.sleep(0.1)
+                finally:
+                    processing_finished = time.monotonic()
+                    self._record_performance(
+                        item[0],
+                        queue_delay_ms=max(
+                            0.0, (processing_started - item[3]) * 1000.0
+                        ),
+                        processing_duration_ms=max(
+                            0.0, (processing_finished - processing_started) * 1000.0
+                        ),
+                    )
             finally:
                 self._queue.task_done()
+
+    def _record_performance(self, stream, queue_delay_ms, processing_duration_ms):
+        with self._lock:
+            snapshot = dict(self._snapshots.get(stream) or {})
+            snapshot.update(
+                {
+                    "queue_delay_ms": round(float(queue_delay_ms), 1),
+                    "processing_duration_ms": round(
+                        float(processing_duration_ms), 1
+                    ),
+                    "submitted_frame_count": self._submitted_frame_count,
+                    "replaced_frame_count": self._replaced_frame_count,
+                }
+            )
+            self._snapshots[stream] = snapshot
 
     def _record_worker_error(self, stream, occurred_at, error):
         self._clear_identity_state(stream)

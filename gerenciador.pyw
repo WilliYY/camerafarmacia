@@ -1740,6 +1740,9 @@ class LiveCameraWidget(tk.Frame):
         self.thread = None
         self.running = False
         self.photo = None
+        self._display_lock = threading.Lock()
+        self._pending_display_image = None
+        self._display_update_scheduled = False
         self.target_width = 620  # Tamanho padrão, será ajustado dinamicamente
         self.current_error_msg = ""
         self.is_online = False
@@ -1982,6 +1985,8 @@ class LiveCameraWidget(tk.Frame):
 
     def stop_stream(self):
         self.running = False
+        with self._display_lock:
+            self._pending_display_image = None
         # Fecha a conexão MJPEG ativa para liberar imediatamente
         if hasattr(self, '_mjpeg_response') and self._mjpeg_response:
             try:
@@ -2115,24 +2120,39 @@ class LiveCameraWidget(tk.Frame):
         self.is_online = True
         self.connectivity_status = "online"
         self.last_frame_at = time.time()
-        def apply_image():
-            if not self.running:
+        with self._display_lock:
+            self._pending_display_image = pil_image
+            if self._display_update_scheduled:
                 return
-            try:
-                old_photo = getattr(self, "photo", None)
-                photo = ImageTk.PhotoImage(pil_image)
-                self.photo = photo
-                self.video_lbl.configure(image=photo, text="", compound="none")
-                self.video_lbl.image = photo
-                self.update_header_text()
-                if old_photo:
-                    try:
-                        self.app.root.call("image", "delete", old_photo)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-        self.app.root.after(0, apply_image)
+            self._display_update_scheduled = True
+        try:
+            self.app.root.after(0, self._apply_pending_image)
+        except Exception:
+            with self._display_lock:
+                self._pending_display_image = None
+                self._display_update_scheduled = False
+
+    def _apply_pending_image(self):
+        with self._display_lock:
+            pil_image = self._pending_display_image
+            self._pending_display_image = None
+            self._display_update_scheduled = False
+        if not self.running or pil_image is None:
+            return
+        try:
+            old_photo = getattr(self, "photo", None)
+            photo = ImageTk.PhotoImage(pil_image)
+            self.photo = photo
+            self.video_lbl.configure(image=photo, text="", compound="none")
+            self.video_lbl.image = photo
+            self.update_header_text()
+            if old_photo:
+                try:
+                    self.app.root.call("image", "delete", old_photo)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def open_fullscreen(self):
         fs_win = tk.Toplevel(self.app.root)
@@ -6537,11 +6557,11 @@ class CameraManagerApp:
                 max_total_bytes=768 * 1024 * 1024,
                 store_identifiable_face_previews=True,
             )
-            def run_analytics_maintenance():
-                result = dict(evidence_archive.cleanup())
+            def run_analytics_maintenance(now=None):
+                result = dict(evidence_archive.cleanup(now=now))
                 try:
                     result["provisional_faces_deleted"] = int(
-                        face_service.cleanup_provisional()
+                        face_service.cleanup_provisional(now=now)
                     )
                 except Exception as error:
                     result["provisional_faces_deleted"] = 0
@@ -6565,8 +6585,8 @@ class CameraManagerApp:
                 evidence_archive=evidence_archive,
                 person_detector=person_detector,
                 hardware_guard=self.vision_hardware_guard,
-                sample_interval_seconds=1.0,
-                face_interval_seconds=1.0,
+                sample_interval_seconds=0.5,
+                face_interval_seconds=0.5,
                 person_interval_seconds=5.0,
                 queue_size=2,
             )
@@ -6664,7 +6684,7 @@ class CameraManagerApp:
         for widget in getattr(self, "camera_widgets", {}).values():
             if not widget.expanded:
                 widget.expand()
-        self.add_log("Visao local ativada nos previews abertos (maximo de 1 amostra/s por camera).")
+        self.add_log("Visao local ativada nos previews abertos (maximo de 2 amostras/s por camera).")
 
     def submit_vision_frame(self, stream, image):
         vision = getattr(self, "_vision_coordinator", None)

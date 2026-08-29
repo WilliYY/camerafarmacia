@@ -599,6 +599,93 @@ class BiometricStoreTests(unittest.TestCase):
             self.assertNotIn(b"Thiago", db_path.read_bytes())
             store.close()
 
+    def test_unknown_confirmation_is_scoped_per_camera_before_creating_cluster(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = BiometricStore(Path(temp) / "biometric.sqlite3")
+            service = LocalFaceService(
+                store,
+                backend=FakeFaceBackend(embeddings=[[0.0, 1.0, 0.0]]),
+                protector=FakeProtector(),
+            )
+            image = Image.new("RGB", (96, 96), "white")
+
+            self.assertEqual(service.analyze_frame("farmacia", image)["identities"], [])
+            self.assertEqual(service.analyze_frame("farmacia2", image)["identities"], [])
+            self.assertEqual(service.analyze_frame("farmacia", image)["identities"], [])
+            result = service.analyze_frame("farmacia", image)
+
+            self.assertEqual(len(result["identities"]), 1)
+            self.assertEqual(len(store.list_provisional_clusters()), 1)
+            store.close()
+
+    def test_same_provisional_face_survives_moderate_embedding_variation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = BiometricStore(Path(temp) / "biometric.sqlite3")
+            backend = FakeFaceBackend(embeddings=[[1.0, 0.0, 0.0]])
+            service = LocalFaceService(
+                store,
+                backend=backend,
+                protector=FakeProtector(),
+            )
+            image = Image.new("RGB", (96, 96), "white")
+            for _ in range(3):
+                created = service.analyze_frame("farmacia", image)
+            profile_id = created["identities"][0]["profile_id"]
+
+            backend.embeddings = [[0.50, 0.8660254, 0.0]]
+            varied = service.analyze_frame("farmacia", image)
+
+            self.assertEqual(varied["identities"][0]["profile_id"], profile_id)
+            self.assertEqual(len(store.list_provisional_clusters()), 1)
+            store.close()
+
+    def test_ambiguous_distinct_provisional_faces_are_not_merged(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = BiometricStore(Path(temp) / "biometric.sqlite3")
+            service = LocalFaceService(
+                store,
+                backend=FakeFaceBackend(),
+                protector=FakeProtector(),
+            )
+            service._provisional_profiles = {
+                "first": [1.0, 0.0, 0.0],
+                "second": [0.0, 1.0, 0.0],
+            }
+            service._provisional_metadata = {
+                "first": {"observation_count": 5},
+                "second": {"observation_count": 4},
+            }
+
+            self.assertIsNone(
+                service._match_provisional([0.70710678, 0.70710678, 0.0])
+            )
+            store.close()
+
+    def test_one_provisional_cluster_is_not_assigned_to_two_faces_in_same_frame(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = BiometricStore(Path(temp) / "biometric.sqlite3")
+            backend = FakeFaceBackend(embeddings=[[1.0, 0.0, 0.0]])
+            service = LocalFaceService(
+                store,
+                backend=backend,
+                protector=FakeProtector(),
+            )
+            image = Image.new("RGB", (96, 96), "white")
+            for _ in range(3):
+                service.analyze_frame("farmacia", image)
+
+            backend.embeddings = [[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
+            result = service.analyze_frame("farmacia", image)
+            provisional_ids = [
+                item["profile_id"]
+                for item in result["identities"]
+                if item.get("provisional")
+            ]
+
+            self.assertEqual(len(provisional_ids), 1)
+            self.assertEqual(len(set(provisional_ids)), 1)
+            store.close()
+
     def test_provisional_faces_expire_after_ten_days(self):
         with tempfile.TemporaryDirectory() as temp:
             store = BiometricStore(Path(temp) / "biometric.sqlite3")
@@ -1074,6 +1161,30 @@ class VisionCoordinatorTests(unittest.TestCase):
 
         self.assertLessEqual(coordinator.pending_count, 2)
         self.assertFalse(coordinator.running)
+
+    def test_worker_reports_bounded_internal_analysis_delay(self):
+        processed = threading.Event()
+
+        class MeasuredCoordinator(VisionCoordinator):
+            def process_frame_now(self, stream, *_args, **_kwargs):
+                self._save_snapshot(stream, {"stream": stream, "state": "active"})
+                processed.set()
+                return {"state": "active"}
+
+        coordinator = MeasuredCoordinator(
+            store=FakeVisionStore(),
+            sample_interval_seconds=0,
+            queue_size=2,
+        )
+        coordinator.start()
+        coordinator.submit("farmacia", Image.new("RGB", (64, 36), "black"))
+        self.assertTrue(processed.wait(1))
+        self.assertTrue(coordinator.stop(timeout=2))
+
+        snapshot = coordinator.snapshot()["farmacia"]
+        self.assertGreaterEqual(snapshot["queue_delay_ms"], 0.0)
+        self.assertGreaterEqual(snapshot["processing_duration_ms"], 0.0)
+        self.assertIn("replaced_frame_count", snapshot)
 
     def test_stop_reports_timeout_and_keeps_live_thread_reference(self):
         started = threading.Event()
