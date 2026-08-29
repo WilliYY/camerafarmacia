@@ -32,6 +32,11 @@ PROVISIONAL_EQUIVALENT_CLUSTER_THRESHOLD = 0.65
 PROVISIONAL_PENDING_THRESHOLD = 0.45
 PROVISIONAL_TRACK_THRESHOLD = 0.20
 PROVISIONAL_TRACK_MAX_AGE_SECONDS = 2.0
+FACE_GALLERY_MAX_TEMPLATES = 5
+FACE_GALLERY_DIVERSITY_THRESHOLD = 0.92
+FACE_GALLERY_ADMISSION_THRESHOLD = 0.50
+FACE_GALLERY_CONFIRMATION_THRESHOLD = 0.80
+FACE_GALLERY_CONFIRMATION_SECONDS = 15.0
 
 
 def normalize_profile_role(value):
@@ -220,33 +225,60 @@ class LocalFaceService:
         self.available = bool(self.backend.available)
         self.status = self.backend.status
         self._profiles = {}
+        self._profile_galleries = {}
         self._names = {}
         self._roles = {}
         self._provisional_profiles = {}
+        self._provisional_galleries = {}
         self._provisional_names = {}
         self._provisional_crops = {}
         self._provisional_metadata = {}
         self._pending_unknowns = []
         self._provisional_tracks = {}
+        self._pending_provisional_templates = {}
         self._last_provisional_write = {}
         self._frame_sequence = 0
         if self.available:
             self.refresh_profiles()
             self.refresh_provisional_clusters()
 
-    def _encode(self, display_name, embedding, role):
+    @staticmethod
+    def _embedding_gallery(embedding, embeddings=None):
+        primary = [float(item) for item in embedding]
+        if not primary or not all(math.isfinite(item) for item in primary):
+            raise ValueError("face_embedding_invalid")
+        gallery = [primary]
+        candidates = embeddings if isinstance(embeddings, list) else []
+        for candidate in candidates:
+            if not isinstance(candidate, list) or len(candidate) != len(primary):
+                continue
+            normalized = [float(item) for item in candidate]
+            if not all(math.isfinite(item) for item in normalized):
+                continue
+            if any(_cosine_similarity(normalized, saved) >= 0.9999 for saved in gallery):
+                continue
+            gallery.append(normalized)
+            if len(gallery) >= FACE_GALLERY_MAX_TEMPLATES:
+                break
+        return gallery
+
+    def _encode(self, display_name, embedding, role, embeddings=None):
+        gallery = self._embedding_gallery(embedding, embeddings)
         value = {
-            "schema_version": 1,
+            "schema_version": 2 if len(gallery) > 1 else 1,
             "model_id": self.backend.model_id,
             "display_name": display_name,
             "role": normalize_profile_role(role),
-            "embedding": [float(item) for item in embedding],
+            "embedding": gallery[0],
         }
+        if len(gallery) > 1:
+            value["embeddings"] = gallery
         return json.dumps(value, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
     def _decode(self, protected):
         payload = json.loads(self.protector.unprotect(bytes(protected)).decode("utf-8"))
-        if payload.get("schema_version") != 1 or payload.get("model_id") != self.backend.model_id:
+        schema_version = payload.get("schema_version")
+        if schema_version not in {1, 2} or payload.get("model_id") != self.backend.model_id:
             raise ValueError("face_profile_model_mismatch")
         embedding = payload.get("embedding")
         if not isinstance(embedding, list) or not embedding:
@@ -254,25 +286,34 @@ class LocalFaceService:
         display_name = str(payload.get("display_name", "")).strip()
         if not display_name:
             raise ValueError("face_profile_name_missing")
+        gallery = self._embedding_gallery(
+            embedding,
+            payload.get("embeddings") if schema_version == 2 else None,
+        )
         return {
             "display_name": display_name,
             "role": normalize_profile_role(payload.get("role", "authorized")),
-            "embedding": [float(item) for item in embedding],
+            "embedding": gallery[0],
+            "embeddings": gallery,
         }
 
-    def _encode_provisional(self, display_name, embedding, crop_jpeg):
+    def _encode_provisional(self, display_name, embedding, crop_jpeg, embeddings=None):
+        gallery = self._embedding_gallery(embedding, embeddings)
         value = {
-            "schema_version": 1,
+            "schema_version": 2 if len(gallery) > 1 else 1,
             "model_id": self.backend.model_id,
             "display_name": display_name,
-            "embedding": [float(item) for item in embedding],
+            "embedding": gallery[0],
             "crop_jpeg": base64.b64encode(bytes(crop_jpeg)).decode("ascii"),
         }
+        if len(gallery) > 1:
+            value["embeddings"] = gallery
         return json.dumps(value, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
     def _decode_provisional(self, protected):
         payload = json.loads(self.protector.unprotect(bytes(protected)).decode("utf-8"))
-        if payload.get("schema_version") != 1 or payload.get("model_id") != self.backend.model_id:
+        schema_version = payload.get("schema_version")
+        if schema_version not in {1, 2} or payload.get("model_id") != self.backend.model_id:
             raise ValueError("provisional_face_model_mismatch")
         embedding = payload.get("embedding")
         display_name = str(payload.get("display_name") or "").strip()
@@ -281,31 +322,40 @@ class LocalFaceService:
         crop_jpeg = base64.b64decode(payload.get("crop_jpeg") or "", validate=True)
         if not crop_jpeg.startswith(b"\xff\xd8") or len(crop_jpeg) > 64 * 1024:
             raise ValueError("provisional_face_crop_invalid")
+        gallery = self._embedding_gallery(
+            embedding,
+            payload.get("embeddings") if schema_version == 2 else None,
+        )
         return {
             "display_name": display_name,
-            "embedding": [float(item) for item in embedding],
+            "embedding": gallery[0],
+            "embeddings": gallery,
             "crop_jpeg": crop_jpeg,
         }
 
     def refresh_profiles(self):
         profiles = {}
+        galleries = {}
         names = {}
         roles = {}
         for item in self.store.list_profiles(include_payload=True):
             try:
                 decoded = self._decode(item["protected_profile"])
                 profiles[item["profile_id"]] = decoded["embedding"]
+                galleries[item["profile_id"]] = decoded["embeddings"]
                 names[item["profile_id"]] = decoded["display_name"]
                 roles[item["profile_id"]] = decoded["role"]
             except Exception:
                 continue
         with self._lock:
             self._profiles = profiles
+            self._profile_galleries = galleries
             self._names = names
             self._roles = roles
 
     def refresh_provisional_clusters(self):
         profiles = {}
+        galleries = {}
         names = {}
         crops = {}
         metadata = {}
@@ -317,6 +367,7 @@ class LocalFaceService:
                 decoded = self._decode_provisional(item["protected_cluster"])
                 cluster_id = str(item["cluster_id"])
                 profiles[cluster_id] = decoded["embedding"]
+                galleries[cluster_id] = decoded["embeddings"]
                 names[cluster_id] = decoded["display_name"]
                 crops[cluster_id] = decoded["crop_jpeg"]
                 metadata[cluster_id] = {
@@ -329,6 +380,7 @@ class LocalFaceService:
                 continue
         with self._lock:
             self._provisional_profiles = profiles
+            self._provisional_galleries = galleries
             self._provisional_names = names
             self._provisional_crops = crops
             self._provisional_metadata = metadata
@@ -382,12 +434,26 @@ class LocalFaceService:
             number += 1
         return f"Pessoa {number}"
 
+    def _provisional_similarity(self, embedding, cluster_id):
+        gallery = self._provisional_galleries.get(cluster_id)
+        if not gallery:
+            candidate = self._provisional_profiles.get(cluster_id)
+            gallery = [candidate] if candidate is not None else []
+        scores = [_cosine_similarity(embedding, candidate) for candidate in gallery]
+        return max(scores) if scores else -1.0
+
+    def _provisional_cluster_similarity(self, left_id, right_id):
+        return _cosine_similarity(
+            self._provisional_profiles[left_id],
+            self._provisional_profiles[right_id],
+        )
+
     def _match_provisional(self, embedding, excluded_cluster_ids=None):
         excluded_cluster_ids = set(excluded_cluster_ids or ())
         scored = sorted(
             (
-                (_cosine_similarity(embedding, candidate), cluster_id)
-                for cluster_id, candidate in self._provisional_profiles.items()
+                (self._provisional_similarity(embedding, cluster_id), cluster_id)
+                for cluster_id in self._provisional_profiles
                 if cluster_id not in excluded_cluster_ids
             ),
             reverse=True,
@@ -405,9 +471,8 @@ class LocalFaceService:
             ]
             for index, (_score, candidate_id) in enumerate(equivalent):
                 for _other_score, other_id in equivalent[index + 1 :]:
-                    if _cosine_similarity(
-                        self._provisional_profiles[candidate_id],
-                        self._provisional_profiles[other_id],
+                    if self._provisional_cluster_similarity(
+                        candidate_id, other_id
                     ) < PROVISIONAL_EQUIVALENT_CLUSTER_THRESHOLD:
                         return None
             selected_score, cluster_id = max(
@@ -492,9 +557,7 @@ class LocalFaceService:
                 continue
             if monotonic_now - float(track.get("last_seen") or 0.0) > PROVISIONAL_TRACK_MAX_AGE_SECONDS:
                 continue
-            similarity = _cosine_similarity(
-                embedding, self._provisional_profiles[cluster_id]
-            )
+            similarity = self._provisional_similarity(embedding, cluster_id)
             if similarity < PROVISIONAL_TRACK_THRESHOLD:
                 continue
             geometry = self._track_geometry_score(bbox, track.get("bbox"))
@@ -521,19 +584,86 @@ class LocalFaceService:
         for stale_cluster_id in stale:
             tracks.pop(stale_cluster_id, None)
 
+    def _confirmed_candidates(self, embedding):
+        candidates = {}
+        for profile_id, primary in self._profiles.items():
+            gallery = self._profile_galleries.get(profile_id) or [primary]
+            candidates[profile_id] = max(
+                gallery,
+                key=lambda candidate: _cosine_similarity(embedding, candidate),
+            )
+        return candidates
+
     def _resembles_confirmed_profile(self, embedding):
         scored = sorted(
             _cosine_similarity(embedding, candidate)
-            for candidate in self._profiles.values()
+            for candidate in self._confirmed_candidates(embedding).values()
         )
         if not scored or scored[-1] < self.matcher.threshold:
             return False
         second = scored[-2] if len(scored) > 1 else -1.0
         return scored[-1] - second >= self.matcher.minimum_margin
 
-    def _touch_provisional(self, cluster_id, monotonic_now):
+    def _remember_provisional_template(self, cluster_id, embedding, monotonic_now):
+        gallery = self._provisional_galleries.setdefault(
+            cluster_id,
+            [list(self._provisional_profiles[cluster_id])],
+        )
+        candidate = [float(item) for item in embedding]
+        if (
+            len(candidate) != len(gallery[0])
+            or not all(math.isfinite(item) for item in candidate)
+        ):
+            return False
+        best_score = max(
+            _cosine_similarity(candidate, saved) for saved in gallery
+        )
+        if (
+            best_score < FACE_GALLERY_ADMISSION_THRESHOLD
+            or len(gallery) >= FACE_GALLERY_MAX_TEMPLATES
+        ):
+            self._pending_provisional_templates.pop(cluster_id, None)
+            return False
+        if best_score >= FACE_GALLERY_DIVERSITY_THRESHOLD:
+            self._pending_provisional_templates.pop(cluster_id, None)
+            return False
+
+        pending = self._pending_provisional_templates.get(cluster_id)
+        pending_is_compatible = (
+            pending is not None
+            and monotonic_now - float(pending["last_seen"])
+            <= FACE_GALLERY_CONFIRMATION_SECONDS
+            and _cosine_similarity(candidate, pending["embedding"])
+            >= FACE_GALLERY_CONFIRMATION_THRESHOLD
+        )
+        if not pending_is_compatible:
+            self._pending_provisional_templates[cluster_id] = {
+                "embedding": candidate,
+                "count": 1,
+                "last_seen": float(monotonic_now),
+            }
+            return False
+
+        count = int(pending["count"]) + 1
+        confirmed = [
+            ((float(previous) * (count - 1)) + float(current)) / count
+            for previous, current in zip(pending["embedding"], candidate)
+        ]
+        self._pending_provisional_templates.pop(cluster_id, None)
+        gallery.append(confirmed)
+        return True
+
+    def _touch_provisional(self, cluster_id, monotonic_now, embedding=None):
+        gallery_changed = False
+        if embedding is not None:
+            gallery_changed = self._remember_provisional_template(
+                cluster_id, embedding, monotonic_now
+            )
         previous = self._last_provisional_write.get(cluster_id, -1e9)
-        if monotonic_now - previous < PROVISIONAL_WRITE_INTERVAL_SECONDS:
+        if (
+            not gallery_changed
+            and monotonic_now - previous < PROVISIONAL_WRITE_INTERVAL_SECONDS
+        ):
             return
         metadata = self._provisional_metadata.get(cluster_id) or {}
         crop_jpeg = self._provisional_crops.get(cluster_id)
@@ -543,7 +673,12 @@ class LocalFaceService:
             return
         try:
             protected = self.protector.protect(
-                self._encode_provisional(display_name, embedding, crop_jpeg)
+                self._encode_provisional(
+                    display_name,
+                    embedding,
+                    crop_jpeg,
+                    self._provisional_galleries.get(cluster_id),
+                )
             )
             update = getattr(self.store, "update_provisional_cluster", None)
             updated = callable(update) and update(
@@ -585,7 +720,7 @@ class LocalFaceService:
         if match is not None:
             cluster_id, confidence = match
             self._remember_provisional_track(stream, cluster_id, bbox, monotonic_now)
-            self._touch_provisional(cluster_id, monotonic_now)
+            self._touch_provisional(cluster_id, monotonic_now, embedding)
             return cluster_id, confidence
 
         stream = str(stream)
@@ -651,6 +786,7 @@ class LocalFaceService:
             return None
         self._pending_unknowns.remove(best)
         self._provisional_profiles[cluster_id] = list(best["embedding"])
+        self._provisional_galleries[cluster_id] = [list(best["embedding"])]
         self._provisional_names[cluster_id] = display_name
         self._provisional_crops[cluster_id] = crop_jpeg
         self._provisional_metadata[cluster_id] = {
@@ -723,8 +859,14 @@ class LocalFaceService:
                 embedding = self._provisional_profiles.get(cluster_id)
                 if embedding is None:
                     return False
+                gallery = self._provisional_galleries.get(cluster_id) or [embedding]
                 protected = self.protector.protect(
-                    self._encode(display_name, embedding, normalize_profile_role(role))
+                    self._encode(
+                        display_name,
+                        embedding,
+                        normalize_profile_role(role),
+                        gallery,
+                    )
                 )
                 promote = getattr(self.store, "promote_provisional_cluster", None)
                 if not callable(promote):
@@ -733,9 +875,11 @@ class LocalFaceService:
                 if not new_profile_id:
                     return False
                 self._provisional_profiles.pop(cluster_id, None)
+                self._provisional_galleries.pop(cluster_id, None)
                 self._provisional_names.pop(cluster_id, None)
                 self._provisional_crops.pop(cluster_id, None)
                 self._provisional_metadata.pop(cluster_id, None)
+                self._pending_provisional_templates.pop(cluster_id, None)
                 self._last_provisional_write.pop(cluster_id, None)
             self.refresh_profiles()
             return new_profile_id
@@ -818,7 +962,11 @@ class LocalFaceService:
                 bbox = tuple(face["bbox"]) if face.get("bbox") is not None else None
                 if bbox is not None:
                     face_boxes.append(bbox)
-                result = self.matcher.match(f"{stream}:{index}", embedding, self._profiles)
+                result = self.matcher.match(
+                    f"{stream}:{index}",
+                    embedding,
+                    self._confirmed_candidates(embedding),
+                )
                 if result:
                     result["display_name"] = self._names.get(result["profile_id"], "Pessoa cadastrada")
                     result["role"] = self._roles.get(result["profile_id"], "authorized")

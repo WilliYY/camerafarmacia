@@ -35,10 +35,14 @@ def load_manager_copy():
     pil_module = types.ModuleType("PIL")
     pil_module.Image = types.ModuleType("PIL.Image")
     pil_module.ImageTk = types.ModuleType("PIL.ImageTk")
+    pil_module.ImageDraw = types.ModuleType("PIL.ImageDraw")
+    pil_module.ImageFont = types.ModuleType("PIL.ImageFont")
     fake_modules = {
         "PIL": pil_module,
         "PIL.Image": pil_module.Image,
         "PIL.ImageTk": pil_module.ImageTk,
+        "PIL.ImageDraw": pil_module.ImageDraw,
+        "PIL.ImageFont": pil_module.ImageFont,
     }
     previous_modules = {name: sys.modules.get(name) for name in fake_modules}
     try:
@@ -1051,6 +1055,10 @@ class StorageSafetyTests(unittest.TestCase):
         )
 
         self.assertEqual(stream_source.count("_read_mjpeg_frames"), 1)
+        self.assertLess(
+            stream_source.index("inspect_preview_frame"),
+            stream_source.index("submit_vision_frame"),
+        )
         self.assertIn("apply_identity_overlay", stream_source)
         self.assertIn("get_vision_identity_overlay", overlay_source)
         self.assertIn("render_identity_overlay", overlay_source)

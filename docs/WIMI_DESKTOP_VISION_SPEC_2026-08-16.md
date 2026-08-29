@@ -32,7 +32,10 @@ sensivel.
    rede da loja.
 6. A visao reutiliza quadros que o preview Tkinter ja decodificou. Nao abre uma
    segunda conexao, nao liga transcodificacao escondida e nao toca no fluxo
-   `/api/stream.ts` usado pela gravacao.
+   `/api/stream.ts` usado pela gravacao. Antes da exibicao e da fila de visao, a
+   integridade visual e medida em uma amostra fixa de `48x27`: cores sentinela e
+   faixas horizontais brancas/rosas extensas sao rejeitadas. Oito rejeicoes
+   consecutivas refazem somente o consumidor MJPEG do preview.
 7. A fila de visao possui no maximo dois quadros no total e aceita no maximo
    duas amostras por segundo por camera. A fila da IA e a fila de desenho do
    Tkinter substituem quadros antigos pelo mais recente e registram atraso de
@@ -49,6 +52,9 @@ sensivel.
    revisao ficam no payload DPAPI e expiram em 10 dias sem confirmacao. Capturas
    operacionais preservam ate `1280x720` em JPEG 82 e achatam os rostos no
    contexto; uma prancha facial nitida separada e cifrada permite revisao local.
+   O payload aceita, com leitura retrocompativel, ate cinco vetores do mesmo
+   agrupamento. Um angulo distinto so entra nessa galeria depois de duas amostras
+   compativeis em ate 15 segundos; a promocao manual preserva a galeria.
 10. Uma identidade confirmada so e exibida apos correspondencia acima do
     limiar, margem contra o segundo candidato e confirmacao em amostras
     consecutivas. Agrupamentos provisorios usam tambem continuidade espacial de
@@ -132,6 +138,9 @@ produtividade.
   banco biometrico ou nas evidencias;
 - o reconhecimento usa o quadro ja amostrado pelo preview, no maximo duas vezes
   por segundo por camera, sem abrir uma nova conexao com o stream;
+- um quadro reprovado pela integridade visual nao entra na IA, nas evidencias ou
+  na sobreposicao; a interface conserva o ultimo quadro valido durante a
+  recuperacao exclusiva do preview;
 - o limite de memoria e o encerramento do NVR continuam prevalecendo sobre a
   analise opcional.
 

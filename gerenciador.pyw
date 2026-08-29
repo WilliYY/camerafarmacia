@@ -18,6 +18,7 @@ except ImportError as error:
     )
     sys.exit(1)
 
+from wimi_analytics.frame_integrity import FrameIntegrityGuard, assess_frame_integrity
 from wimi_analytics.overlay import render_identity_overlay
 
 import tkinter as tk
@@ -1743,6 +1744,8 @@ class LiveCameraWidget(tk.Frame):
         self._display_lock = threading.Lock()
         self._pending_display_image = None
         self._display_update_scheduled = False
+        self._frame_integrity_guard = FrameIntegrityGuard()
+        self._last_integrity_log_at = 0.0
         self.target_width = 620  # Tamanho padrão, será ajustado dinamicamente
         self.current_error_msg = ""
         self.is_online = False
@@ -1943,40 +1946,31 @@ class LiveCameraWidget(tk.Frame):
             w.target_width = target_w
 
     def is_corrupt_frame(self, pil_image):
-        """Detecta se o frame decodificado possui blocos grandes de corrupção do decoder (verde, magenta ou cinza do ffmpeg)"""
-        try:
-            w, h = pil_image.size
-            if w < 10 or h < 10:
-                return False
-            # Amostra 5 pontos no rodapé da imagem (concentração de erros de decodificação H.264/MJPEG)
-            sample_points = [
-                (int(w * 0.2), int(h * 0.9)),
-                (int(w * 0.4), int(h * 0.9)),
-                (int(w * 0.6), int(h * 0.9)),
-                (int(w * 0.8), int(h * 0.9)),
-                (int(w * 0.5), int(h * 0.95))
-            ]
-            
-            # Garante formato RGB para leitura de canais de cor
-            img_rgb = pil_image.convert("RGB")
-            
-            corrupt_count = 0
-            for x, y in sample_points:
-                r, g, b = img_rgb.getpixel((x, y))
-                # 1. Magenta (Alto R, Baixo G, Alto B)
-                if r > 200 and g < 60 and b > 200:
-                    corrupt_count += 1
-                # 2. Verde Puro (Baixo R, Alto G, Baixo B)
-                elif r < 60 and g > 200 and b < 60:
-                    corrupt_count += 1
-                # 3. Cinza Puro de Dropped Frame (120-136 nos 3 canais)
-                elif 120 <= r <= 136 and 120 <= g <= 136 and 120 <= b <= 136:
-                    corrupt_count += 1
-            
-            # Se a maioria dos pontos no rodapé contiverem as cores padrão de decodificação falha, descarta o frame
-            return corrupt_count >= 4
-        except Exception:
-            return False
+        return not assess_frame_integrity(pil_image)["valid"]
+
+    def inspect_preview_frame(self, pil_image):
+        result = assess_frame_integrity(pil_image)
+        should_reconnect = self._frame_integrity_guard.observe(
+            result["valid"], result.get("reason")
+        )
+        if result["valid"]:
+            return True, False
+
+        now = time.time()
+        streak = self._frame_integrity_guard.consecutive_rejected
+        if streak == 1 or should_reconnect or now - self._last_integrity_log_at >= 30.0:
+            action = (
+                "reconectando somente o preview"
+                if should_reconnect
+                else "aguardando o proximo quadro valido"
+            )
+            self.app.add_log(
+                f"[{self.stream_name.upper()}] Quadro visual invalido descartado "
+                f"({result.get('reason', 'unknown')}); {action}.",
+                "tag_atencao",
+            )
+            self._last_integrity_log_at = now
+        return False, should_reconnect
 
     def start_stream(self):
         self.running = True
@@ -1987,6 +1981,7 @@ class LiveCameraWidget(tk.Frame):
         self.running = False
         with self._display_lock:
             self._pending_display_image = None
+        self._frame_integrity_guard.reset()
         # Fecha a conexão MJPEG ativa para liberar imediatamente
         if hasattr(self, '_mjpeg_response') and self._mjpeg_response:
             try:
@@ -2069,15 +2064,21 @@ class LiveCameraWidget(tk.Frame):
                     try:
                         source_image = Image.open(io.BytesIO(jpeg_data))
                         source_image.load()
+                        frame_valid, should_reconnect = self.inspect_preview_frame(source_image)
+                        if not frame_valid:
+                            if should_reconnect:
+                                try:
+                                    self._mjpeg_response.close()
+                                except Exception:
+                                    pass
+                                self._frame_integrity_guard.reset()
+                                break
+                            continue
                         # Redimensiona mantendo 16:9 - mostra a imagem INTEIRA sem cortes
                         tw = self.target_width
                         th = int(tw * 9 / 16)
                         image = source_image.resize((tw, th), Image.Resampling.BILINEAR)
-                        
-                        # Descarta frames com corrupção visual severa (ex: magenta/verde/cinza)
-                        if self.is_corrupt_frame(image):
-                            continue
-                            
+
                         if self.running:
                             self.app.submit_vision_frame(self.stream_name, source_image)
                             image = self.apply_identity_overlay(image)
@@ -2168,6 +2169,7 @@ class LiveCameraWidget(tk.Frame):
         
         def fs_loop():
             mjpeg_url = f"http://127.0.0.1:1984/api/stream.mjpeg?src={self.stream_name}_mjpeg"
+            integrity_guard = FrameIntegrityGuard()
             while fs_running[0]:
                 try:
                     req = urllib.request.Request(mjpeg_url)
@@ -2212,6 +2214,15 @@ class LiveCameraWidget(tk.Frame):
                                     h = fs_win.winfo_screenheight()
                                 
                                 image = Image.open(io.BytesIO(jpeg_data))
+                                image.load()
+                                integrity = assess_frame_integrity(image)
+                                if not integrity["valid"]:
+                                    if integrity_guard.observe(False, integrity.get("reason")):
+                                        integrity_guard.reset()
+                                        response.close()
+                                        break
+                                    continue
+                                integrity_guard.observe(True)
                                 # Escala mantendo proporção original (sem corte)
                                 img_aspect = image.width / image.height
                                 win_aspect = w / h
@@ -2224,10 +2235,6 @@ class LiveCameraWidget(tk.Frame):
                                 
                                 image = image.resize((new_w, new_h), Image.Resampling.BILINEAR)
                                 
-                                # Descarta frames com corrupção visual severa
-                                if self.is_corrupt_frame(image):
-                                    continue
-
                                 image = self.apply_identity_overlay(image)
 
                                 photo = ImageTk.PhotoImage(image)

@@ -639,6 +639,59 @@ class BiometricStoreTests(unittest.TestCase):
             self.assertEqual(len(store.list_provisional_clusters()), 1)
             store.close()
 
+    def test_provisional_face_gallery_joins_multiple_angles_after_restart(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = BiometricStore(Path(temp) / "biometric.sqlite3")
+            backend = FakeFaceBackend(embeddings=[[1.0, 0.0, 0.0]])
+            protector = FakeProtector()
+            service = LocalFaceService(
+                store,
+                backend=backend,
+                protector=protector,
+            )
+            image = Image.new("RGB", (96, 96), "white")
+            for _ in range(3):
+                created = service.analyze_frame("farmacia", image)
+            profile_id = created["identities"][0]["profile_id"]
+
+            backend.embeddings = [[0.50, 0.8660254, 0.0]]
+            varied = service.analyze_frame("farmacia2", image)
+            self.assertEqual(varied["identities"][0]["profile_id"], profile_id)
+            cluster_id = profile_id.split(":", 1)[1]
+            self.assertEqual(len(service._provisional_galleries[cluster_id]), 1)
+            varied = service.analyze_frame("farmacia2", image)
+            self.assertEqual(varied["identities"][0]["profile_id"], profile_id)
+            self.assertEqual(len(service._provisional_galleries[cluster_id]), 2)
+
+            restarted = LocalFaceService(
+                store,
+                backend=backend,
+                protector=protector,
+            )
+            backend.embeddings = [[0.0, 1.0, 0.0]]
+            side_view = restarted.analyze_frame("farmacia2", image)
+
+            self.assertEqual(side_view["identities"][0]["profile_id"], profile_id)
+            self.assertEqual(len(store.list_provisional_clusters()), 1)
+
+            confirmed_id = restarted.rename_profile(
+                profile_id,
+                "Thiago",
+                role="employee",
+                consent=True,
+            )
+            confirmed = LocalFaceService(
+                store,
+                backend=backend,
+                protector=protector,
+                matcher=IdentityMatcher(confirmations=1),
+            )
+            recognized = confirmed.analyze_frame("farmacia2", image)
+
+            self.assertEqual(recognized["identities"][0]["profile_id"], confirmed_id)
+            self.assertEqual(recognized["identities"][0]["display_name"], "Thiago")
+            store.close()
+
     def test_ambiguous_distinct_provisional_faces_are_not_merged(self):
         with tempfile.TemporaryDirectory() as temp:
             store = BiometricStore(Path(temp) / "biometric.sqlite3")

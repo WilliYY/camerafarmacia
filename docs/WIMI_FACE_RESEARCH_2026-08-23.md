@@ -23,6 +23,9 @@ memoria, instalacao reproduzivel e falha isolada da gravacao.
 - InsightFace: codigo MIT e recursos avancados, mas os modelos publicos
   pre-treinados sao limitados a pesquisa nao comercial salvo licenca separada.
   Tambem adicionaria outro runtime ou servico local sem necessidade atual.
+- CompreFace: oferece API REST e empacotamento Docker, mas acrescenta servicos,
+  imagens e manutencao operacional ao Windows. Para duas cameras, duplica a
+  infraestrutura de reconhecimento e cria dependencia de outro processo 24h.
 
 ## Decisao
 
@@ -48,6 +51,14 @@ Nenhum novo repositorio ou runtime foi adicionado. O OpenCV ja fixado atende a
 comparacao vetorial, reduzindo CPU, superficie de falha e risco operacional em
 relacao a DeepFace, dlib/`face_recognition` ou InsightFace.
 
+Na revisao de 29/08/2026, a decisao foi mantida. O repositorio OpenCV Zoo passou
+a apontar o catalogo atual de modelos para a organizacao oficial do OpenCV no
+Hugging Face, mas YuNet/SFace continuam adequados ao runtime DNN local ja fixado.
+O backend ganhou uma galeria DPAPI de ate cinco angulos por identidade: um vetor
+distinto exige duas amostras compativeis em ate 15 segundos, a persistencia e
+retrocompativel e a galeria acompanha a nomeacao manual. Esse reforco resolve a
+fragmentacao observada sem instalar TensorFlow, Docker ou outro servidor.
+
 ## Proximas validacoes
 
 - Calibrar falso aceite e falsa rejeicao com perfis consentidos e iluminacao real.
@@ -65,3 +76,4 @@ relacao a DeepFace, dlib/`face_recognition` ou InsightFace.
 - https://github.com/ageitgey/face_recognition
 - https://github.com/deepinsight/insightface
 - https://github.com/deepinsight/insightface/blob/master/server/LICENSING.md
+- https://github.com/exadel-inc/CompreFace

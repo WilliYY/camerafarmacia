@@ -251,11 +251,20 @@ podendo pausar a analise sem interromper a gravacao.
 O preview e a fila de visao mantem somente o quadro mais recente quando o PC nao
 consegue acompanhar a chegada, evitando acumular atraso ao longo das horas. A
 tela Cameras mostra separadamente o atraso de fila e o tempo de processamento
-da IA. O agrupamento provisório combina vetor facial e continuidade espacial da
-mesma camera por uma janela curta; empates só sao reaproveitados quando os
-proprios agrupamentos tambem sao compatíveis. Isso reduz fragmentacao, mas nao
-torna reconhecimento facial infalivel: nome real e funcao continuam exigindo
-confirmacao humana.
+da IA. Antes de exibir ou analisar, um filtro de custo fixo descarta quadros com
+cores sentinela ou grandes faixas horizontais brancas/rosas de falha do decoder.
+O ultimo quadro valido permanece na tela; depois de oito rejeicoes consecutivas,
+somente a conexao MJPEG do preview e refeita. O stream bruto da gravacao, o
+go2rtc e os arquivos de video nao sao reiniciados por essa decisao visual.
+
+O agrupamento provisório combina vetor facial e continuidade espacial da mesma
+camera por uma janela curta; empates só sao reaproveitados quando os proprios
+agrupamentos tambem sao compatíveis. Cada `Pessoa N` pode manter uma galeria
+cifrada e limitada a cinco angulos. Um novo angulo precisa corresponder ao perfil
+e aparecer em duas amostras compativeis dentro de 15 segundos antes de ser
+persistido. A galeria sobrevive a reinicializacao e acompanha a promocao para um
+nome confirmado. Isso reduz fragmentacao, mas nao torna reconhecimento facial
+infalivel: nome real e funcao continuam exigindo confirmacao humana.
 
 O YuNet usa limiar de deteccao `0.80`, calibrado localmente com um quadro real da
 camera em 28/08/2026: o limiar anterior `0.90` nao encontrou o rosto distante no
