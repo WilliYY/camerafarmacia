@@ -178,6 +178,7 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
 
         self.assertTrue(controller.show())
         controller.notebook.select(controller._evidence_tab)
+        controller._evidence_notebook.select(controller._evidence_activity_tab)
         self.root.update()
         camera_values = controller._trees["cameras"].item("camera-0", "values")
         summary = controller._labels["behavior_summary"].cget("text")
@@ -243,6 +244,7 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
 
         self.assertTrue(controller.show())
         controller.notebook.select(controller._evidence_tab)
+        controller._evidence_notebook.select(controller._evidence_activity_tab)
         self.root.update()
         rows = [
             controller._trees["profile_activity"].item(item, "values")
@@ -291,6 +293,10 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
 
         controller.notebook.select(controller._evidence_tab)
         self.root.update()
+        self.assertEqual(store.observation_reads, 0)
+
+        controller._evidence_notebook.select(controller._evidence_activity_tab)
+        self.root.update()
         self.assertGreaterEqual(store.observation_reads, 1)
         controller.destroy()
 
@@ -306,28 +312,27 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         self.assertTrue(controller.show())
         controller.window.geometry("980x760")
         controller.notebook.select(controller._evidence_tab)
-        controller._evidence_analysis_notebook.select(
-            controller._evidence_activity_tab
-        )
+        controller._evidence_notebook.select(controller._evidence_capture_tab)
+        self.root.update()
+        self.assertGreater(controller._evidence_gallery_canvas.winfo_height(), 250)
+
+        controller._evidence_notebook.select(controller._evidence_activity_tab)
         controller._behavior_notebook.select(1)
         self.root.update()
 
         self.assertGreaterEqual(controller.window.winfo_width(), 980)
         self.assertGreaterEqual(controller.window.winfo_height(), 760)
-        self.assertGreater(controller._evidence_gallery_canvas.winfo_height(), 100)
-        self.assertGreater(controller._trees["events"].winfo_height(), 40)
-        controller._evidence_analysis_notebook.select(
-            controller._evidence_people_tab
-        )
+        self.assertGreater(controller._trees["events"].winfo_height(), 200)
+        controller._evidence_notebook.select(controller._evidence_people_tab)
         self.root.update()
-        self.assertGreater(controller._trees["people"].winfo_height(), 40)
+        self.assertGreater(controller._trees["people"].winfo_height(), 300)
 
         controller.notebook.select(0)
         self.root.update()
         controller.notebook.select(controller._evidence_tab)
         self.root.update()
         self.assertEqual(controller._behavior_notebook.index("current"), 1)
-        self.assertEqual(controller._evidence_analysis_notebook.index("current"), 1)
+        self.assertEqual(controller._evidence_notebook.index("current"), 2)
         controller.destroy()
 
     def test_camera_tab_shows_manually_assigned_role_after_recognition(self):
@@ -536,14 +541,12 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
             ],
             ["Rede", "Relatórios"],
         )
-        self.assertIsNone(controller._evidence_notebook)
-        self.assertIs(controller._evidence_capture_tab, controller._evidence_tab)
         self.assertEqual(
             [
-                controller._evidence_analysis_notebook.tab(tab, "text")
-                for tab in controller._evidence_analysis_notebook.tabs()
+                controller._evidence_notebook.tab(tab, "text")
+                for tab in controller._evidence_notebook.tabs()
             ],
-            ["Atividade e trajetos", "Pessoas observadas"],
+            ["Capturas", "Atividade e trajetos", "Pessoas observadas"],
         )
 
         controller.hide()

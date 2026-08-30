@@ -179,12 +179,10 @@ class AnalyticsDesktopWindow:
         self._evidence_capture_tab = None
         self._evidence_activity_tab = None
         self._evidence_people_tab = None
-        self._evidence_analysis_notebook = None
         self._behavior_notebook = None
         self._evidence_gallery_canvas = None
         self._evidence_gallery_frame = None
         self._evidence_canvas_window = None
-        self._evidence_content_pane = None
         self._evidence_cards = {}
         self._evidence_selection_vars = {}
         self._evidence_photo_cache = {}
@@ -717,13 +715,24 @@ class AnalyticsDesktopWindow:
     def _build_evidence_tab(self):
         tab = self._tab("Evidências")
         self._evidence_tab = tab
-        self._evidence_notebook = None
-        captures_tab = tab
+        notebook = ttk.Notebook(tab, style="Wimi.TNotebook")
+        notebook.pack(fill="both", expand=True, padx=8, pady=(8, 0))
+        notebook.enable_traversal()
+        self._evidence_notebook = notebook
+
+        captures_tab = tk.Frame(notebook, bg=BG)
+        activity_tab = tk.Frame(notebook, bg=BG)
+        people_tab = tk.Frame(notebook, bg=BG)
         self._evidence_capture_tab = captures_tab
+        self._evidence_activity_tab = activity_tab
+        self._evidence_people_tab = people_tab
+        notebook.add(captures_tab, text="Capturas")
+        notebook.add(activity_tab, text="Atividade e trajetos")
+        notebook.add(people_tab, text="Pessoas observadas")
 
         self._section_title(
             captures_tab,
-            "Capturas, identificações e trajetos",
+            "Capturas e identificações",
             "Contexto protegido e revisão facial local criptografada. Agrupamentos provisórios expiram em 10 dias; nomes reais exigem confirmação manual.",
         )
         actions = tk.Frame(captures_tab, bg=BG)
@@ -779,17 +788,8 @@ class AnalyticsDesktopWindow:
         self._labels["evidence_status"].pack(fill="x")
         self._bind_local_wrap(self._labels["evidence_status"], status_row)
 
-        content_pane = tk.PanedWindow(
-            captures_tab,
-            orient=tk.VERTICAL,
-            bg=BORDER,
-            bd=0,
-            sashwidth=6,
-            sashrelief="flat",
-        )
-        content_pane.pack(fill="both", expand=True, padx=8, pady=(0, 12))
-        self._evidence_content_pane = content_pane
-        gallery_shell = tk.Frame(content_pane, bg=BG)
+        gallery_shell = tk.Frame(captures_tab, bg=BG)
+        gallery_shell.pack(fill="both", expand=True, padx=8, pady=(0, 12))
         self._evidence_gallery_canvas = tk.Canvas(
             gallery_shell,
             bg=BG,
@@ -824,44 +824,11 @@ class AnalyticsDesktopWindow:
         self._bind_evidence_mousewheel(self._evidence_gallery_canvas)
         self._bind_evidence_mousewheel(self._evidence_gallery_frame)
 
-        analysis_shell = ttk.Notebook(content_pane, style="Wimi.TNotebook")
-        activity_tab = tk.Frame(analysis_shell, bg=BG)
-        people_tab = tk.Frame(analysis_shell, bg=BG)
-        self._evidence_activity_tab = activity_tab
-        self._evidence_people_tab = people_tab
-        self._evidence_analysis_notebook = analysis_shell
         self._build_behavior_panel(activity_tab)
         self._build_people_panel(people_tab)
-        analysis_shell.add(activity_tab, text="Atividade e trajetos")
-        analysis_shell.add(people_tab, text="Pessoas observadas")
-        analysis_shell.enable_traversal()
-        content_pane.add(
-            gallery_shell,
-            minsize=110,
-            height=300,
-            stretch="always",
+        notebook.bind(
+            "<<NotebookTabChanged>>", self._on_notebook_tab_changed, add="+"
         )
-        content_pane.add(
-            analysis_shell,
-            minsize=280,
-            height=330,
-            stretch="always",
-        )
-        content_pane.after_idle(self._position_initial_evidence_split)
-
-    def _position_initial_evidence_split(self):
-        pane = self._evidence_content_pane
-        if pane is None or not pane.winfo_exists():
-            return
-        total_height = pane.winfo_height()
-        if total_height <= 1:
-            pane.after(25, self._position_initial_evidence_split)
-            return
-        gallery_height = max(110, min(300, total_height - 320))
-        try:
-            pane.sash_place(0, 0, gallery_height)
-        except tk.TclError:
-            return
 
     def _build_reports_tab(self, notebook=None):
         tab = self._tab("Relatórios", notebook)
@@ -1632,7 +1599,7 @@ class AnalyticsDesktopWindow:
         return self._evidence_subtab_is_selected(self._evidence_capture_tab)
 
     def _activity_tab_is_selected(self):
-        return self._evidence_tab_is_selected()
+        return self._evidence_subtab_is_selected(self._evidence_activity_tab)
 
     def _on_notebook_tab_changed(self, _event=None):
         if self._evidence_tab_is_selected() and self._evidence_gallery_dirty:

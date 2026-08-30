@@ -81,9 +81,10 @@ O gerenciador compara a versão local com a versão publicada no GitHub, mas só
 O painel principal possui duas abas superiores: **Cameras** e **Analises**.
 Analises fica dentro da mesma janela e possui tres areas: `Operacao`,
 `Evidencias` e `Rede e relatorios`. Operacao agrupa Visao geral e Cameras;
-Rede e relatorios mantem suas duas visoes em subabas. Evidencias usa uma unica
-area com galeria rolavel e subabas de largura total para Atividade e trajetos e
-Pessoas observadas. Alternar entre as abas nao reinicia o NVR, o coletor, a
+Rede e relatorios mantem suas duas visoes em subabas. Evidencias separa Capturas,
+Atividade e trajetos e Pessoas observadas em tres subabas de largura e altura
+total, sem comprimir a galeria e as tabelas na mesma tela. Alternar entre as abas
+nao reinicia o NVR, o coletor, a
 visao ou o banco local.
 
 O historico persistente usa SQLite em `sistema/analytics/`, fora do HD de
@@ -209,7 +210,7 @@ O WIMI Analytics roda integrado ao processo do NVR. No modo visual, use as abas
 superiores `Cameras` e `Analises`; a segunda contem `Operacao`, `Evidencias` e
 `Rede e relatorios`. Visao geral e Cameras ficam em Operacao, enquanto Rede e
 Relatorios compartilham a ultima area. Evidencias concentra galeria, atividade,
-trajetos e pessoas, com as analises em subabas de largura total. Trocar de aba
+trajetos e pessoas em tres subabas independentes de largura e altura total. Trocar de aba
 preserva a coleta, os previews e o historico; o fluxo normal nao abre navegador
 nem uma segunda janela.
 
