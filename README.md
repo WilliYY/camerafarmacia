@@ -25,6 +25,12 @@ do go2rtc, e grava os bytes diretamente em arquivos `.ts`. O inicio da
 gravacao e bloqueado se essa rota nao estiver registrada, evitando o falso
 estado "gravando" com arquivo vazio.
 
+Quando o produtor da camera entrega uma faixa de audio de entrada, a mesma rota
+MPEG-TS a inclui no arquivo sem reencode ou uma segunda conexao. O painel mostra
+`video + audio`, `somente video` ou `audio disponivel so para interfone` a partir
+da direcao real anunciada pelo go2rtc. Audio `sendonly` e retorno para o alto-
+falante da camera e nao deve ser apresentado como microfone gravado.
+
 As gravacoes sao organizadas em pastas diarias (`AAAA-MM-DD`). O temporario
 `.recording` fica no mesmo volume do destino validado e e publicado por
 renomeacao atomica, sem gravar o bloco inteiro primeiro no SSD do Windows.
@@ -44,6 +50,11 @@ O grid é responsivo e preserva a proporção original de 16:9:
 - Com duas câmeras abertas, o layout reduz os players para caberem lado a lado.
 - Com uma câmera aberta, o player expande para o maior tamanho útil disponível.
 - O enquadramento é preservado, sem distorção ou corte.
+
+Cada player tambem oferece controles curtos de movimento para cameras Tuya PTZ.
+Uma seta executa um pulso de 450 ms e o mesmo worker sempre envia `STOP`, mesmo
+se a janela for recolhida ou ocorrer erro. O controle e independente da
+gravacao e permanece desativado ate a Tuya Cloud estar configurada.
 
 ### 4. Gestão de Energia e Quedas de Eletricidade
 
@@ -173,6 +184,19 @@ pip install Pillow
 Não edite `sistema/go2rtc/go2rtc.yaml`: ele é gerado a partir da configuração local e é substituído ao iniciar. As credenciais e os identificadores das câmeras ficam somente em `sistema/config.json`, que é ignorado pelo Git.
 
 O gerenciador valida os nomes e as URLs dos streams, gera uma senha local forte para a interface web e publica somente `visualizador.html` na porta do go2rtc. A API, RTSP e o visualizador na rede local exigem autenticação; o navegador solicitará as credenciais ao abrir o painel remoto.
+
+Para habilitar o movimento, abra uma camera no painel e use **Configurar Tuya**.
+Informe o `Access ID`, o `Access Secret` e o data center do projeto oficial
+Tuya Cloud ao qual a conta Smart Life das cameras foi vinculada. O segredo e
+protegido pelo DPAPI do Windows antes de entrar no `config.json`, nao aparece em
+logs e nao e copiado para o arquivo de configuracao compartilhado no HD. A API
+oficial usada e `POST /v1.0/cameras/{device_id}/configs/ptz`.
+
+O movimento nao exige trocar a URL de gravacao. Ja o audio depende do que a
+camera efetivamente fornece ao go2rtc: possuir microfone no aplicativo do
+fabricante nao garante que o firmware o exponha na sessao WebRTC usada pelo
+NVR. Confirme o indicador `video + audio` antes de considerar a faixa sonora
+validada.
 
 ### 3. Configurar o destino das gravações
 

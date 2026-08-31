@@ -20,6 +20,17 @@ except ImportError as error:
 
 from wimi_analytics.frame_integrity import FrameIntegrityGuard, assess_frame_integrity
 from wimi_analytics.overlay import render_identity_overlay
+from wimi_analytics.camera_control import (
+    TUYA_ENDPOINTS,
+    TuyaCloudClient,
+    TuyaPtzPulseController,
+    build_tuya_cloud_config,
+    extract_tuya_device_id,
+    get_go2rtc_stream_capabilities,
+    infer_tuya_endpoint,
+    load_tuya_cloud_credentials,
+    normalize_tuya_cloud_config,
+)
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -1257,6 +1268,7 @@ def carregar_config():
             "trusted_update_hashes": {},
             "retention_days": 90,
             "emergency_cleanup_enabled": False,
+            "tuya_cloud": {},
         }
         backup_path = CONFIG_PATH + ".bak"
         config = None
@@ -1366,6 +1378,10 @@ def carregar_config():
         if config.get("emergency_cleanup_enabled") is not emergency_cleanup_enabled:
             config["emergency_cleanup_enabled"] = emergency_cleanup_enabled
             updated = True
+        tuya_cloud = normalize_tuya_cloud_config(config.get("tuya_cloud"))
+        if config.get("tuya_cloud") != tuya_cloud:
+            config["tuya_cloud"] = tuya_cloud
+            updated = True
         if "gdrive_root" not in config:
             config["gdrive_root"] = defaults["gdrive_root"]
             updated = True
@@ -1386,6 +1402,7 @@ def salvar_config_locked(config):
         config["trusted_update_hashes"] = normalize_trusted_update_hashes(config.get("trusted_update_hashes"))
         config["retention_days"] = normalize_retention_days(config.get("retention_days"))
         config["emergency_cleanup_enabled"] = config.get("emergency_cleanup_enabled") is True
+        config["tuya_cloud"] = normalize_tuya_cloud_config(config.get("tuya_cloud"))
         write_json_atomically(CONFIG_PATH, config)
         shutil.copy2(CONFIG_PATH, CONFIG_PATH + ".bak")
 
@@ -1751,6 +1768,9 @@ class LiveCameraWidget(tk.Frame):
         self.is_online = False
         self.connectivity_status = "connecting"
         self.last_frame_at = None
+        self._last_media_capability_check = 0.0
+        self._ptz_controller = None
+        self._ptz_config_fingerprint = None
         
         # Botão de cabeçalho para expandir/recolher
         self.header_btn = tk.Button(
@@ -1783,6 +1803,27 @@ class LiveCameraWidget(tk.Frame):
         self.video_lbl = tk.Label(self.body_frame, bg="#020204", cursor="hand2")
         self.video_lbl.pack(pady=4)
         self.video_lbl.bind("<Double-Button-1>", lambda e: self.open_fullscreen())
+
+        self.camera_media_status = tk.Frame(self.body_frame, bg="#0B1220", padx=10, pady=5)
+        self.camera_media_status.pack(fill="x", padx=4, pady=(0, 2))
+        self.lbl_media_status = tk.Label(
+            self.camera_media_status,
+            text="Gravação: verificando áudio",
+            font=("Segoe UI", 8, "bold"),
+            fg="#FBBF24",
+            bg="#0B1220",
+            anchor="w",
+        )
+        self.lbl_media_status.pack(side="left")
+        self.lbl_ptz_status = tk.Label(
+            self.camera_media_status,
+            text="Movimento: verificando",
+            font=("Segoe UI", 8),
+            fg="#9CA3AF",
+            bg="#0B1220",
+            anchor="e",
+        )
+        self.lbl_ptz_status.pack(side="right")
         
         # Frame de controles inferiores da câmera (Barra de Ações Estilizada)
         self.controls_frame = tk.Frame(self.body_frame, bg="#111827", bd=1, relief="flat")
@@ -1856,11 +1897,344 @@ class LiveCameraWidget(tk.Frame):
         )
         self.btn_fullscreen.pack(side="right", padx=10, pady=2)
 
+        self.ptz_frame = tk.Frame(self.controls_frame, bg="#111827", padx=4, pady=1)
+        self.ptz_frame.pack(side="right", padx=2, pady=1)
+        tk.Label(
+            self.ptz_frame,
+            text="PTZ",
+            font=("Segoe UI", 8, "bold"),
+            fg="#D1D5DB",
+            bg="#111827",
+        ).pack(side="left", padx=(2, 5))
+        self.ptz_buttons = []
+        for symbol, direction in (("←", "LEFT"), ("↑", "UP"), ("↓", "DOWN"), ("→", "RIGHT")):
+            button = tk.Button(
+                self.ptz_frame,
+                text=symbol,
+                font=("Segoe UI Symbol", 11, "bold"),
+                fg=TEXT_COLOR,
+                bg="#1F2937",
+                activebackground="#2563EB",
+                activeforeground="#FFFFFF",
+                disabledforeground="#6B7280",
+                bd=0,
+                width=3,
+                height=1,
+                cursor="hand2",
+                command=lambda selected=direction: self.move_camera(selected),
+            )
+            button.pack(side="left", padx=2)
+            self.ptz_buttons.append(button)
+        self.btn_ptz_stop = tk.Button(
+            self.ptz_frame,
+            text="■",
+            font=("Segoe UI Symbol", 9, "bold"),
+            fg="#FCA5A5",
+            bg="#1F2937",
+            activebackground="#991B1B",
+            activeforeground="#FFFFFF",
+            disabledforeground="#6B7280",
+            bd=0,
+            width=3,
+            cursor="hand2",
+            command=self.stop_camera_movement,
+        )
+        self.btn_ptz_stop.pack(side="left", padx=(6, 2))
+        self.ptz_buttons.append(self.btn_ptz_stop)
+        self.btn_ptz_config = tk.Button(
+            self.ptz_frame,
+            text="⚙",
+            font=("Segoe UI Symbol", 10, "bold"),
+            fg=TEXT_COLOR,
+            bg="#1F2937",
+            activebackground="#374151",
+            activeforeground="#FFFFFF",
+            bd=0,
+            cursor="hand2",
+            width=3,
+            padx=2,
+            pady=2,
+            command=self.open_ptz_settings,
+        )
+        self.btn_ptz_config.pack(side="left", padx=(6, 2))
+
         # Hover styling effects
         self.app.setup_button_hover(self.btn_folder, "#111827", "#1F2937")
         self.app.setup_button_hover(self.btn_link, "#111827", "#1F2937")
         self.app.setup_button_hover(self.btn_reconnect, "#111827", "#1F2937")
         self.app.setup_button_hover(self.btn_fullscreen, "#111827", "#1F2937")
+        self.app.setup_button_hover(self.btn_ptz_config, "#1F2937", "#374151")
+        self.refresh_ptz_configuration()
+
+    def _stream_url(self):
+        streams = (globals().get("CONFIG") or {}).get("streams") or {}
+        return streams.get(self.stream_name, "") if isinstance(streams, dict) else ""
+
+    def refresh_ptz_configuration(self):
+        config = normalize_tuya_cloud_config((globals().get("CONFIG") or {}).get("tuya_cloud"))
+        device_id = extract_tuya_device_id(self._stream_url())
+        enabled = bool(config and device_id)
+        state = "normal" if enabled else "disabled"
+        cursor = "hand2" if enabled else "arrow"
+        for button in getattr(self, "ptz_buttons", []):
+            button.configure(state=state, cursor=cursor)
+        if not device_id:
+            text = "Movimento: fonte sem PTZ Tuya"
+        elif not config:
+            text = "Movimento: requer Tuya Cloud"
+        else:
+            text = "Movimento: pronto"
+        self.lbl_ptz_status.configure(text=text, fg="#34D399" if enabled else "#FBBF24")
+
+    def _get_ptz_controller(self):
+        config = normalize_tuya_cloud_config((globals().get("CONFIG") or {}).get("tuya_cloud"))
+        device_id = extract_tuya_device_id(self._stream_url())
+        if not config or not device_id:
+            raise ValueError("configure o acesso Tuya Cloud antes de mover a câmera")
+        fingerprint = (
+            config.get("access_id"),
+            config.get("endpoint"),
+            config.get("secret_protected"),
+            device_id,
+        )
+        if self._ptz_controller is not None and self._ptz_config_fingerprint == fingerprint:
+            return self._ptz_controller
+        if self._ptz_controller is not None:
+            self._ptz_controller.request_stop()
+        access_id, secret, endpoint = load_tuya_cloud_credentials(config)
+        client = TuyaCloudClient(access_id, secret, endpoint)
+        self._ptz_controller = TuyaPtzPulseController(
+            lambda direction: client.move(device_id, direction),
+            duration=0.45,
+            callback=self._on_ptz_state_from_worker,
+        )
+        self._ptz_config_fingerprint = fingerprint
+        return self._ptz_controller
+
+    def move_camera(self, direction):
+        try:
+            controller = self._get_ptz_controller()
+            if not controller.pulse(direction):
+                self.lbl_ptz_status.configure(text="Movimento: aguarde", fg="#FBBF24")
+        except Exception as error:
+            self.lbl_ptz_status.configure(text="Movimento: configuração inválida", fg="#F87171")
+            self.app.add_log(
+                f"[PTZ][{self.stream_name.upper()}] Controle indisponível: {error}",
+                "tag_erro",
+            )
+            messagebox.showerror("Movimento da câmera", str(error))
+
+    def stop_camera_movement(self):
+        if self.request_ptz_stop():
+            self.lbl_ptz_status.configure(text="Movimento: parando", fg="#FBBF24")
+
+    def request_ptz_stop(self):
+        if self._ptz_controller is None:
+            return False
+        self._ptz_controller.request_stop()
+        return True
+
+    def _on_ptz_state_from_worker(self, state, detail):
+        def apply_state():
+            if not self.winfo_exists():
+                return
+            if state == "moving":
+                self.lbl_ptz_status.configure(text="Movimento: executando", fg="#60A5FA")
+            elif state == "idle":
+                self.lbl_ptz_status.configure(text="Movimento: pronto", fg="#34D399")
+            else:
+                self.lbl_ptz_status.configure(text="Movimento: falhou", fg="#F87171")
+                self.app.add_log(
+                    f"[PTZ][{self.stream_name.upper()}] Falha de controle: {detail}",
+                    "tag_erro",
+                )
+        try:
+            self.app.root.after(0, apply_state)
+        except Exception:
+            pass
+
+    def close_ptz(self, timeout=6.0):
+        if self._ptz_controller is None:
+            return True
+        return self._ptz_controller.close(timeout=timeout)
+
+    def open_ptz_settings(self):
+        current_window = getattr(self, "_ptz_settings_window", None)
+        if current_window is not None and current_window.winfo_exists():
+            current_window.lift()
+            current_window.focus_force()
+            return
+
+        current = normalize_tuya_cloud_config((globals().get("CONFIG") or {}).get("tuya_cloud"))
+        stream_endpoint = infer_tuya_endpoint(self._stream_url())
+        endpoint_labels = {
+            "Américas": TUYA_ENDPOINTS["america"],
+            "Europa": TUYA_ENDPOINTS["europe"],
+            "China": TUYA_ENDPOINTS["china"],
+            "Índia": TUYA_ENDPOINTS["india"],
+        }
+        selected_label = next(
+            (label for label, endpoint in endpoint_labels.items()
+             if endpoint == current.get("endpoint", stream_endpoint)),
+            "Américas",
+        )
+
+        window = tk.Toplevel(self)
+        self._ptz_settings_window = window
+        window.title("Configurar movimento Tuya")
+        window.configure(bg="#111827")
+        window.resizable(False, False)
+        window.transient(self.app.root)
+        window.grab_set()
+
+        content = tk.Frame(window, bg="#111827", padx=20, pady=18)
+        content.pack(fill="both", expand=True)
+        tk.Label(
+            content,
+            text="Controle de movimento da câmera",
+            font=("Segoe UI", 12, "bold"),
+            fg="#F9FAFB",
+            bg="#111827",
+            anchor="w",
+        ).grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 14))
+
+        access_var = tk.StringVar(value=current.get("access_id", ""))
+        secret_var = tk.StringVar()
+        center_var = tk.StringVar(value=selected_label)
+        fields = (("Access ID", access_var, False), ("Access Secret", secret_var, True))
+        for row, (label, variable, secret_field) in enumerate(fields, start=1):
+            tk.Label(
+                content,
+                text=label,
+                font=("Segoe UI", 9),
+                fg="#D1D5DB",
+                bg="#111827",
+                anchor="w",
+            ).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=6)
+            tk.Entry(
+                content,
+                textvariable=variable,
+                show="•" if secret_field else "",
+                font=("Segoe UI", 9),
+                bg="#1F2937",
+                fg="#F9FAFB",
+                insertbackground="#F9FAFB",
+                relief="flat",
+                width=42,
+            ).grid(row=row, column=1, sticky="ew", pady=6, ipady=5)
+
+        tk.Label(
+            content,
+            text="Data center",
+            font=("Segoe UI", 9),
+            fg="#D1D5DB",
+            bg="#111827",
+        ).grid(row=3, column=0, sticky="w", padx=(0, 12), pady=6)
+        center_combo = ttk.Combobox(
+            content,
+            textvariable=center_var,
+            values=list(endpoint_labels.keys()),
+            state="readonly",
+            width=39,
+        )
+        center_combo.grid(row=3, column=1, sticky="ew", pady=6)
+        tk.Label(
+            content,
+            text=(
+                "O segredo fica protegido pelo Windows. Deixe-o vazio para manter "
+                "o valor já salvo."
+            ),
+            font=("Segoe UI", 8),
+            fg="#9CA3AF",
+            bg="#111827",
+            justify="left",
+            wraplength=430,
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 14))
+
+        actions = tk.Frame(content, bg="#111827")
+        actions.grid(row=5, column=0, columnspan=2, sticky="e")
+
+        def close_window():
+            self._ptz_settings_window = None
+            window.grab_release()
+            window.destroy()
+
+        def save_settings():
+            global CONFIG
+            previous = CONFIG.get("tuya_cloud", {})
+            try:
+                new_config = build_tuya_cloud_config(
+                    access_var.get(),
+                    endpoint_labels[center_var.get()],
+                    secret_var.get(),
+                    existing=current,
+                )
+                CONFIG["tuya_cloud"] = new_config
+                if not salvar_config(CONFIG):
+                    CONFIG["tuya_cloud"] = previous
+                    raise RuntimeError("não foi possível salvar a configuração local")
+                for widget in self.app.camera_widgets.values():
+                    widget.refresh_ptz_configuration()
+                self.app.add_log("Configuração Tuya Cloud salva com segredo protegido pelo Windows.")
+                close_window()
+            except Exception as error:
+                messagebox.showerror("Configurar movimento", str(error), parent=window)
+
+        tk.Button(
+            actions,
+            text="Cancelar",
+            font=("Segoe UI", 9),
+            fg="#D1D5DB",
+            bg="#374151",
+            activebackground="#4B5563",
+            activeforeground="#FFFFFF",
+            bd=0,
+            padx=14,
+            pady=6,
+            command=close_window,
+        ).pack(side="left", padx=4)
+        tk.Button(
+            actions,
+            text="Salvar",
+            font=("Segoe UI", 9, "bold"),
+            fg="#FFFFFF",
+            bg="#2563EB",
+            activebackground="#1D4ED8",
+            activeforeground="#FFFFFF",
+            bd=0,
+            padx=18,
+            pady=6,
+            command=save_settings,
+        ).pack(side="left", padx=4)
+        window.protocol("WM_DELETE_WINDOW", close_window)
+        window.update_idletasks()
+        x = self.app.root.winfo_rootx() + max(20, (self.app.root.winfo_width() - window.winfo_width()) // 2)
+        y = self.app.root.winfo_rooty() + max(20, (self.app.root.winfo_height() - window.winfo_height()) // 2)
+        window.geometry(f"+{x}+{y}")
+
+    def refresh_media_capabilities(self, force=False):
+        now = time.time()
+        if not force and now - self._last_media_capability_check < 10.0:
+            return
+        self._last_media_capability_check = now
+        streams_data = self.app.get_cached_streams_data()
+        capabilities = get_go2rtc_stream_capabilities(streams_data or {}, self.stream_name)
+        if capabilities["incoming_audio"]:
+            text, color = "Gravação: vídeo + áudio", "#34D399"
+        elif capabilities["talkback_audio"]:
+            text, color = "Gravação: somente vídeo | áudio disponível só para interfone", "#FBBF24"
+        elif capabilities["media_active"]:
+            text, color = "Gravação: somente vídeo | microfone não fornecido", "#FBBF24"
+        else:
+            text, color = "Gravação: aguardando mídia", "#9CA3AF"
+
+        def apply_status():
+            if self.winfo_exists():
+                self.lbl_media_status.configure(text=text, fg=color)
+        try:
+            self.app.root.after(0, apply_status)
+        except Exception:
+            pass
 
     def toggle(self):
         if self.expanded:
@@ -1976,6 +2350,11 @@ class LiveCameraWidget(tk.Frame):
         self.running = True
         self.thread = threading.Thread(target=self.stream_loop, daemon=True)
         self.thread.start()
+        threading.Thread(
+            target=self.refresh_media_capabilities,
+            kwargs={"force": True},
+            daemon=True,
+        ).start()
 
     def stop_stream(self):
         self.running = False
@@ -2038,6 +2417,7 @@ class LiveCameraWidget(tk.Frame):
         last_frame_received_time = 0
         
         while self.running:
+            self.refresh_media_capabilities()
             bridge_available = (
                 self.app.managed_go2rtc_running()
                 or getattr(self.app, "_last_go2rtc_ok", False)
@@ -7283,8 +7663,12 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
         # Para as conexões de vídeo das câmeras embutidas antes do encerramento
         if hasattr(self, "camera_widgets"):
             try:
-                for cam_widget in self.camera_widgets.values():
+                camera_widgets = list(self.camera_widgets.values())
+                for cam_widget in camera_widgets:
                     cam_widget.stop_stream()
+                    cam_widget.request_ptz_stop()
+                for cam_widget in camera_widgets:
+                    cam_widget.close_ptz(timeout=6.0)
             except Exception:
                 pass
                 
