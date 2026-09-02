@@ -1082,12 +1082,39 @@ class StorageSafetyTests(unittest.TestCase):
         widget.body_frame = types.SimpleNamespace(pack_forget=lambda: None)
         widget._recalc_camera_sizes = lambda: None
         stop_calls = []
+        audio_stop_calls = []
         widget.stop_stream = lambda: stop_calls.append(True)
+        widget.stop_live_audio = lambda: audio_stop_calls.append(True)
 
         widget.collapse()
 
         self.assertFalse(widget.expanded)
         self.assertEqual(stop_calls, [])
+        self.assertEqual(audio_stop_calls, [True])
+
+    def test_live_audio_selection_mutes_other_cameras(self):
+        app = self.new_app()
+        calls = {"cam1": [], "cam2": []}
+        app.camera_widgets = {
+            name: types.SimpleNamespace(
+                stop_live_audio=lambda stream=name: calls[stream].append(True)
+            )
+            for name in calls
+        }
+
+        app.stop_other_live_audio("cam2")
+
+        self.assertEqual(calls["cam1"], [True])
+        self.assertEqual(calls["cam2"], [])
+
+    def test_live_listening_does_not_change_recording_state(self):
+        source = inspect.getsource(self.module.LiveCameraWidget.toggle_live_audio)
+        recording_source = inspect.getsource(self.module.CameraManagerApp.gravar_bloco_cam)
+
+        self.assertNotIn("recording_active", source)
+        self.assertNotIn("active_connections", source)
+        self.assertIn("/api/stream.ts?src={stream_name}", recording_source)
+        self.assertNotIn("#media=video", recording_source)
 
     def test_continuous_analysis_starts_and_releases_hidden_preview(self):
         widget = self.module.LiveCameraWidget.__new__(

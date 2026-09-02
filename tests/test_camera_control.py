@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import tempfile
 import threading
 import unittest
 
@@ -8,6 +9,8 @@ from wimi_analytics.camera_control import (
     TUYA_ENDPOINTS,
     TuyaCloudClient,
     TuyaPtzPulseController,
+    LiveAudioPlayer,
+    build_live_audio_ffmpeg_command,
     build_tuya_cloud_config,
     build_tuya_signature,
     extract_tuya_device_id,
@@ -32,6 +35,133 @@ class FakeResponse:
 
 
 class CameraControlTests(unittest.TestCase):
+    def test_live_audio_command_decodes_only_local_incoming_audio(self):
+        command = build_live_audio_ffmpeg_command(
+            r"C:\NVR\ffmpeg.exe",
+            "farmacia2",
+        )
+
+        self.assertIn("http://127.0.0.1:1984/api/stream.ts?src=farmacia2", command)
+        self.assertIn("-vn", command)
+        self.assertIn("pcm_s16le", command)
+        self.assertIn("pipe:1", command)
+        self.assertNotIn("password", " ".join(command).lower())
+
+    def test_live_audio_command_rejects_untrusted_stream_name(self):
+        with self.assertRaisesRegex(ValueError, "stream"):
+            build_live_audio_ffmpeg_command("ffmpeg.exe", "../camera")
+
+    def test_live_audio_player_stops_only_its_owned_process(self):
+        played = threading.Event()
+        process_created = threading.Event()
+
+        class FakeStdout:
+            def __init__(self):
+                self._first = True
+
+            def read(self, _size):
+                if self._first:
+                    self._first = False
+                    return b"\x00" * 3200
+                played.wait(1.0)
+                return b""
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdout = FakeStdout()
+                self.terminated = False
+
+            def poll(self):
+                return None if not self.terminated else 0
+
+            def terminate(self):
+                self.terminated = True
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                self.terminated = True
+
+        class FakeSink:
+            def write(self, data, _stop_event):
+                self.data = data
+                played.set()
+                return True
+
+            def close(self):
+                pass
+
+        processes = []
+
+        def process_factory(_command, **_kwargs):
+            process = FakeProcess()
+            processes.append(process)
+            process_created.set()
+            return process
+
+        with tempfile.NamedTemporaryFile(suffix=".exe") as ffmpeg:
+            player = LiveAudioPlayer(
+                ffmpeg.name,
+                process_factory=process_factory,
+                sink_factory=lambda: FakeSink(),
+            )
+            self.assertTrue(player.start("farmacia"))
+            self.assertFalse(player.start("farmacia"))
+            self.assertTrue(process_created.wait(1.0))
+            self.assertTrue(played.wait(1.0))
+            self.assertTrue(player.close(timeout=2.0))
+
+        self.assertEqual(len(processes), 1)
+        self.assertTrue(processes[0].terminated)
+
+    def test_live_audio_player_does_not_misreport_output_failure_as_missing_microphone(self):
+        error_seen = threading.Event()
+        states = []
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdout = self
+                self.terminated = False
+                self.sent = False
+
+            def read(self, _size):
+                if not self.sent:
+                    self.sent = True
+                    return b"\x00" * 3200
+                return b""
+
+            def poll(self):
+                return None if not self.terminated else 0
+
+            def terminate(self):
+                self.terminated = True
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                self.terminated = True
+
+        def callback(state, _detail):
+            states.append(state)
+            if state == "error":
+                error_seen.set()
+
+        with tempfile.NamedTemporaryFile(suffix=".exe") as ffmpeg:
+            player = LiveAudioPlayer(
+                ffmpeg.name,
+                callback=callback,
+                process_factory=lambda _command, **_kwargs: FakeProcess(),
+                sink_factory=lambda: (_ for _ in ()).throw(OSError("sem saida")),
+            )
+            self.assertTrue(player.start("farmacia"))
+            self.assertTrue(error_seen.wait(1.0))
+            player.close(timeout=2.0)
+
+        self.assertIn("error", states)
+        self.assertNotIn("unavailable", states)
+
     def test_media_capabilities_distinguish_microphone_from_talkback(self):
         payload = {
             "camera": {

@@ -21,6 +21,7 @@ except ImportError as error:
 from wimi_analytics.frame_integrity import FrameIntegrityGuard, assess_frame_integrity
 from wimi_analytics.overlay import render_identity_overlay
 from wimi_analytics.camera_control import (
+    LiveAudioPlayer,
     TUYA_ENDPOINTS,
     TuyaCloudClient,
     TuyaPtzPulseController,
@@ -954,6 +955,7 @@ def prune_log_dedup_state(last_logged, suppressed_counts, now, max_entries=500, 
 # Configurações do Projeto
 PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
 GO2RTC_EXE = os.path.join(PROJ_DIR, "sistema", "go2rtc", "go2rtc.exe")
+FFMPEG_EXE = os.path.join(PROJ_DIR, "sistema", "go2rtc", "ffmpeg.exe")
 LOGS_DIR = os.path.join(PROJ_DIR, "sistema", "logs")
 
 # Garante a existência das pastas do projeto
@@ -1770,6 +1772,11 @@ class LiveCameraWidget(tk.Frame):
         self.connectivity_status = "connecting"
         self.last_frame_at = None
         self._last_media_capability_check = 0.0
+        self._incoming_audio_available = False
+        self._live_audio_player = LiveAudioPlayer(
+            FFMPEG_EXE,
+            callback=self._on_live_audio_state_from_worker,
+        )
         self._ptz_controller = None
         self._ptz_config_fingerprint = None
         
@@ -1881,6 +1888,24 @@ class LiveCameraWidget(tk.Frame):
         )
         self.btn_reconnect.pack(side="left", padx=4, pady=2)
 
+        self.btn_live_audio = tk.Button(
+            self.controls_frame,
+            text=" 🔇 Sem microfone",
+            font=("Segoe UI", 8, "bold"),
+            fg=TEXT_COLOR,
+            bg="#111827",
+            activebackground="#065F46",
+            activeforeground="#FFFFFF",
+            disabledforeground="#6B7280",
+            bd=0,
+            cursor="arrow",
+            padx=10,
+            pady=4,
+            state="disabled",
+            command=self.toggle_live_audio,
+        )
+        self.btn_live_audio.pack(side="left", padx=4, pady=2)
+
         # Botão Tela Cheia
         self.btn_fullscreen = tk.Button(
             self.controls_frame,
@@ -1963,6 +1988,7 @@ class LiveCameraWidget(tk.Frame):
         self.app.setup_button_hover(self.btn_folder, "#111827", "#1F2937")
         self.app.setup_button_hover(self.btn_link, "#111827", "#1F2937")
         self.app.setup_button_hover(self.btn_reconnect, "#111827", "#1F2937")
+        self.app.setup_button_hover(self.btn_live_audio, "#111827", "#065F46")
         self.app.setup_button_hover(self.btn_fullscreen, "#111827", "#1F2937")
         self.app.setup_button_hover(self.btn_ptz_config, "#1F2937", "#374151")
         self.refresh_ptz_configuration()
@@ -2058,6 +2084,73 @@ class LiveCameraWidget(tk.Frame):
         if self._ptz_controller is None:
             return True
         return self._ptz_controller.close(timeout=timeout)
+
+    def _on_live_audio_state_from_worker(self, state, detail):
+        def apply_state():
+            if not self.winfo_exists():
+                return
+            if state == "playing":
+                self.btn_live_audio.configure(
+                    text=" 🔊 Silenciar",
+                    state="normal",
+                    cursor="hand2",
+                    bg="#065F46",
+                )
+            elif state in {"connecting", "reconnecting"}:
+                self.btn_live_audio.configure(
+                    text=" 🔇 Cancelar escuta",
+                    state="normal",
+                    cursor="hand2",
+                    bg="#92400E",
+                )
+            elif self._incoming_audio_available:
+                label = " 🔇 Tentar ouvir" if state in {"error", "unavailable"} else " 🔇 Ouvir"
+                self.btn_live_audio.configure(
+                    text=label,
+                    state="normal",
+                    cursor="hand2",
+                    bg="#111827",
+                )
+            else:
+                self.btn_live_audio.configure(
+                    text=" 🔇 Sem microfone",
+                    state="disabled",
+                    cursor="arrow",
+                    bg="#111827",
+                )
+        try:
+            self.app.root.after(0, apply_state)
+        except Exception:
+            pass
+
+    def toggle_live_audio(self):
+        if self._live_audio_player.is_running():
+            self.stop_live_audio()
+            self.app.add_log(
+                f"[{self.stream_name.upper()}] Escuta ao vivo silenciada; gravação não foi alterada."
+            )
+            return
+        if not self._incoming_audio_available:
+            return
+        try:
+            require_trusted_binary(FFMPEG_EXE, "ffmpeg.exe")
+            self.app.stop_other_live_audio(self.stream_name)
+            if self._live_audio_player.start(self.stream_name):
+                self.app.add_log(
+                    f"[{self.stream_name.upper()}] Escuta ao vivo ligada; gravação continua independente."
+                )
+        except Exception as error:
+            self.app.add_log(
+                f"[{self.stream_name.upper()}] Escuta ao vivo indisponível: {error}",
+                "tag_erro",
+            )
+            messagebox.showerror("Áudio da câmera", str(error))
+
+    def stop_live_audio(self):
+        return self._live_audio_player.stop(timeout=0.5)
+
+    def close_live_audio(self, timeout=3.0):
+        return self._live_audio_player.close(timeout=timeout)
 
     def open_ptz_settings(self):
         current_window = getattr(self, "_ptz_settings_window", None)
@@ -2221,17 +2314,39 @@ class LiveCameraWidget(tk.Frame):
         streams_data = self.app.get_cached_streams_data()
         capabilities = get_go2rtc_stream_capabilities(streams_data or {}, self.stream_name)
         if capabilities["incoming_audio"]:
-            text, color = "Gravação: vídeo + áudio", "#34D399"
+            text, color = "Gravação bruta: vídeo + áudio", "#34D399"
         elif capabilities["talkback_audio"]:
-            text, color = "Gravação: somente vídeo | áudio disponível só para interfone", "#FBBF24"
+            text, color = "Gravação bruta: SEM ÁUDIO | câmera oferece somente interfone", "#FBBF24"
         elif capabilities["media_active"]:
-            text, color = "Gravação: somente vídeo | microfone não fornecido", "#FBBF24"
+            text, color = "Gravação bruta: SEM ÁUDIO | microfone não fornecido", "#FBBF24"
         else:
-            text, color = "Gravação: aguardando mídia", "#9CA3AF"
+            text, color = "Gravação bruta: aguardando mídia", "#9CA3AF"
 
         def apply_status():
             if self.winfo_exists():
+                self._incoming_audio_available = bool(capabilities["incoming_audio"])
                 self.lbl_media_status.configure(text=text, fg=color)
+                if self._incoming_audio_available:
+                    if not self._live_audio_player.is_running():
+                        self.btn_live_audio.configure(
+                            text=" 🔇 Ouvir",
+                            state="normal",
+                            cursor="hand2",
+                            bg="#111827",
+                        )
+                else:
+                    self.btn_live_audio.configure(
+                        text=" 🔇 Sem microfone",
+                        state="disabled",
+                        cursor="arrow",
+                        bg="#111827",
+                    )
+                    if self._live_audio_player.is_running():
+                        threading.Thread(
+                            target=self.stop_live_audio,
+                            daemon=True,
+                            name=f"stop-live-audio-{self.stream_name}",
+                        ).start()
         try:
             self.app.root.after(0, apply_status)
         except Exception:
@@ -2277,6 +2392,7 @@ class LiveCameraWidget(tk.Frame):
         self.update_header_text()
         if not self.continuous_analysis:
             self.stop_stream()
+        self.stop_live_audio()
         self.body_frame.pack_forget()
         self.pack_configure(fill="x", expand=False)
         self._recalc_camera_sizes()
@@ -3004,6 +3120,11 @@ class CameraManagerApp:
     def setup_button_hover(self, button, normal_bg, hover_bg):
         button.bind("<Enter>", lambda e: button.configure(bg=hover_bg))
         button.bind("<Leave>", lambda e: button.configure(bg=normal_bg))
+
+    def stop_other_live_audio(self, selected_stream):
+        for stream_name, widget in getattr(self, "camera_widgets", {}).items():
+            if stream_name != selected_stream:
+                widget.stop_live_audio()
 
     def setup_card_hover_glow(self, card, glow_color):
         card.bind("<Enter>", lambda e: card.configure(highlightbackground=glow_color))
@@ -7702,6 +7823,7 @@ WshShell.Run "pythonw.exe gerenciador.pyw --silent", 0, False
                 camera_widgets = list(self.camera_widgets.values())
                 for cam_widget in camera_widgets:
                     cam_widget.stop_stream()
+                    cam_widget.close_live_audio(timeout=3.0)
                     cam_widget.request_ptz_stop()
                 for cam_widget in camera_widgets:
                     cam_widget.close_ptz(timeout=6.0)

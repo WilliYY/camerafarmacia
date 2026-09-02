@@ -26,10 +26,17 @@ gravacao e bloqueado se essa rota nao estiver registrada, evitando o falso
 estado "gravando" com arquivo vazio.
 
 Quando o produtor da camera entrega uma faixa de audio de entrada, a mesma rota
-MPEG-TS a inclui no arquivo sem reencode ou uma segunda conexao. O painel mostra
-`video + audio`, `somente video` ou `audio disponivel so para interfone` a partir
-da direcao real anunciada pelo go2rtc. Audio `sendonly` e retorno para o alto-
+MPEG-TS a inclui no arquivo por padrao, sem reencode ou uma segunda conexao. O
+painel mostra `video + audio`, `SEM AUDIO` ou `somente interfone` a partir da
+direcao real anunciada pelo go2rtc. Audio `sendonly` e retorno para o alto-
 falante da camera e nao deve ser apresentado como microfone gravado.
+
+Cada camera aberta possui o controle `Ouvir`/`Silenciar`. Ele inicia silenciado,
+decodifica somente a faixa de audio pelo FFmpeg local e envia PCM para a API
+`waveOut` do Windows, sem criar arquivos. Apenas uma camera pode ficar audivel
+por vez. Recolher a camera ou encerrar o NVR fecha o processo de escuta; esse
+controle nunca liga, desliga ou reconfigura a gravacao. Se a origem nao anunciar
+audio de entrada, o botao fica desabilitado em vez de reproduzir silencio.
 
 As gravacoes sao organizadas em pastas diarias (`AAAA-MM-DD`). O temporario
 `.recording` fica no mesmo volume do destino validado e e publicado por
@@ -381,7 +388,7 @@ as APIs `/api/v1/*` exigem a sessao criada pela pagina, validam `Host` e
 1. **Preserve a gravação direta.** A gravação deve consumir `/api/stream.ts?src=NOME` via `urllib.request`, sem OpenCV, decode local ou re-encode contínuo.
 2. **Use `127.0.0.1` para a API local.** Evite `localhost` para não depender de resolução IPv6 do Windows.
 3. **Mantenha o MJPEG em thread separada.** A GUI Tkinter não deve bloquear enquanto lê frames.
-4. **Feche streams recolhidos.** Ao recolher uma câmera ou fechar a janela, encerre conexões HTTP e loops de leitura.
+4. **Feche streams recolhidos.** Ao recolher uma câmera ou fechar a janela, encerre a escuta ao vivo e conexões que não sejam necessárias para a análise contínua.
 5. **Não quebre as pastas diárias.** Gravações e sincronização devem respeitar subpastas `AAAA-MM-DD`.
 6. **Proteja contra duplicidade.** O heartbeat JSON é parte crítica da segurança de gravação em rede.
 7. **Evite dependências pesadas.** O projeto foi desenhado para rodar com baixo consumo em máquinas simples.
