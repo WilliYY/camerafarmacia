@@ -1062,6 +1062,89 @@ class StorageSafetyTests(unittest.TestCase):
         self.assertIn("apply_identity_overlay", stream_source)
         self.assertIn("get_vision_identity_overlay", overlay_source)
         self.assertIn("render_identity_overlay", overlay_source)
+        self.assertIn("0.066 if self.expanded else 0.5", stream_source)
+        render_branch = stream_source.index(
+            "if self.expanded", stream_source.index("submit_vision_frame")
+        )
+        self.assertLess(
+            stream_source.index("submit_vision_frame"),
+            render_branch,
+        )
+
+    def test_continuous_analysis_keeps_collapsed_recording_preview_running(self):
+        widget = self.module.LiveCameraWidget.__new__(
+            self.module.LiveCameraWidget
+        )
+        widget.expanded = True
+        widget.continuous_analysis = True
+        widget.update_header_text = lambda: None
+        widget.pack_configure = lambda **_kwargs: None
+        widget.body_frame = types.SimpleNamespace(pack_forget=lambda: None)
+        widget._recalc_camera_sizes = lambda: None
+        stop_calls = []
+        widget.stop_stream = lambda: stop_calls.append(True)
+
+        widget.collapse()
+
+        self.assertFalse(widget.expanded)
+        self.assertEqual(stop_calls, [])
+
+    def test_continuous_analysis_starts_and_releases_hidden_preview(self):
+        widget = self.module.LiveCameraWidget.__new__(
+            self.module.LiveCameraWidget
+        )
+        widget.expanded = False
+        widget.continuous_analysis = False
+        starts = []
+        stops = []
+        widget.start_stream = lambda: starts.append(True)
+        widget.stop_stream = lambda: stops.append(True)
+
+        widget.set_continuous_analysis(True)
+        widget.set_continuous_analysis(False)
+
+        self.assertEqual(starts, [True])
+        self.assertEqual(stops, [True])
+        self.assertFalse(widget.continuous_analysis)
+
+    def test_continuous_analysis_does_not_duplicate_live_preview_thread(self):
+        widget = self.module.LiveCameraWidget.__new__(
+            self.module.LiveCameraWidget
+        )
+        widget.running = True
+        widget.thread = FakeAliveThread()
+
+        self.assertFalse(widget.start_stream())
+        self.assertIsInstance(widget.thread, FakeAliveThread)
+
+    def test_recording_state_controls_continuous_camera_analysis(self):
+        app = self.new_app()
+        app.recording_active = {"cam1": True, "cam2": False}
+        calls = {"cam1": [], "cam2": []}
+        app.camera_widgets = {
+            name: types.SimpleNamespace(
+                set_continuous_analysis=lambda enabled, stream=name: calls[
+                    stream
+                ].append(enabled)
+            )
+            for name in calls
+        }
+
+        app.sync_continuous_vision_streams()
+
+        self.assertEqual(calls["cam1"], [True])
+        self.assertEqual(calls["cam2"], [False])
+
+    def test_recording_lifecycle_requests_continuous_analysis_sync(self):
+        start_source = inspect.getsource(
+            self.module.CameraManagerApp._run_start_sequence_locked
+        )
+        stop_source = inspect.getsource(
+            self.module.CameraManagerApp._run_stop_sequence_locked
+        )
+
+        self.assertIn("request_continuous_vision_sync", start_source)
+        self.assertIn("request_continuous_vision_sync", stop_source)
 
     def test_preview_keeps_only_latest_pending_ui_frame(self):
         callbacks = []

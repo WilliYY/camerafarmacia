@@ -181,6 +181,8 @@ class AnalyticsDesktopWindow:
         self._evidence_activity_tab = None
         self._evidence_people_tab = None
         self._behavior_notebook = None
+        self._people_activity_panes = None
+        self._people_activity_layout_height = 0
         self._evidence_gallery_canvas = None
         self._evidence_gallery_frame = None
         self._evidence_canvas_window = None
@@ -401,6 +403,19 @@ class AnalyticsDesktopWindow:
             if label.winfo_exists():
                 label.configure(wraplength=wraplength)
 
+    def _balance_people_activity_panes(self, event):
+        panes = self._people_activity_panes
+        if event.widget is not panes or event.height < 320:
+            return
+        if event.height == self._people_activity_layout_height:
+            return
+        self._people_activity_layout_height = event.height
+        first_pane_height = max(160, min(int(event.height * 0.42), event.height - 160))
+        try:
+            panes.sash_place(0, 0, first_pane_height)
+        except tk.TclError:
+            pass
+
     def _tree(self, parent, key, columns, widths, height=12):
         wrapper = tk.Frame(parent, bg=BG)
         wrapper.pack(fill="both", expand=True, padx=8, pady=(0, 12))
@@ -555,12 +570,13 @@ class AnalyticsDesktopWindow:
             "<<TreeviewSelect>>", self._update_profile_action_controls, add="+"
         )
 
-    def _build_behavior_panel(self, tab):
-        self._section_title(
-            tab,
-            "Atividade e trajetos observados",
-            "Identificações por câmera e intervalos sem confirmação. O sistema não conhece a localização fora da imagem.",
-        )
+    def _build_behavior_panel(self, tab, show_title=True):
+        if show_title:
+            self._section_title(
+                tab,
+                "Atividade e trajetos observados",
+                "Identificações por câmera e intervalos sem confirmação. O sistema não conhece a localização fora da imagem.",
+            )
         self._labels["profile_activity_summary"] = tk.Label(
             tab,
             text="Nenhum trajeto identificado registrado.",
@@ -717,14 +733,12 @@ class AnalyticsDesktopWindow:
         self._evidence_notebook = notebook
 
         captures_tab = tk.Frame(notebook, bg=BG)
-        activity_tab = tk.Frame(notebook, bg=BG)
-        people_tab = tk.Frame(notebook, bg=BG)
+        people_activity_tab = tk.Frame(notebook, bg=BG)
         self._evidence_capture_tab = captures_tab
-        self._evidence_activity_tab = activity_tab
-        self._evidence_people_tab = people_tab
+        self._evidence_activity_tab = people_activity_tab
+        self._evidence_people_tab = people_activity_tab
         notebook.add(captures_tab, text="Capturas")
-        notebook.add(activity_tab, text="Atividade e trajetos")
-        notebook.add(people_tab, text="Pessoas observadas")
+        notebook.add(people_activity_tab, text="Pessoas e trajetos")
 
         self._section_title(
             captures_tab,
@@ -820,8 +834,7 @@ class AnalyticsDesktopWindow:
         self._bind_evidence_mousewheel(self._evidence_gallery_canvas)
         self._bind_evidence_mousewheel(self._evidence_gallery_frame)
 
-        self._build_behavior_panel(activity_tab)
-        self._build_people_panel(people_tab)
+        self._build_people_activity_panel(people_activity_tab)
         notebook.bind(
             "<<NotebookTabChanged>>", self._on_notebook_tab_changed, add="+"
         )
@@ -857,18 +870,63 @@ class AnalyticsDesktopWindow:
         )
         self._report_detail.pack(fill="both", expand=True)
 
-    def _build_people_panel(self, tab):
+    def _build_people_activity_panel(self, tab):
         self._section_title(
             tab,
-            "Pessoas observadas",
-            "Rostos recorrentes recebem nomes provisórios. Um nome real e uma função só são mantidos após confirmação manual.",
+            "Pessoas, atividade e trajetos",
+            "Identificações locais, tempo observado e sequências entre câmeras reunidos na mesma visão.",
         )
+        self._labels["continuous_analysis_status"] = tk.Label(
+            tab,
+            text="Análise contínua: verificando câmeras em gravação",
+            font=("Segoe UI", 9, "bold"),
+            fg=YELLOW,
+            bg=SURFACE,
+            anchor="w",
+            justify="left",
+            padx=10,
+            pady=7,
+            highlightbackground=BORDER,
+            highlightthickness=1,
+        )
+        self._labels["continuous_analysis_status"].pack(
+            fill="x", padx=8, pady=(0, 8)
+        )
+        self._bind_local_wrap(
+            self._labels["continuous_analysis_status"], tab, padding=32
+        )
+        body = tk.PanedWindow(tab, orient="vertical", bg=BG, sashwidth=6, bd=0)
+        body.pack(fill="both", expand=True, padx=8, pady=(0, 12))
+        people_panel = tk.Frame(
+            body,
+            bg=BG,
+            highlightbackground=BORDER,
+            highlightthickness=1,
+        )
+        activity_panel = tk.Frame(
+            body,
+            bg=BG,
+            highlightbackground=BORDER,
+            highlightthickness=1,
+        )
+        body.add(people_panel, minsize=160)
+        body.add(activity_panel, minsize=160)
+        self._people_activity_panes = body
+        body.bind("<Configure>", self._balance_people_activity_panes, add="+")
+        self._build_people_panel(people_panel, show_title=False)
+        self._build_behavior_panel(activity_panel, show_title=False)
+
+    def _build_people_panel(self, tab, show_title=True):
+        if show_title:
+            self._section_title(
+                tab,
+                "Pessoas observadas",
+                "Rostos recorrentes recebem nomes provisórios. Um nome real e uma função só são mantidos após confirmação manual.",
+            )
         actions = tk.Frame(tab, bg=BG)
-        actions.pack(fill="x", padx=8, pady=(0, 6))
-        primary_actions = tk.Frame(actions, bg=BG)
-        primary_actions.pack(fill="x")
+        actions.pack(fill="x", padx=8, pady=(8 if not show_title else 0, 6))
         tk.Label(
-            primary_actions,
+            actions,
             text="Função:",
             font=("Segoe UI", 9),
             fg=MUTED,
@@ -876,7 +934,7 @@ class AnalyticsDesktopWindow:
         ).pack(side="left")
         self._profile_role_var = tk.StringVar(value="Funcionário")
         role_selector = ttk.Combobox(
-            primary_actions,
+            actions,
             textvariable=self._profile_role_var,
             values=[label for label, _code in PROFILE_ROLE_OPTIONS],
             state="readonly",
@@ -884,18 +942,16 @@ class AnalyticsDesktopWindow:
         )
         role_selector.pack(side="left", padx=(6, 10))
         self._enroll_button = self._button(
-            primary_actions, "Cadastrar rosto", self._enroll_person, GREEN
+            actions, "Cadastrar rosto", self._enroll_person, GREEN
         )
         self._enroll_button.pack(side="left")
-        secondary_actions = tk.Frame(actions, bg=BG)
-        secondary_actions.pack(fill="x", pady=(6, 0))
         self._rename_button = self._button(
-            secondary_actions, "Renomear", self._rename_selected_person, BLUE
+            actions, "Renomear", self._rename_selected_person, BLUE
         )
-        self._rename_button.pack(side="left")
+        self._rename_button.pack(side="left", padx=(8, 0))
         self._rename_button.configure(state="disabled", disabledforeground=MUTED)
         self._delete_button = self._button(
-            secondary_actions, "Excluir selecionado", self._delete_person, RED
+            actions, "Excluir selecionado", self._delete_person, RED
         )
         self._delete_button.pack(side="left", padx=8)
         self._labels["face_status"] = tk.Label(
@@ -981,6 +1037,7 @@ class AnalyticsDesktopWindow:
             evidence=evidence_status,
         )
         self._refresh_cameras(payload, vision=vision_snapshot, events=events)
+        self._refresh_continuous_analysis_status(payload, vision_snapshot)
         if activity_visible:
             self._refresh_behavior(
                 events=events,
@@ -994,6 +1051,48 @@ class AnalyticsDesktopWindow:
         )
         self._refresh_reports()
         self._refresh_people(profiles=profiles)
+
+    def _refresh_continuous_analysis_status(self, payload, vision):
+        label = self._labels.get("continuous_analysis_status")
+        if label is None:
+            return
+        metrics = ((payload.get("nvr") or {}).get("snapshot") or {}).get(
+            "metrics"
+        ) or {}
+        recording_streams = [
+            str(stream) for stream in (metrics.get("active_streams") or [])
+        ]
+        analyzing_states = {"active", "calibrating"}
+        if recording_streams:
+            analyzing_count = sum(
+                1
+                for stream in recording_streams
+                if (vision.get(stream) or {}).get("state") in analyzing_states
+            )
+            label.configure(
+                text=(
+                    f"Análise contínua: {analyzing_count}/{len(recording_streams)} "
+                    "câmeras em gravação | até 2 amostras/s por câmera"
+                ),
+                fg=(
+                    GREEN
+                    if analyzing_count == len(recording_streams)
+                    else YELLOW
+                ),
+            )
+            return
+        preview_count = sum(
+            1
+            for item in vision.values()
+            if item.get("state") in analyzing_states
+        )
+        label.configure(
+            text=(
+                "Análise contínua: aguardando gravação"
+                f" | previews em análise: {preview_count}"
+            ),
+            fg=GREEN if preview_count else MUTED,
+        )
 
     def _refresh_overview(self, payload, vision=None, events=None, evidence=None):
         nvr = payload.get("nvr") or {}
@@ -1603,6 +1702,7 @@ class AnalyticsDesktopWindow:
             self._update_evidence_controls()
         if self._activity_tab_is_selected():
             self._refresh_behavior()
+            self._refresh_people()
 
     def _evidence_page_count(self):
         count = len(self._evidence_snapshots)

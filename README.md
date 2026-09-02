@@ -92,11 +92,16 @@ O gerenciador compara a versão local com a versão publicada no GitHub, mas só
 O painel principal possui duas abas superiores: **Cameras** e **Analises**.
 Analises fica dentro da mesma janela e possui duas areas: `Central` e
 `Evidencias`. Central agrupa Visao geral, Cameras, Rede e Relatorios na mesma
-navegacao. Evidencias separa Capturas,
-Atividade e trajetos e Pessoas observadas em tres subabas de largura e altura
-total, sem comprimir a galeria e as tabelas na mesma tela. Alternar entre as abas
-nao reinicia o NVR, o coletor, a
-visao ou o banco local.
+navegacao. Evidencias separa Capturas e Pessoas e trajetos. A segunda visao
+reune o cadastro e ranking de pessoas, tempo observado, sequencias entre cameras
+e eventos tecnicos em paineis redimensionaveis. Alternar entre as abas nao
+reinicia o NVR, o coletor, a visao ou o banco local.
+
+Durante a gravacao, o preview MJPEG de cada camera permanece alimentando a
+analise mesmo quando o painel visual esta recolhido. Nesse estado, a interface
+nao renderiza imagens e limita a entrega ao analisador a ate 2 amostras por
+segundo por camera. Ao parar a gravacao, previews recolhidos sao encerrados;
+previews que continuam abertos permanecem disponiveis normalmente.
 
 O historico persistente usa SQLite em `sistema/analytics/`, fora do HD de
 gravacoes. A visao reutiliza o preview existente, calibra de forma limitada o
@@ -232,10 +237,11 @@ pythonw.exe gerenciador.pyw --silent
 
 O WIMI Analytics roda integrado ao processo do NVR. No modo visual, use as abas
 superiores `Cameras` e `Analises`; a segunda contem `Central` e `Evidencias`.
-Visao geral, Cameras, Rede e Relatorios ficam reunidos em Central. Evidencias concentra galeria, atividade,
-trajetos e pessoas em tres subabas independentes de largura e altura total. Trocar de aba
-preserva a coleta, os previews e o historico; o fluxo normal nao abre navegador
-nem uma segunda janela.
+Visao geral, Cameras, Rede e Relatorios ficam reunidos em Central. Evidencias
+concentra a galeria em Capturas e unifica pessoas, atividade e trajetos em uma
+segunda visao com paineis redimensionaveis. Trocar de aba preserva a coleta, os
+previews e o historico; o fluxo normal nao abre navegador nem uma segunda
+janela.
 
 O historico fica em `sistema/analytics/`, fora do HD de gravacao. A visao usa os
 quadros ja decodificados pelo preview, sem abrir outra conexao com as cameras e

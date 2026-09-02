@@ -300,7 +300,7 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         self.assertGreaterEqual(store.observation_reads, 1)
         controller.destroy()
 
-    def test_activity_view_preserves_selection_at_minimum_geometry(self):
+    def test_people_and_trajectories_share_readable_view_at_minimum_geometry(self):
         controller = AnalyticsDesktopWindow(
             self.root,
             FakeCollector(),
@@ -322,17 +322,53 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
 
         self.assertGreaterEqual(controller.window.winfo_width(), 980)
         self.assertGreaterEqual(controller.window.winfo_height(), 760)
-        self.assertGreater(controller._trees["events"].winfo_height(), 200)
-        controller._evidence_notebook.select(controller._evidence_people_tab)
-        self.root.update()
-        self.assertGreater(controller._trees["people"].winfo_height(), 300)
+        self.assertIs(
+            controller._evidence_activity_tab,
+            controller._evidence_people_tab,
+        )
+        self.assertGreater(controller._trees["events"].winfo_height(), 70)
+        self.assertGreater(controller._trees["people"].winfo_height(), 70)
 
         controller.notebook.select(0)
         self.root.update()
         controller.notebook.select(controller._evidence_tab)
         self.root.update()
         self.assertEqual(controller._behavior_notebook.index("current"), 1)
-        self.assertEqual(controller._evidence_notebook.index("current"), 2)
+        self.assertEqual(controller._evidence_notebook.index("current"), 1)
+        controller.destroy()
+
+    def test_people_and_trajectories_show_continuous_recording_analysis_status(self):
+        class RecordingCollector(FakeCollector):
+            def snapshot(self):
+                state = super().snapshot()
+                state["payload"]["nvr"]["snapshot"]["metrics"] = {
+                    "active_streams": ["farmacia", "farmacia2"]
+                }
+                return state
+
+        class RecordingVision(FakeVision):
+            def snapshot(self):
+                return {
+                    "farmacia": {"state": "active"},
+                    "farmacia2": {"state": "calibrating"},
+                }
+
+        controller = AnalyticsDesktopWindow(
+            self.root,
+            RecordingCollector(),
+            FakeStore(),
+            RecordingVision(),
+            face_service=FakeFaceService(),
+        )
+
+        self.assertTrue(controller.show())
+        self.root.update()
+        status = controller._labels["continuous_analysis_status"].cget("text")
+
+        self.assertIn("Análise contínua", status)
+        self.assertIn("2/2", status)
+        self.assertIn("gravação", status)
+        self.assertIn("2 amostras/s", status)
         controller.destroy()
 
     def test_camera_tab_shows_manually_assigned_role_after_recognition(self):
@@ -541,7 +577,11 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
                 controller._evidence_notebook.tab(tab, "text")
                 for tab in controller._evidence_notebook.tabs()
             ],
-            ["Capturas", "Atividade e trajetos", "Pessoas observadas"],
+            ["Capturas", "Pessoas e trajetos"],
+        )
+        self.assertIs(
+            controller._evidence_activity_tab,
+            controller._evidence_people_tab,
         )
 
         controller.hide()

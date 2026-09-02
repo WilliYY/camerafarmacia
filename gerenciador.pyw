@@ -1757,6 +1757,7 @@ class LiveCameraWidget(tk.Frame):
         self.expanded = False
         self.thread = None
         self.running = False
+        self.continuous_analysis = False
         self.photo = None
         self._display_lock = threading.Lock()
         self._pending_display_image = None
@@ -2274,10 +2275,18 @@ class LiveCameraWidget(tk.Frame):
     def collapse(self):
         self.expanded = False
         self.update_header_text()
-        self.stop_stream()
+        if not self.continuous_analysis:
+            self.stop_stream()
         self.body_frame.pack_forget()
         self.pack_configure(fill="x", expand=False)
         self._recalc_camera_sizes()
+
+    def set_continuous_analysis(self, enabled):
+        self.continuous_analysis = bool(enabled)
+        if self.continuous_analysis:
+            self.start_stream()
+        elif not self.expanded:
+            self.stop_stream()
 
     def _recalc_camera_sizes(self):
         """Recalcula o tamanho das câmeras com base em quantas estão expandidas e na altura do container"""
@@ -2347,6 +2356,8 @@ class LiveCameraWidget(tk.Frame):
         return False, should_reconnect
 
     def start_stream(self):
+        if self.running and self.thread is not None and self.thread.is_alive():
+            return False
         self.running = True
         self.thread = threading.Thread(target=self.stream_loop, daemon=True)
         self.thread.start()
@@ -2355,6 +2366,7 @@ class LiveCameraWidget(tk.Frame):
             kwargs={"force": True},
             daemon=True,
         ).start()
+        return True
 
     def stop_stream(self):
         self.running = False
@@ -2410,7 +2422,7 @@ class LiveCameraWidget(tk.Frame):
             self._mjpeg_response = None
 
     def stream_loop(self):
-        """Loop principal de exibição via MJPEG stream (conexão persistente, ~15 FPS)"""
+        """Mantem exibicao fluida ou amostragem limitada quando recolhida."""
         mjpeg_url = f"http://127.0.0.1:1984/api/stream.mjpeg?src={self.stream_name}_mjpeg"
         time.sleep(0.3)
         
@@ -2429,14 +2441,13 @@ class LiveCameraWidget(tk.Frame):
             
             try:
                 last_frame_time = 0
-                min_interval = 0.066  # Limita a ~15 FPS para balancear fluidez e CPU
-                
                 for jpeg_data in self._read_mjpeg_frames(mjpeg_url):
                     if not self.running:
                         break
                     
                     # Rate limiter para não sobrecarregar a CPU
                     now = time.time()
+                    min_interval = 0.066 if self.expanded else 0.5
                     if (now - last_frame_time) < min_interval:
                         continue
                     last_frame_time = now
@@ -2454,16 +2465,23 @@ class LiveCameraWidget(tk.Frame):
                                 self._frame_integrity_guard.reset()
                                 break
                             continue
-                        # Redimensiona mantendo 16:9 - mostra a imagem INTEIRA sem cortes
-                        tw = self.target_width
-                        th = int(tw * 9 / 16)
-                        image = source_image.resize((tw, th), Image.Resampling.BILINEAR)
-
                         if self.running:
                             self.app.submit_vision_frame(self.stream_name, source_image)
-                            image = self.apply_identity_overlay(image)
-                            self.update_image(image)
                             last_frame_received_time = time.time()
+                            if self.expanded:
+                                # Redimensiona apenas quando o quadro sera exibido.
+                                tw = self.target_width
+                                th = int(tw * 9 / 16)
+                                image = source_image.resize(
+                                    (tw, th), Image.Resampling.BILINEAR
+                                )
+                                image = self.apply_identity_overlay(image)
+                                self.update_image(image)
+                            else:
+                                self.current_error_msg = ""
+                                self.is_online = True
+                                self.connectivity_status = "online"
+                                self.last_frame_at = last_frame_received_time
                     except Exception:
                         pass  # Frame corrompido, pula para o próximo
                 
@@ -6170,6 +6188,7 @@ class CameraManagerApp:
                 )
                 if not pasta_final:
                     self.recording_active[stream_name] = False
+                    self.request_continuous_vision_sync()
                     break
                 if gdrive_dir:
                     heartbeat_dirs.add(gdrive_dir)
@@ -6188,6 +6207,7 @@ class CameraManagerApp:
 
                 if status == "espaco_critico":
                     self.recording_active[stream_name] = False
+                    self.request_continuous_vision_sync()
                     escrever_log_cam("Gravacao encerrada com seguranca por falta de espaco local.")
                     break
                     
@@ -6700,7 +6720,9 @@ class CameraManagerApp:
                 )
                 self.recording_threads[stream] = t
                 t.start()
-                
+
+            self.request_continuous_vision_sync()
+
             if not self.silent:
                 self.root.after(0, lambda: self.add_log("Inicialização concluída em segundo plano."))
                 self.root.after(0, lambda: self.set_button_state("RECORDING"))
@@ -6733,6 +6755,7 @@ class CameraManagerApp:
             # concluir flush, fsync e publicacao do bloco atual.
             for stream in self.streams:
                 self.recording_active[stream] = False
+            self.request_continuous_vision_sync()
 
             for _, conn in list(self.active_connections.items()):
                 try:
@@ -7066,6 +7089,19 @@ class CameraManagerApp:
                 parent=self.analytics_page,
             )
         self._analytics_window.show()
+
+    def request_continuous_vision_sync(self):
+        try:
+            self.root.after(0, self.sync_continuous_vision_streams)
+            return True
+        except Exception:
+            return False
+
+    def sync_continuous_vision_streams(self):
+        for stream, widget in getattr(self, "camera_widgets", {}).items():
+            widget.set_continuous_analysis(
+                bool(self.recording_active.get(stream, False))
+            )
 
     def activate_wimi_camera_analysis(self):
         for widget in getattr(self, "camera_widgets", {}).values():
