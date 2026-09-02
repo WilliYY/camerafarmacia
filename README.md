@@ -90,9 +90,9 @@ O gerenciador compara a versão local com a versão publicada no GitHub, mas só
 ### 8. Painel Unificado WIMI Analytics
 
 O painel principal possui duas abas superiores: **Cameras** e **Analises**.
-Analises fica dentro da mesma janela e possui tres areas: `Operacao`,
-`Evidencias` e `Rede e relatorios`. Operacao agrupa Visao geral e Cameras;
-Rede e relatorios mantem suas duas visoes em subabas. Evidencias separa Capturas,
+Analises fica dentro da mesma janela e possui duas areas: `Central` e
+`Evidencias`. Central agrupa Visao geral, Cameras, Rede e Relatorios na mesma
+navegacao. Evidencias separa Capturas,
 Atividade e trajetos e Pessoas observadas em tres subabas de largura e altura
 total, sem comprimir a galeria e as tabelas na mesma tela. Alternar entre as abas
 nao reinicia o NVR, o coletor, a
@@ -231,9 +231,8 @@ pythonw.exe gerenciador.pyw --silent
 ```
 
 O WIMI Analytics roda integrado ao processo do NVR. No modo visual, use as abas
-superiores `Cameras` e `Analises`; a segunda contem `Operacao`, `Evidencias` e
-`Rede e relatorios`. Visao geral e Cameras ficam em Operacao, enquanto Rede e
-Relatorios compartilham a ultima area. Evidencias concentra galeria, atividade,
+superiores `Cameras` e `Analises`; a segunda contem `Central` e `Evidencias`.
+Visao geral, Cameras, Rede e Relatorios ficam reunidos em Central. Evidencias concentra galeria, atividade,
 trajetos e pessoas em tres subabas independentes de largura e altura total. Trocar de aba
 preserva a coleta, os previews e o historico; o fluxo normal nao abre navegador
 nem uma segunda janela.

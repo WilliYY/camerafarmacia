@@ -507,7 +507,7 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         self.assertIn("Thiago", people_values)
         controller.destroy()
 
-    def test_reuses_one_native_window_and_groups_people_inside_evidence(self):
+    def test_reuses_one_native_window_and_groups_operational_views_in_central(self):
         controller = AnalyticsDesktopWindow(
             self.root,
             FakeCollector(),
@@ -525,22 +525,17 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         ]
         self.assertEqual(
             top_level_tabs,
-            ["Operação", "Evidências", "Rede e relatórios"],
+            ["Central", "Evidências"],
         )
         self.assertEqual(
             [
-                controller._operation_notebook.tab(tab, "text")
-                for tab in controller._operation_notebook.tabs()
+                controller._central_notebook.tab(tab, "text")
+                for tab in controller._central_notebook.tabs()
             ],
-            ["Visão geral", "Câmeras"],
+            ["Visão geral", "Câmeras", "Rede", "Relatórios"],
         )
-        self.assertEqual(
-            [
-                controller._network_reports_notebook.tab(tab, "text")
-                for tab in controller._network_reports_notebook.tabs()
-            ],
-            ["Rede", "Relatórios"],
-        )
+        self.assertIs(controller._operation_notebook, controller._central_notebook)
+        self.assertIs(controller._network_reports_notebook, controller._central_notebook)
         self.assertEqual(
             [
                 controller._evidence_notebook.tab(tab, "text")
@@ -552,7 +547,7 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
         controller.hide()
         self.assertTrue(controller.show())
         self.assertIs(controller.window, first_window)
-        self.assertEqual(len(controller.notebook.tabs()), 3)
+        self.assertEqual(len(controller.notebook.tabs()), 2)
 
         controller.destroy()
         self.assertIsNone(controller.window)
@@ -593,7 +588,7 @@ class AnalyticsDesktopWindowTests(unittest.TestCase):
 
         self.assertIsInstance(embedded_frame, tk.Frame)
         self.assertIs(embedded_frame.winfo_toplevel(), self.root)
-        self.assertEqual(len(controller.notebook.tabs()), 3)
+        self.assertEqual(len(controller.notebook.tabs()), 2)
 
         controller.hide()
         self.assertTrue(controller.show())

@@ -144,6 +144,7 @@ class AnalyticsDesktopWindow:
         self.activate_cameras = activate_cameras
         self.window = None
         self.notebook = None
+        self._central_notebook = None
         self._operation_notebook = None
         self._network_reports_notebook = None
         self._after_id = None
@@ -324,9 +325,8 @@ class AnalyticsDesktopWindow:
         self.notebook = ttk.Notebook(window, style="Wimi.TNotebook")
         self.notebook.pack(fill="both", expand=True, padx=14 if self.embedded else 18, pady=(0, 12 if self.embedded else 18))
         self.notebook.enable_traversal()
-        self._build_operation_tab()
+        self._build_central_tab()
         self._build_evidence_tab()
-        self._build_network_reports_tab()
         self.notebook.bind(
             "<<NotebookTabChanged>>", self._on_notebook_tab_changed, add="+"
         )
@@ -338,21 +338,17 @@ class AnalyticsDesktopWindow:
         notebook.add(frame, text=title)
         return frame
 
-    def _build_operation_tab(self):
-        tab = self._tab("Operação")
+    def _build_central_tab(self):
+        tab = self._tab("Central")
         notebook = ttk.Notebook(tab, style="Wimi.TNotebook")
         notebook.pack(fill="both", expand=True, padx=8, pady=(8, 0))
         notebook.enable_traversal()
+        self._central_notebook = notebook
+        # Keep the private aliases while callers migrate to the unified area.
         self._operation_notebook = notebook
+        self._network_reports_notebook = notebook
         self._build_overview_tab(notebook)
         self._build_cameras_tab(notebook)
-
-    def _build_network_reports_tab(self):
-        tab = self._tab("Rede e relatórios")
-        notebook = ttk.Notebook(tab, style="Wimi.TNotebook")
-        notebook.pack(fill="both", expand=True, padx=8, pady=(8, 0))
-        notebook.enable_traversal()
-        self._network_reports_notebook = notebook
         self._build_network_tab(notebook)
         self._build_reports_tab(notebook)
 
